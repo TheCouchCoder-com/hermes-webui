@@ -7,6 +7,9 @@ on:
 
 jobs:
   release:
+    # Guard: never run on the upstream repo if a tag is somehow pushed there
+    # from a misconfigured remote. This workflow only fires on the fork.
+    if: github.repository == 'TheCouchCoder-com/hermes-webui'
     runs-on: ubuntu-latest
     permissions:
       contents: write   # required: create GitHub Release

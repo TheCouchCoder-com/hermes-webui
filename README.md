@@ -1,5 +1,7 @@
 # Hermes Web UI
 
+> **Fork notice.** This is a fork of [`nesquena/hermes-webui`](https://github.com/nesquena/hermes-webui), maintained by **TheCouchCoder & ChakerT**. Released under the MIT License (see [`LICENSE`](LICENSE)). The fork tracks upstream and adds deployment changes specific to our setup. Bug reports for this fork go to [our issue tracker](https://github.com/TheCouchCoder-com/hermes-webui/issues), not upstream.
+
 [Hermes Agent](https://hermes-agent.nousresearch.com/) is a sophisticated autonomous agent that lives on your server, accessed via a terminal or messaging apps, that remembers what it learns and gets more capable the longer it runs.
 
 Hermes WebUI is a lightweight, dark-themed web app interface in your browser for [Hermes Agent](https://hermes-agent.nousresearch.com/).
@@ -98,7 +100,7 @@ ecosystem. See [HERMES.md](HERMES.md) for the full side-by-side.
 Run the repo bootstrap:
 
 ```bash
-git clone https://github.com/nesquena/hermes-webui.git hermes-webui
+git clone https://github.com/TheCouchCoder-com/hermes-webui.git hermes-webui
 cd hermes-webui
 python3 bootstrap.py
 ```
@@ -147,7 +149,7 @@ For a comprehensive setup guide covering all 3 compose files, common failure mod
 The simplest setup: one WebUI container that runs the agent in-process.
 
 ```bash
-git clone https://github.com/nesquena/hermes-webui
+git clone https://github.com/TheCouchCoder-com/hermes-webui
 cd hermes-webui
 cp .env.docker.example .env
 # Edit .env if your host UID isn't 1000 (e.g. macOS where UIDs start at 501)
@@ -167,14 +169,14 @@ docker compose up -d --force-recreate
 ### Manual `docker run` (no compose)
 
 ```bash
-docker pull ghcr.io/nesquena/hermes-webui:latest
+docker pull ghcr.io/thecouchcoder-com/hermes-webui:latest
 docker run -d \
   -e WANTED_UID=$(id -u) -e WANTED_GID=$(id -g) \
   -v ~/.hermes:/home/hermeswebui/.hermes \
   -e HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui \
   -v ~/workspace:/workspace \
   -p 127.0.0.1:8787:8787 \
-  ghcr.io/nesquena/hermes-webui:latest
+  ghcr.io/thecouchcoder-com/hermes-webui:latest
 ```
 
 ### Build locally
@@ -672,5 +674,5 @@ Want to contribute? See [ARCHITECTURE.md](ARCHITECTURE.md) for the codebase layo
 ## Repo
 
 ```
-git@github.com:nesquena/hermes-webui.git
+git@github.com:TheCouchCoder-com/hermes-webui.git
 ```

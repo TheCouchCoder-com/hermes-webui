@@ -1,5 +1,9 @@
 # Hermes Web UI -- Changelog
 
+> **Fork notice.** This is a fork of [`nesquena/hermes-webui`](https://github.com/nesquena/hermes-webui).
+> Entries below this notice document upstream releases and were not written by the fork maintainers.
+> Fork-specific changes will be added above this notice as they ship.
+
 ## [v0.51.10] — 2026-05-06 — 2-PR full-sweep batch
 
 ### Fixed

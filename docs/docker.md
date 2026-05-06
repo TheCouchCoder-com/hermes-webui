@@ -16,7 +16,7 @@ If something stops working, **start with the single-container setup** — it's t
 ## 5-minute quickstart (single container)
 
 ```bash
-git clone https://github.com/nesquena/hermes-webui
+git clone https://github.com/TheCouchCoder-com/hermes-webui
 cd hermes-webui
 cp .env.docker.example .env
 # Edit .env if needed (most users can skip this on Linux)
@@ -194,7 +194,7 @@ volumes:
 - #668 — auto-detect UID/GID from mounted volume
 - #569 — UID/GID detection priority order
 
-If you hit a new failure mode not covered here, please [open an issue](https://github.com/nesquena/hermes-webui/issues/new) with:
+If you hit a new failure mode not covered here, please [open an issue](https://github.com/TheCouchCoder-com/hermes-webui/issues/new) with:
 
 1. Which compose file you used
 2. The error from `docker logs hermes-webui`
