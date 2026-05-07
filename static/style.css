@@ -552,6 +552,12 @@
   /* ── Update banner ── */
   .update-banner{display:none;background:var(--surface);border:1px solid var(--accent);border-radius:10px;padding:10px 16px;margin:10px auto;max-width:780px;font-size:13px;color:var(--accent-text);align-items:center;justify-content:space-between;gap:12px;}
   .update-banner.visible{display:flex;}
+  .update-banner-rows{display:flex;flex-direction:column;flex:1;min-width:0;gap:8px;}
+  .update-banner-row{display:flex;align-items:center;justify-content:space-between;gap:12px;}
+  .update-banner-row + .update-banner-row{padding-top:8px;border-top:1px solid color-mix(in srgb,var(--accent) 25%,transparent);}
+  .update-banner-row-text{display:flex;flex-direction:column;flex:1;min-width:0;}
+  .update-banner-row-actions{display:flex;gap:8px;flex-shrink:0;flex-wrap:wrap;}
+  .update-banner-actions{display:flex;gap:8px;flex-shrink:0;align-self:flex-start;}
   .update-btn{padding:6px 12px;border-radius:8px;font-size:12px;font-weight:600;background:var(--accent-bg);border:1px solid var(--accent-bg-strong);color:var(--accent-text);cursor:pointer;transition:background .15s;}
   .update-btn:hover{background:var(--accent-bg-strong);}
   .update-primary{background:var(--accent-bg-strong);border-color:var(--accent);}
