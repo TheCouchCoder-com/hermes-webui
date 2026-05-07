@@ -77,7 +77,15 @@
     <span class="app-titlebar-title" id="appTitlebarTitle">Hermes</span>
     <span class="app-titlebar-sub" id="appTitlebarSub" hidden></span>
   </div>
-  <div class="app-titlebar-spacer" aria-hidden="true"></div>
+  <div class="app-titlebar-right">
+    <div id="profileChipTitlebarWrap" class="titlebar-profile-wrap" hidden>
+      <button class="titlebar-profile-chip profile-chip" id="profileChipTitlebar" type="button" onclick="toggleProfileDropdown(this)" title="Switch profile" data-i18n-title="profile_switch_title" aria-haspopup="menu" aria-expanded="false">
+        <span class="composer-profile-icon" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></span>
+        <span class="composer-profile-label" id="profileChipTitlebarLabel">default</span>
+        <span class="composer-profile-chevron" aria-hidden="true"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
+      </button>
+    </div>
+  </div>
 </header>
 <div class="layout">
   <nav class="rail" aria-label="Primary navigation">
