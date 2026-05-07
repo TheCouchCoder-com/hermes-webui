@@ -1692,7 +1692,9 @@ button:hover{background:rgba(124,185,255,.25)}
   <h1>{{BOT_NAME}}</h1>
   <p class="sub">{{LOGIN_SUBTITLE}}</p>
   <form id="login-form" data-invalid-pw="{{LOGIN_INVALID_PW}}" data-conn-failed="{{LOGIN_CONN_FAILED}}">
-    <input type="password" id="pw" placeholder="{{LOGIN_PLACEHOLDER}}" autofocus>
+    <input type="text" id="username" placeholder="Username" autocomplete="username" autofocus>
+    <input type="password" id="pw" placeholder="{{LOGIN_PLACEHOLDER}}" autocomplete="current-password">
+    <input type="password" id="pw_confirm" placeholder="Confirm password" autocomplete="new-password" style="display:none">
     <button type="submit">{{LOGIN_BTN}}</button>
   </form>
   <div class="err" id="err"></div>
@@ -1700,6 +1702,300 @@ button:hover{background:rgba(124,185,255,.25)}
 <!-- Keep login.js relative so subpath mounts load it under the current scope. -->
 <script src="static/login.js?v={{WEBUI_VERSION}}"></script>
 </body></html>"""
+
+
+# ── Multi-user auth handlers (issue #2) ──────────────────────────────────────
+
+def _set_login_cookies(handler, *, user, session_cookie):
+    """Emit Set-Cookie headers for hermes_session AND hermes_profile.
+
+    Called after a successful login or bootstrap. The profile cookie is
+    HMAC-signed (api/helpers.py:build_profile_cookie) and pinned to the
+    user's assigned_profile so they land on their workspace immediately,
+    not whatever the previous browser session had.
+    """
+    from api.auth import set_auth_cookie
+    from api.helpers import build_profile_cookie
+    set_auth_cookie(handler, session_cookie)
+    handler.send_header("Set-Cookie", build_profile_cookie(user['assigned_profile']))
+
+
+def _handle_login_post(handler, body) -> bool:
+    """POST /api/auth/login — multi-user login.
+
+    Body: {"username": "...", "password": "..."}
+
+    On success, sets BOTH hermes_session AND hermes_profile cookies.
+
+    Backwards compatibility: if no users exist (env-var legacy deployments
+    or onboarding), falls back to the legacy single-shared-password path.
+    Once .users.json is populated, the legacy fallback is no longer reached.
+    """
+    from api.auth import (
+        _check_login_rate, _record_login_attempt,
+        create_session, is_auth_enabled, set_auth_cookie,
+        verify_password, verify_user_credentials,
+    )
+    from api.users import has_users, record_login
+
+    client_ip = handler.client_address[0]
+    username = (body.get("username") or "").strip().lower()
+    password = body.get("password") or ""
+
+    # Auth disabled and no users configured → silent success (legacy behavior).
+    if not is_auth_enabled() and not has_users():
+        return j(handler, {"ok": True, "message": "Auth not enabled"})
+
+    if not _check_login_rate(client_ip, username=username or None):
+        return j(handler, {"error": "Too many attempts. Try again in a minute."}, status=429)
+
+    user = None
+    if username:
+        user = verify_user_credentials(username, password)
+
+    # Legacy fallback: if no users exist (env-var deployment), accept the
+    # plain-password form. Once any user is created, this branch never runs
+    # again because the user-credential check above takes precedence.
+    if user is None and not has_users():
+        if verify_password(password):
+            cookie_val = create_session(user_id=None)
+            handler.send_response(200)
+            handler.send_header("Content-Type", "application/json")
+            handler.send_header("Cache-Control", "no-store")
+            _security_headers(handler)
+            set_auth_cookie(handler, cookie_val)
+            handler.end_headers()
+            handler.wfile.write(json.dumps({"ok": True}).encode())
+            return True
+
+    if user is None:
+        _record_login_attempt(client_ip, username=username or None)
+        return bad(handler, "Invalid username or password", 401)
+
+    cookie_val = create_session(user_id=user['id'])
+    record_login(user['id'])
+
+    handler.send_response(200)
+    handler.send_header("Content-Type", "application/json")
+    handler.send_header("Cache-Control", "no-store")
+    _security_headers(handler)
+    _set_login_cookies(handler, user=user, session_cookie=cookie_val)
+    handler.end_headers()
+    handler.wfile.write(json.dumps({
+        "ok": True,
+        "must_change_password": bool(user.get('must_change_password')),
+    }).encode())
+    return True
+
+
+def _handle_bootstrap_post(handler, body) -> bool:
+    """POST /api/auth/bootstrap — first-boot creation of the initial admin.
+
+    Public endpoint, but only succeeds when .users.json does not exist
+    AND HERMES_WEBUI_PASSWORD env var is not set. Race-protected: re-checks
+    under the users lock before creating.
+    """
+    from api.auth import _check_login_rate, _record_login_attempt, create_session
+    from api.startup import is_first_boot
+    from api import users as users_mod
+    from api.users import UserValidationError, record_login
+
+    client_ip = handler.client_address[0]
+    if not _check_login_rate(client_ip):
+        return j(handler, {"error": "Too many attempts. Try again in a minute."}, status=429)
+
+    if not is_first_boot():
+        # Race: users were created (or env var was set) between the page
+        # load and the form submit. 409 Conflict, not 401, to make the
+        # state mismatch unambiguous.
+        return j(handler, {"error": "Bootstrap already completed"}, status=409)
+
+    username = (body.get("username") or "").strip().lower()
+    password = body.get("password") or ""
+
+    try:
+        with users_mod._users_lock:
+            # Re-check under the lock to close the race against a parallel
+            # bootstrap attempt.
+            if users_mod.has_users():
+                _record_login_attempt(client_ip)
+                return j(handler, {"error": "Bootstrap already completed"}, status=409)
+            user = users_mod.create_user(
+                username=username,
+                password=password,
+                role='admin',
+                assigned_profile='default',
+                allowed_profiles=None,
+                permissions={},
+            )
+    except UserValidationError as e:
+        _record_login_attempt(client_ip)
+        return j(handler, {"error": str(e)}, status=400)
+
+    cookie_val = create_session(user_id=user['id'])
+    record_login(user['id'])
+
+    handler.send_response(200)
+    handler.send_header("Content-Type", "application/json")
+    handler.send_header("Cache-Control", "no-store")
+    _security_headers(handler)
+    _set_login_cookies(handler, user=user, session_cookie=cookie_val)
+    handler.end_headers()
+    handler.wfile.write(json.dumps({"ok": True}).encode())
+    return True
+
+
+def _handle_change_password_post(handler, body) -> bool:
+    """POST /api/auth/change_password — current user changes their own
+    password. Required for the must_change_password flow."""
+    from api.auth import current_user, require_user, verify_user_credentials
+    from api import users as users_mod
+    from api.users import UserValidationError
+
+    user = require_user(handler)
+    if user is None:
+        return True
+    old_pw = body.get("old_password") or ""
+    new_pw = body.get("new_password") or ""
+    if not isinstance(old_pw, str) or not isinstance(new_pw, str):
+        return bad(handler, "old_password and new_password required", 400)
+
+    # Verify the old password under constant time.
+    confirmed = verify_user_credentials(user['username'], old_pw)
+    if confirmed is None:
+        return bad(handler, "Old password incorrect", 401)
+    try:
+        users_mod.update_user(user['id'], password=new_pw, must_change_password=False)
+    except UserValidationError as e:
+        return j(handler, {"error": str(e)}, status=400)
+    return j(handler, {"ok": True})
+
+
+def _handle_me_get(handler) -> bool:
+    """GET /api/me — return the current user record (without password_hash)."""
+    from api.auth import current_user, require_user
+    user = require_user(handler)
+    if user is None:
+        return True
+    return j(handler, _public_user_view(user))
+
+
+def _public_user_view(user: dict) -> dict:
+    """Strip server-only fields from a user record before serialising."""
+    return {k: v for k, v in user.items() if k != 'password_hash'}
+
+
+# ── Admin user endpoints (issue #2) ──────────────────────────────────────────
+
+_ADMIN_USERS_PATH = '/api/admin/users'
+
+
+def _admin_user_id_from_path(path: str):
+    """For paths under /api/admin/users/<id>[/password], return the id and
+    sub-action ('' or 'password'). Returns (None, None) if it doesn't match."""
+    if not path.startswith(_ADMIN_USERS_PATH + '/'):
+        return None, None
+    rest = path[len(_ADMIN_USERS_PATH) + 1:]
+    if not rest:
+        return None, None
+    parts = rest.split('/', 1)
+    user_id = parts[0]
+    action = parts[1] if len(parts) > 1 else ''
+    if not user_id or '/' in user_id:
+        return None, None
+    return user_id, action
+
+
+def _handle_admin_users_get(handler) -> bool:
+    """GET /api/admin/users — list every user, no password_hash."""
+    from api.auth import require_admin
+    if require_admin(handler) is None:
+        return True
+    from api.users import load_users
+    return j(handler, {'users': [_public_user_view(u) for u in load_users()]})
+
+
+def _handle_admin_users_post(handler, body) -> bool:
+    """POST /api/admin/users — create a user."""
+    from api.auth import require_admin
+    if require_admin(handler) is None:
+        return True
+    from api import users as users_mod
+    from api.users import UserValidationError
+    try:
+        user = users_mod.create_user(
+            username=(body.get('username') or '').strip(),
+            password=body.get('password') or '',
+            role=body.get('role') or 'user',
+            assigned_profile=(body.get('assigned_profile') or 'default').strip(),
+            allowed_profiles=body.get('allowed_profiles'),
+            permissions=body.get('permissions') or {},
+            must_change_password=bool(body.get('must_change_password', False)),
+        )
+    except UserValidationError as e:
+        return j(handler, {'error': str(e)}, status=400)
+    return j(handler, {'user': _public_user_view(user)}, status=201)
+
+
+def _handle_admin_user_patch(handler, body, user_id: str) -> bool:
+    """PATCH /api/admin/users/<id> — edit role, profiles, permissions."""
+    from api.auth import require_admin
+    if require_admin(handler) is None:
+        return True
+    from api import users as users_mod
+    from api.users import UserValidationError
+    patch = {}
+    for k in ('role', 'assigned_profile', 'allowed_profiles',
+              'permissions', 'must_change_password'):
+        if k in body:
+            patch[k] = body[k]
+    try:
+        user = users_mod.update_user(user_id, **patch)
+    except KeyError:
+        return j(handler, {'error': 'user not found'}, status=404)
+    except UserValidationError as e:
+        return j(handler, {'error': str(e)}, status=400)
+    return j(handler, {'user': _public_user_view(user)})
+
+
+def _handle_admin_user_delete(handler, user_id: str) -> bool:
+    """DELETE /api/admin/users/<id> — delete user; revoke their sessions."""
+    from api.auth import current_user, require_admin, invalidate_sessions_for_user
+    admin = require_admin(handler)
+    if admin is None:
+        return True
+    if admin['id'] == user_id:
+        return j(handler, {'error': 'cannot delete your own account'}, status=400)
+    from api import users as users_mod
+    from api.users import UserValidationError
+    try:
+        users_mod.delete_user(user_id)
+    except KeyError:
+        return j(handler, {'error': 'user not found'}, status=404)
+    except UserValidationError as e:
+        return j(handler, {'error': str(e)}, status=400)
+    revoked = invalidate_sessions_for_user(user_id)
+    return j(handler, {'ok': True, 'revoked_sessions': revoked})
+
+
+def _handle_admin_user_password_post(handler, body, user_id: str) -> bool:
+    """POST /api/admin/users/<id>/password — reset a user's password.
+    Sets must_change_password=True and revokes existing sessions so the
+    target user must log in fresh and set a new password."""
+    from api.auth import require_admin, invalidate_sessions_for_user
+    if require_admin(handler) is None:
+        return True
+    new_pw = body.get('new_password') or ''
+    from api import users as users_mod
+    from api.users import UserValidationError
+    try:
+        users_mod.set_password(user_id, new_pw, must_change=True)
+    except KeyError:
+        return j(handler, {'error': 'user not found'}, status=404)
+    except UserValidationError as e:
+        return j(handler, {'error': str(e)}, status=400)
+    revoked = invalidate_sessions_for_user(user_id)
+    return j(handler, {'ok': True, 'must_change': True, 'revoked_sessions': revoked})
 
 
 # ── Logs endpoint ─────────────────────────────────────────────────────────────
@@ -2439,14 +2735,35 @@ def handle_get(handler, parsed) -> bool:
         )
         return t(handler, _page, content_type="text/html; charset=utf-8")
 
+    if parsed.path == "/api/me":
+        return _handle_me_get(handler)
+
+    if parsed.path == _ADMIN_USERS_PATH:
+        return _handle_admin_users_get(handler)
+
     if parsed.path == "/api/auth/status":
         from api.auth import is_auth_enabled, parse_cookie, verify_session
+        from api.startup import is_first_boot
 
+        first_boot = is_first_boot()
+        # Auth is "enabled" once any user exists OR a legacy env-var password
+        # is configured. Either way, login is required.
+        try:
+            from api.users import has_users
+            users_configured = has_users()
+        except Exception:
+            users_configured = False
+
+        auth_enabled = is_auth_enabled() or users_configured
         logged_in = False
-        if is_auth_enabled():
+        if auth_enabled:
             cv = parse_cookie(handler)
             logged_in = bool(cv and verify_session(cv))
-        return j(handler, {"auth_enabled": is_auth_enabled(), "logged_in": logged_in})
+        return j(handler, {
+            "auth_enabled": auth_enabled,
+            "logged_in": logged_in,
+            "first_boot": first_boot,
+        })
 
     if parsed.path in ("/manifest.json", "/manifest.webmanifest"):
         static_root = Path(__file__).parent.parent / "static"
@@ -2886,8 +3203,11 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/projects":
         # ── Profile scoping (#1614) ────────────────────────────────────────
         # Default: filter to the active profile. ?all_profiles=1 returns the
-        # aggregate list so settings/admin UIs can still see everything.
+        # aggregate list so settings/admin UIs can still see everything,
+        # subject to allowed_profiles for non-admins (issue #2).
         from api.profiles import get_active_profile_name
+        from api.auth import current_user
+        from api.users import has_users
         active_profile = get_active_profile_name()
         all_projects = load_projects()
         all_profiles = _all_profiles_query_flag(parsed)
@@ -2896,6 +3216,20 @@ def handle_get(handler, parsed) -> bool:
         else:
             scoped = [p for p in all_projects
                       if _profiles_match(p.get("profile"), active_profile)]
+
+        # Non-admin allowed_profiles enforcement: even with ?all_profiles=1,
+        # restricted users can only see projects in profiles they're allowed
+        # to switch to.
+        if has_users():
+            user = current_user(handler)
+            if user is not None and user.get('role') != 'admin':
+                allowed = user.get('allowed_profiles')
+                if allowed is not None:
+                    scoped = [p for p in scoped
+                              if (p.get('profile') or 'default') in allowed
+                              or _profiles_match(p.get('profile'), active_profile)
+                              and active_profile in allowed]
+
         return j(handler, {
             "projects": scoped,
             "all_profiles": all_profiles,
@@ -3164,10 +3498,21 @@ def handle_get(handler, parsed) -> bool:
     # ── Profile API (GET) ──
     if parsed.path == "/api/profiles":
         from api.profiles import list_profiles_api, get_active_profile_name
+        from api.auth import current_user
+        from api.users import has_users
 
+        all_profiles = list_profiles_api()
+        if has_users():
+            # Filter to allowed_profiles for non-admins (decision #6, issue #2).
+            user = current_user(handler)
+            if user is not None and user.get('role') != 'admin':
+                allowed = user.get('allowed_profiles')
+                if allowed is not None:
+                    all_profiles = [p for p in all_profiles
+                                    if (p.get('name') if isinstance(p, dict) else p) in allowed]
         return j(
             handler,
-            {"profiles": list_profiles_api(), "active": get_active_profile_name()},
+            {"profiles": all_profiles, "active": get_active_profile_name()},
         )
 
     if parsed.path == "/api/profile/active":
@@ -3432,6 +3777,11 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e), 500)
 
     if parsed.path == "/api/admin/reload":
+        from api.auth import require_admin
+        from api.users import has_users
+        if has_users():
+            if require_admin(handler) is None:
+                return True
         # Hot-reload api.models module to pick up code changes without restart.
         import importlib
         from api import models as _models
@@ -3832,38 +4182,56 @@ def handle_post(handler, parsed) -> bool:
     # See GET-side comment above: wrap in cron_profile_context so writes go
     # to the TLS-active profile's jobs.json instead of the process default.
     if parsed.path == "/api/crons/create":
+        from api.auth import require_perm
         from api.profiles import cron_profile_context
 
+        if require_perm(handler, 'manage_cron') is None:
+            return True
         with cron_profile_context():
             return _handle_cron_create(handler, body)
 
     if parsed.path == "/api/crons/update":
+        from api.auth import require_perm
         from api.profiles import cron_profile_context
 
+        if require_perm(handler, 'manage_cron') is None:
+            return True
         with cron_profile_context():
             return _handle_cron_update(handler, body)
 
     if parsed.path == "/api/crons/delete":
+        from api.auth import require_perm
         from api.profiles import cron_profile_context
 
+        if require_perm(handler, 'manage_cron') is None:
+            return True
         with cron_profile_context():
             return _handle_cron_delete(handler, body)
 
     if parsed.path == "/api/crons/run":
+        from api.auth import require_perm
         from api.profiles import cron_profile_context
 
+        if require_perm(handler, 'manage_cron') is None:
+            return True
         with cron_profile_context():
             return _handle_cron_run(handler, body)
 
     if parsed.path == "/api/crons/pause":
+        from api.auth import require_perm
         from api.profiles import cron_profile_context
 
+        if require_perm(handler, 'manage_cron') is None:
+            return True
         with cron_profile_context():
             return _handle_cron_pause(handler, body)
 
     if parsed.path == "/api/crons/resume":
+        from api.auth import require_perm
         from api.profiles import cron_profile_context
 
+        if require_perm(handler, 'manage_cron') is None:
+            return True
         with cron_profile_context():
             return _handle_cron_resume(handler, body)
 
@@ -3909,9 +4277,15 @@ def handle_post(handler, parsed) -> bool:
 
     # ── Skills (POST) ──
     if parsed.path == "/api/skills/save":
+        from api.auth import require_perm
+        if require_perm(handler, 'manage_skills') is None:
+            return True
         return _handle_skill_save(handler, body)
 
     if parsed.path == "/api/skills/delete":
+        from api.auth import require_perm
+        if require_perm(handler, 'manage_skills') is None:
+            return True
         return _handle_skill_delete(handler, body)
 
     # ── Memory (POST) ──
@@ -3920,6 +4294,20 @@ def handle_post(handler, parsed) -> bool:
 
     # ── Profile API (POST) ──
     if parsed.path == "/api/profile/switch":
+        from api.auth import current_user, require_perm
+        from api.users import has_users, is_profile_allowed
+
+        # When users are configured, enforce switch_profile permission AND
+        # allowed_profiles (issue #2). When users aren't configured (legacy
+        # env-var deployments), fall through to the unrestricted behavior.
+        if has_users():
+            user = require_perm(handler, 'switch_profile')
+            if user is None:
+                return True
+            target = (body.get("name") or "").strip()
+            if not is_profile_allowed(user, target):
+                return bad(handler, "Profile not allowed", 403)
+
         name = body.get("name", "").strip()
         if not name:
             return bad(handler, "name is required")
@@ -3945,6 +4333,15 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e), 409)
 
     if parsed.path == "/api/profile/create":
+        # Admin-only once users are configured (issue #2). Creating a
+        # profile changes what other users can be allowed onto, which is
+        # an admin-shaped action.
+        from api.auth import require_admin
+        from api.users import has_users
+        if has_users():
+            if require_admin(handler) is None:
+                return True
+
         name = body.get("name", "").strip()
         if not name:
             return bad(handler, "name is required")
@@ -3979,6 +4376,11 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
 
     if parsed.path == "/api/profile/delete":
+        from api.auth import require_admin
+        from api.users import has_users
+        if has_users():
+            if require_admin(handler) is None:
+                return True
         name = body.get("name", "").strip()
         if not name:
             return bad(handler, "name is required")
@@ -3999,9 +4401,25 @@ def handle_post(handler, parsed) -> bool:
             create_session,
             is_auth_enabled,
             parse_cookie,
+            require_perm,
             set_auth_cookie,
             verify_session,
         )
+
+        # Gate settings mutations behind the edit_settings permission, with
+        # an allowlist of personal-display keys that any logged-in user may
+        # toggle (theme, skin, show_thinking, show_token_usage). Anything
+        # else — bot_name, default_workspace, password set/clear, etc. —
+        # requires the perm. Admins always pass.
+        # Skipped on the legacy / first-boot path (no users configured) so
+        # the /api/auth/bootstrap → set-password flow keeps working.
+        from api.users import has_users
+        _PERSONAL_SETTINGS_KEYS = {'theme', 'skin', 'show_thinking', 'show_token_usage'}
+        _body_keys = set(body.keys()) if isinstance(body, dict) else set()
+        _wants_admin_only_change = bool(_body_keys - _PERSONAL_SETTINGS_KEYS)
+        if has_users() and _wants_admin_only_change:
+            if require_perm(handler, 'edit_settings') is None:
+                return True
 
         if "bot_name" in body:
             body["bot_name"] = (str(body["bot_name"]) or "").strip() or "Hermes"
@@ -4377,39 +4795,11 @@ def handle_post(handler, parsed) -> bool:
 
     # ── Auth endpoints (POST) ──
     if parsed.path == "/api/auth/login":
-        from api.auth import (
-            verify_password,
-            create_session,
-            set_auth_cookie,
-            is_auth_enabled,
-        )
-        from api.auth import _check_login_rate, _record_login_attempt
-
-        if not is_auth_enabled():
-            return j(handler, {"ok": True, "message": "Auth not enabled"})
-        client_ip = handler.client_address[0]
-        if not _check_login_rate(client_ip):
-            return j(
-                handler,
-                {"error": "Too many attempts. Try again in a minute."},
-                status=429,
-            )
-        password = body.get("password", "")
-        if not verify_password(password):
-            _record_login_attempt(client_ip)
-            return bad(handler, "Invalid password", 401)
-        cookie_val = create_session()
-        handler.send_response(200)
-        handler.send_header("Content-Type", "application/json")
-        handler.send_header("Cache-Control", "no-store")
-        _security_headers(handler)
-        set_auth_cookie(handler, cookie_val)
-        handler.end_headers()
-        handler.wfile.write(json.dumps({"ok": True}).encode())
-        return True
+        return _handle_login_post(handler, body)
 
     if parsed.path == "/api/auth/logout":
         from api.auth import clear_auth_cookie, invalidate_session, parse_cookie
+        from api.helpers import build_profile_cookie  # noqa: F401  (imported for clarity)
 
         cookie_val = parse_cookie(handler)
         if cookie_val:
@@ -4419,9 +4809,31 @@ def handle_post(handler, parsed) -> bool:
         handler.send_header("Cache-Control", "no-store")
         _security_headers(handler)
         clear_auth_cookie(handler)
+        # Clear the hermes_profile cookie too — it's bound to the logged-in
+        # session conceptually, even though the cookie itself stays valid.
+        import http.cookies as _hc
+        _pc = _hc.SimpleCookie()
+        _pc['hermes_profile'] = ''
+        _pc['hermes_profile']['path'] = '/'
+        _pc['hermes_profile']['max-age'] = '0'
+        _pc['hermes_profile']['httponly'] = True
+        handler.send_header("Set-Cookie", _pc['hermes_profile'].OutputString())
         handler.end_headers()
         handler.wfile.write(json.dumps({"ok": True}).encode())
         return True
+
+    if parsed.path == "/api/auth/bootstrap":
+        return _handle_bootstrap_post(handler, body)
+
+    if parsed.path == "/api/auth/change_password":
+        return _handle_change_password_post(handler, body)
+
+    # ── Admin user CRUD (POST) ──
+    if parsed.path == _ADMIN_USERS_PATH:
+        return _handle_admin_users_post(handler, body)
+    _admin_id, _admin_act = _admin_user_id_from_path(parsed.path)
+    if _admin_id is not None and _admin_act == 'password':
+        return _handle_admin_user_password_post(handler, body, _admin_id)
 
     # ── Checkpoints / Rollback (POST) ──
     if parsed.path == "/api/rollback/restore":
@@ -4452,6 +4864,9 @@ def handle_patch(handler, parsed) -> bool:
         from api.kanban_bridge import handle_kanban_patch
 
         return handle_kanban_patch(handler, parsed, body)
+    _admin_id, _admin_act = _admin_user_id_from_path(parsed.path)
+    if _admin_id is not None and _admin_act == '':
+        return _handle_admin_user_patch(handler, body, _admin_id)
     return False
 
 
@@ -4464,6 +4879,9 @@ def handle_delete(handler, parsed) -> bool:
         from api.kanban_bridge import handle_kanban_delete
 
         return handle_kanban_delete(handler, parsed, body)
+    _admin_id, _admin_act = _admin_user_id_from_path(parsed.path)
+    if _admin_id is not None and _admin_act == '':
+        return _handle_admin_user_delete(handler, _admin_id)
     return False
 
 # ── GET route helpers ─────────────────────────────────────────────────────────

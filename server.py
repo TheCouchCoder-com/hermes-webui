@@ -23,7 +23,12 @@ from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
 from api.helpers import j, get_profile_cookie
 from api.profiles import set_request_profile, clear_request_profile
 from api.routes import handle_delete, handle_get, handle_patch, handle_post
-from api.startup import auto_install_agent_deps, fix_credential_permissions
+from api.startup import (
+    auto_install_agent_deps,
+    cleanup_legacy_sessions,
+    fix_credential_permissions,
+    run_first_boot_migration,
+)
 from api.updates import WEBUI_VERSION
 
 
@@ -211,6 +216,25 @@ def main() -> None:
 
     # Fix sensitive file permissions before doing anything else
     fix_credential_permissions()
+
+    # ── Multi-user RBAC migration (issue #2) ─────────────────────────────
+    # Idempotent. On first boot after the upgrade, copies the legacy
+    # single-shared-password hash into a new admin user named 'admin'.
+    # On a fresh install, leaves .users.json absent so /login renders the
+    # bootstrap form.
+    try:
+        _mig = run_first_boot_migration()
+        if _mig['action'] == 'upgraded':
+            print(f"[migration] action={_mig['action']} admin={_mig['admin_username']}", flush=True)
+        elif _mig['action'] in ('first_boot', 'env_var_legacy_preserved'):
+            print(f"[migration] action={_mig['action']}", flush=True)
+        # cleanup_legacy_sessions removes session records that have no
+        # user_id binding; users are forced to re-login once after upgrade.
+        _dropped = cleanup_legacy_sessions()
+        if _dropped:
+            print(f"[migration] dropped {_dropped} legacy unbound session(s)", flush=True)
+    except Exception as exc:
+        print(f"[migration] startup migration failed: {exc}", flush=True)
 
     # ── #1558 startup self-heal ─────────────────────────────────────────
     # If a previous process wrote a session JSON with fewer messages than

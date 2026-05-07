@@ -89,23 +89,20 @@ class TestSessionPruning(unittest.TestCase):
         auth._prune_expired_sessions()
         self.assertEqual(len(auth._sessions), 0)
 
-    def test_session_ttl_is_24_hours(self):
-        """Newly created sessions should have the expected 24-hour TTL."""
+    def test_session_ttl_matches_constant(self):
+        """Newly created sessions expire SESSION_TTL seconds in the future.
+
+        Issue #2 changed the in-memory shape from `token -> expiry_float` to
+        `token -> {user_id, expiry}`. _session_expiry abstracts both shapes
+        so legacy tests can still assign a raw float to _sessions[token].
+        """
         auth._sessions.clear()
         token_hex = auth.create_session().split(".")[0]
-        # The _sessions dict stores token -> expiry_time
-        # We can check the expiry is approximately SESSION_TTL seconds from now
-        # by looking up the raw entry via the token
-        from api.auth import _sessions, SESSION_TTL
-        # find our entry
-        for t, exp in _sessions.items():
-            if t == token_hex:
-                # expiry should be within 5 seconds of now + SESSION_TTL
-                expected = time.time() + SESSION_TTL
-                self.assertAlmostEqual(exp, expected, delta=5)
-                break
-        else:
-            self.fail("Session token not found in _sessions")
+        from api.auth import _sessions, SESSION_TTL, _session_expiry
+        entry = _sessions.get(token_hex)
+        self.assertIsNotNone(entry, "Session token not found in _sessions")
+        expected = time.time() + SESSION_TTL
+        self.assertAlmostEqual(_session_expiry(entry), expected, delta=5)
 
 
 class TestSessionInvalidation(unittest.TestCase):

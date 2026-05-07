@@ -126,3 +126,118 @@ def auto_install_agent_deps() -> bool:
     except Exception as e:
         print(f'[!!] Auto-install error: {e}', flush=True)
         return False
+
+
+# ── Multi-user RBAC migration (issue #2) ────────────────────────────────────
+
+def run_first_boot_migration() -> dict:
+    """One-time migration from single-shared-password to multi-user records.
+
+    States and actions (per issue #2 §3, locked-in decisions):
+
+      .users.json exists & validates           → no-op
+      .users.json missing,
+      settings.json has password_hash,         → auto-create one admin user
+      HERMES_WEBUI_PASSWORD env var NOT set      named 'admin' with that hash,
+                                                 strip password_hash from settings
+      .users.json missing,
+      HERMES_WEBUI_PASSWORD env var IS set     → leave alone (legacy fallback);
+                                                 manual upgrade required
+      .users.json missing,
+      no legacy password configured            → 'first_boot' state — UI offers
+                                                 the bootstrap form
+      .users.json malformed                    → handled by api.users._load_from_disk
+                                                 (logs + falls back to .bak or empty)
+
+    Returns a status dict for logging / tests:
+      {action: <str>, admin_username: <str|None>, first_boot: <bool>}
+
+    Called from server.py at startup. Idempotent: subsequent boots find
+    .users.json populated and become no-ops.
+    """
+    from api import users as users_mod
+    from api.config import load_settings
+
+    status = {'action': 'noop', 'admin_username': None, 'first_boot': False}
+
+    # Already migrated?
+    if users_mod.has_users():
+        status['action'] = 'already_migrated'
+        return status
+
+    legacy_env = os.environ.get('HERMES_WEBUI_PASSWORD', '').strip()
+    if legacy_env:
+        # Env-var deployments stay on the legacy single-password path during
+        # the transition. Operators upgrade manually: unset the env var,
+        # restart, walk through the bootstrap form. See issue #2 §9.2.
+        status['action'] = 'env_var_legacy_preserved'
+        return status
+
+    settings = load_settings()
+    legacy_hash = (settings.get('password_hash') or '').strip()
+    if legacy_hash:
+        # Upgrade path: copy the existing hash byte-for-byte into a new admin
+        # user named 'admin', strip it from settings.json so there's a single
+        # source of truth going forward.
+        try:
+            users_mod.create_user(
+                username='admin',
+                password='',                   # ignored when password_hash is set
+                role='admin',
+                assigned_profile='default',
+                password_hash=legacy_hash,
+                allowed_profiles=None,
+                permissions={},
+            )
+        except Exception as e:
+            print(f'[migration] Failed to create admin from legacy hash: {e}', flush=True)
+            status['action'] = 'upgrade_failed'
+            return status
+
+        try:
+            from api.config import save_settings
+            settings.pop('password_hash', None)
+            save_settings(settings)
+        except Exception as e:
+            # The user record is already correct; the leftover hash in
+            # settings.json is harmless because get_password_hash() reads
+            # env first then settings, but log loudly so operators know
+            # something went sideways.
+            print(f'[migration] Failed to clear password_hash from settings.json: {e}', flush=True)
+
+        print('[migration] Upgraded to multi-user: created admin user from legacy password', flush=True)
+        status['action'] = 'upgraded'
+        status['admin_username'] = 'admin'
+        return status
+
+    # Truly fresh install. The login page enters bootstrap mode.
+    status['action'] = 'first_boot'
+    status['first_boot'] = True
+    return status
+
+
+def cleanup_legacy_sessions() -> int:
+    """Drop session records that have no user_id binding. Run once at
+    startup after run_first_boot_migration. Issue #2 design: legacy
+    sessions can't be revoked when a user is deleted, so we force a
+    one-time re-login at upgrade. Returns count removed."""
+    try:
+        from api.auth import drop_unbound_legacy_sessions
+        return drop_unbound_legacy_sessions()
+    except Exception as e:
+        print(f'[migration] cleanup_legacy_sessions failed: {e}', flush=True)
+        return 0
+
+
+def is_first_boot() -> bool:
+    """True iff the server has no users configured AND no legacy env-var
+    password (so /login should render the bootstrap form). Used by
+    /api/auth/status and the bootstrap endpoint."""
+    legacy_env = os.environ.get('HERMES_WEBUI_PASSWORD', '').strip()
+    if legacy_env:
+        return False
+    try:
+        from api import users as users_mod
+        return not users_mod.has_users()
+    except Exception:
+        return False
