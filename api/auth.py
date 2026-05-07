@@ -172,8 +172,15 @@ def get_password_hash() -> str | None:
 
 
 def is_auth_enabled() -> bool:
-    """True if a password is configured (env var or settings)."""
-    return get_password_hash() is not None
+    """True if auth is required: either a legacy single-password is configured,
+    or one or more multi-user records exist in .users.json (issue #2)."""
+    if get_password_hash() is not None:
+        return True
+    try:
+        from api.users import has_users
+        return has_users()
+    except Exception:
+        return False
 
 
 def verify_password(plain) -> bool:
