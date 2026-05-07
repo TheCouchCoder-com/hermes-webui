@@ -782,15 +782,30 @@ Replacing with marked.js + DOMPurify is a future improvement (not blocking).
 2. Enhanced /health: COMPLETE (Sprint 7). Returns `active_streams`, `uptime_seconds`.
 3. GET /api/debug/stats: NOT YET IMPLEMENTED. Low priority.
 
-### Phase H: Authentication (Priority: Low, Effort: Medium)
+### Phase H: Authentication & Multi-User RBAC -- COMPLETE (issue #2)
 
-Optional password gate for non-SSH-tunnel deployments.
+The single-shared-password gate in `api/auth.py` evolved into a real
+multi-user system with per-user accounts, role + permissions model, and an
+admin panel. See "§11. Multi-User RBAC" below for the full design.
 
-1. HERMES_WEBUI_PASSWORD env var enables auth
-2. Login page: minimal dark form, POST /api/auth/login
-3. Server sets HttpOnly + SameSite=Strict cookie on successful login
-4. All API endpoints check cookie if HERMES_WEBUI_PASSWORD is set
-5. Cookie validity: 30 days from last activity
+Compact summary:
+1. `STATE_DIR/.users.json` (atomic write + .bak) holds user records:
+   `{id, username, password_hash, role, assigned_profile, allowed_profiles,
+     permissions, must_change_password, created_at, last_login_at}`.
+2. Login is `POST /api/auth/login {username, password}` and sets BOTH
+   `hermes_session` AND `hermes_profile` cookies on success.
+3. The `hermes_profile` cookie is HMAC-signed (same scheme as
+   `hermes_session`); tampering is rejected silently.
+4. RBAC: admin / user roles; permissions toggles for switch_profile /
+   edit_settings / manage_cron / manage_skills (plus admin-only
+   manage_users). Allowed_profiles list narrows where a user can switch.
+5. Admin panel UI at `panelAdmin` (admin-only, gated by `/api/me` probe).
+6. Migration: legacy `password_hash` in `settings.json` is auto-copied
+   into a single `admin` user on first boot; env-var deployments stay on
+   the legacy single-password path until manually upgraded.
+7. Session records bump from `token -> float` to
+   `token -> {user_id, expiry}`; legacy float entries are still readable
+   for backwards-compat with tests / persisted files.
 
 ### Phase I: Test Infrastructure -- COMPLETE
 
@@ -811,6 +826,174 @@ For scale beyond single-user casual use.
 3. Frontend virtual scroll: IntersectionObserver for both message list and session list
 4. Stream cleanup background thread: evict STREAMS entries older than 5 minutes
 5. File tree lazy loading: expand-on-click fetches subdirectory contents
+
+---
+
+## 10.5. Multi-User RBAC (issue #2)
+
+Added in issue #2 on top of the original single-shared-password gate.
+Backwards-compatible: legacy single-password deployments continue working
+unchanged until they migrate.
+
+### Data layer (`api/users.py`)
+
+User records live in `STATE_DIR/.users.json`:
+
+```jsonc
+{
+  "version": 1,
+  "users": [
+    {
+      "id": "<uuid hex>",
+      "username": "alice",
+      "password_hash": "<PBKDF2-SHA256, 600k rounds, hex>",
+      "role": "admin" | "user",
+      "assigned_profile": "default",
+      "allowed_profiles": null,        // null/[] = all
+      "permissions": {
+        "switch_profile": true,
+        "edit_settings": false,
+        "manage_cron": true,
+        "manage_skills": true,
+        "manage_users": false          // admin-only regardless
+      },
+      "must_change_password": false,
+      "created_at": "2026-05-07T00:00:00Z",
+      "last_login_at": null
+    }
+  ]
+}
+```
+
+- Atomic write + `.bak` rotation via `api/_atomic.py:atomic_write_json`,
+  same crash-safety pattern as `Session.save` (#1558).
+- Password hashing reuses `api.auth._hash_password` (PBKDF2-SHA256 with
+  the persisted `_signing_key` as salt).
+- Username syntax: `^[a-z0-9][a-z0-9._-]{0,31}$`. Lowercase only — case
+  collisions impossible.
+- `permissions.manage_users` is admin-only by design; the field is stored
+  for completeness but `has_permission(user, "manage_users")` returns
+  False for any non-admin even when set true.
+- Last-admin guard: `delete_user` and `update_user(role="user")` refuse
+  if the operation would leave zero admins.
+
+### Session schema (`api/auth.py`)
+
+`_sessions` bumped from `token -> expiry_float` to
+`token -> {user_id, expiry}`. Both shapes are still readable
+(`_session_expiry` / `_session_user_id` accept either) so existing tests
+that assign raw floats keep working.
+
+### Cookie hardening
+
+`hermes_profile` is now HMAC-signed: `<name>.<32-hex sig>`. Same scheme
+as `hermes_session`, so `_signing_key()` is shared. Tampering is
+rejected silently in `api/helpers.py:get_profile_cookie` —
+`/api/profile/switch` enforcement is the hard wall, the signature is
+tamper-evidence.
+
+Transition flag `HERMES_WEBUI_ACCEPT_UNSIGNED_PROFILE_COOKIE=1` makes
+`get_profile_cookie` honour the legacy unsigned format for one
+release. Default off in production. Tests' conftest sets it on so the
+existing test corpus that constructs unsigned cookies keeps passing.
+Removed in the next minor release.
+
+### Authorization helpers
+
+```python
+current_user(handler)                 # → user record or None
+require_user(handler)                 # 401 + None on miss; user on hit
+require_admin(handler)                # 401 / 403; user on hit
+require_perm(handler, "manage_cron")  # 401 / 403; user on hit
+```
+
+Pattern at every gated endpoint:
+
+```python
+if has_users():
+    user = require_perm(handler, 'manage_cron')
+    if user is None:
+        return True
+```
+
+The `has_users()` guard preserves the legacy single-password behaviour
+for deployments that haven't migrated yet.
+
+### Login flow
+
+`POST /api/auth/login` body `{username, password}`:
+
+1. Per-IP **and** per-username rate limit (5/60s each). Cycling source
+   IPs no longer dodges per-account brute force.
+2. `verify_user_credentials(username, password)` looks up by username,
+   constant-time-compares the hash, returns the user record or None.
+   The unknown-user path still runs `_hash_password` on a dummy so
+   timing doesn't leak whether the username exists.
+3. On success: `create_session(user_id=user['id'])` stores the new
+   schema entry, both cookies are set on the response, and
+   `must_change_password` is surfaced in the body so the UI can route
+   to the change-password form.
+
+### Migration (`api/startup.py:run_first_boot_migration`)
+
+Runs once at server startup. Four states:
+
+| Trigger | Action |
+|---|---|
+| `.users.json` exists | no-op (`already_migrated`) |
+| `.users.json` missing AND `settings.json:password_hash` set AND no env-var | create one admin user with that exact hash; strip from settings.json (`upgraded`) |
+| `.users.json` missing AND `HERMES_WEBUI_PASSWORD` env set | leave alone; manual upgrade required (`env_var_legacy_preserved`) |
+| `.users.json` missing AND no legacy password | `first_boot` — `/login` renders the bootstrap form |
+
+`cleanup_legacy_sessions()` runs right after migration and drops every
+session record without a `user_id` binding. Forces exactly one re-login
+across the upgrade window.
+
+### Bootstrap
+
+`POST /api/auth/bootstrap` is a public endpoint that succeeds **only** if
+`is_first_boot()` returns True. Race-protected under `_users_lock`. Once
+consumed, every subsequent call returns 409.
+
+### Admin panel
+
+Frontend in `static/panels.js:loadAdminPanel` and the new
+`<div id="panelAdmin">` view. Backed by:
+
+```
+GET    /api/admin/users                   list, no password_hash
+POST   /api/admin/users                   create
+PATCH  /api/admin/users/<id>              edit role/profiles/permissions
+DELETE /api/admin/users/<id>              delete + invalidate sessions
+POST   /api/admin/users/<id>/password     reset, must_change=True
+```
+
+Tab visibility is gated client-side by the `/api/me` boot probe — only
+admins see the rail/mobile entries. Server enforces `require_admin` on
+every `/api/admin/*` route regardless.
+
+All confirm/prompt UI uses `showConfirmDialog` / `showPromptDialog` per
+CLAUDE.md hard rule. Native `confirm()` is forbidden anywhere in the
+admin panel code path.
+
+### Endpoint authorization summary
+
+| Endpoint | Gate |
+|---|---|
+| `POST /api/profile/switch` | `permissions.switch_profile` + `is_profile_allowed` |
+| `POST /api/profile/{create,delete}` | admin |
+| `POST /api/admin/reload` | admin |
+| `POST /api/admin/users[/<id>[/password]]` | admin |
+| `GET  /api/admin/users` | admin |
+| `GET  /api/profiles` | filtered to `allowed_profiles` for non-admin |
+| `GET  /api/projects` | same allowed_profiles filter (in addition to existing profile-scoping) |
+| Everything else | unchanged (login required if auth enabled) |
+
+Decision (issue #2 §9.5): **shared-profile semantics.** Two users with
+overlapping `allowed_profiles` collaborating in the same profile see
+each other's sessions / projects / etc. The hard wall is cross-profile
+isolation; per-user data ownership inside a shared profile is out of
+scope (the product is "agent profile = workspace, user = identity").
 
 ---
 
