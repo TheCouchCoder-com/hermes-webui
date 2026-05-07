@@ -1327,6 +1327,14 @@ function applyBotName(){
       const rb=$('adminRailBtn'); if(rb) rb.style.display='';
       const mb=$('adminMobileBtn'); if(mb) mb.style.display='';
     }
+    if(me && me.username){
+      const so=$('signOutRailBtn');
+      if(so){
+        so.style.display='';
+        so.title='Sign out ('+me.username+')';
+        so.setAttribute('aria-label','Sign out '+me.username);
+      }
+    }
   }catch(e){
     S.currentUser=null;
   }

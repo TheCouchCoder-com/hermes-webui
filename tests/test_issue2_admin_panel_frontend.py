@@ -178,6 +178,28 @@ def test_admin_form_validates_password_confirmation():
         "Mismatch must surface inline to the admin"
 
 
+def test_sign_out_rail_button_present_and_hidden_by_default():
+    """A sign-out button lives at the bottom of the rail, below the cog.
+    Hidden by default; boot.js reveals it once /api/me confirms a user."""
+    assert 'id="signOutRailBtn"' in INDEX_HTML, \
+        "missing #signOutRailBtn — multi-user UIs need a visible logout entry"
+    so_idx = INDEX_HTML.find('id="signOutRailBtn"')
+    so_block = INDEX_HTML[so_idx:INDEX_HTML.find('</button>', so_idx)]
+    assert 'display:none' in so_block, \
+        "sign-out button must start hidden (no users / auth disabled)"
+    assert 'onclick="signOut()"' in so_block, \
+        "sign-out button must call the existing signOut() handler"
+
+
+def test_boot_reveals_sign_out_when_user_is_present():
+    """boot.js's /api/me success path must un-hide the sign-out rail button.
+    Without this, the only logout entry is buried in Settings → Account."""
+    idx = BOOT_JS.find("api('/api/me')")
+    block = BOOT_JS[idx:idx + 1500]
+    assert 'signOutRailBtn' in block, \
+        "boot.js must reveal #signOutRailBtn when /api/me succeeds"
+
+
 def test_main_admin_view_is_gated_by_showing_admin_class():
     """The .main-view container is shared by every panel; each one is
     hidden by default and revealed only when its showing-* class is on
