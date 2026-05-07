@@ -1317,6 +1317,19 @@ function applyBotName(){
   // Update profile chip label immediately
   const profileLabel=$('profileChipLabel');
   if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
+  // Fetch current user (issue #2). Reveal admin tabs only for admin role.
+  // 401 is expected when auth is disabled (legacy / fresh install) — don't
+  // surface those as errors.
+  try{
+    const me=await api('/api/me');
+    S.currentUser=me;
+    if(me && me.role==='admin'){
+      const rb=$('adminRailBtn'); if(rb) rb.style.display='';
+      const mb=$('adminMobileBtn'); if(mb) mb.style.display='';
+    }
+  }catch(e){
+    S.currentUser=null;
+  }
   // Fetch available models without blocking session restore. The static HTML
   // options are enough for first paint; the dynamic provider list can settle
   // after the saved session is visible.

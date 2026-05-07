@@ -200,7 +200,7 @@ async function switchPanel(name, opts = {}) {
   // showing-<name> class on <main>; no class means chat (the default).
   const mainEl = document.querySelector('main.main');
   if (mainEl) {
-    ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs'].forEach(p => {
+    ['settings','skills','memory','tasks','kanban','workspaces','profiles','admin','insights','logs'].forEach(p => {
       mainEl.classList.toggle('showing-' + p, nextPanel === p);
     });
   }
@@ -211,6 +211,7 @@ async function switchPanel(name, opts = {}) {
   if (nextPanel === 'memory') await loadMemory();
   if (nextPanel === 'workspaces') await loadWorkspacesPanel();
   if (nextPanel === 'profiles') await loadProfilesPanel();
+  if (nextPanel === 'admin') await loadAdminPanel();
   if (nextPanel === 'todos') loadTodos();
   if (nextPanel === 'insights') await loadInsights();
   if (nextPanel === 'logs') await loadLogs();
@@ -5542,5 +5543,158 @@ async function _restoreCheckpoint(workspace,checkpoint,message){
     }
   }catch(e){
     showToast(t('checkpoint_restore')+': '+e.message,'error');
+  }
+}
+
+// ── Admin panel (issue #2: multi-user RBAC) ────────────────────────────────-
+// Render-only logic — every mutation goes through /api/admin/users endpoints
+// which enforce role==admin server-side. The admin tab is hidden from
+// non-admins via #adminRailBtn / #adminMobileBtn display:none controlled at
+// boot.js by the /api/me probe.
+
+let _adminUsers = [];
+
+async function loadAdminPanel(){
+  const root = document.getElementById('adminPanel');
+  if (!root) return;
+  try {
+    const data = await api('/api/admin/users');
+    _adminUsers = (data && data.users) || [];
+    _renderAdminUserList(root);
+  } catch (e) {
+    root.innerHTML = '<div style="color:var(--error);font-size:12px;padding:8px">' +
+      esc(e.message || 'Failed to load users') + '</div>';
+  }
+}
+
+function _renderAdminUserList(root){
+  if (!_adminUsers.length){
+    root.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:8px">No users yet.</div>';
+    return;
+  }
+  const items = _adminUsers.map(u => {
+    const roleBadge = u.role === 'admin'
+      ? '<span style="color:var(--accent-text);font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;background:var(--accent-bg)">ADMIN</span>'
+      : '<span style="color:var(--muted);font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;background:var(--hover-bg)">USER</span>';
+    const lastLogin = u.last_login_at
+      ? '<div style="color:var(--muted);font-size:11px">last login: ' + esc(u.last_login_at) + '</div>'
+      : '<div style="color:var(--muted);font-size:11px">never logged in</div>';
+    return (
+      '<div class="detail-card" style="margin-bottom:8px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface)">' +
+        '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">' +
+          '<strong>' + esc(u.username) + '</strong>' + roleBadge +
+        '</div>' +
+        '<div style="color:var(--muted);font-size:11px">profile: ' + esc(u.assigned_profile || 'default') + '</div>' +
+        lastLogin +
+        '<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">' +
+          '<button class="panel-action-btn" onclick="adminEditUser(\'' + u.id + '\')">Edit</button>' +
+          '<button class="panel-action-btn" onclick="adminResetPassword(\'' + u.id + '\')">Reset password</button>' +
+          '<button class="panel-action-btn" style="color:var(--error)" onclick="adminDeleteUser(\'' + u.id + '\')">Delete</button>' +
+        '</div>' +
+      '</div>'
+    );
+  }).join('');
+  root.innerHTML = items;
+}
+
+async function openAdminUserCreate(){
+  const username = await showPromptDialog({
+    title: 'Create user',
+    label: 'Username',
+    placeholder: 'lowercase letters, numbers, . _ -',
+    confirm: 'Next',
+  });
+  if (!username) return;
+  const password = await showPromptDialog({
+    title: 'Create user',
+    label: 'Password (min 8 chars)',
+    inputType: 'password',
+    confirm: 'Next',
+  });
+  if (!password) return;
+  const role = await showPromptDialog({
+    title: 'Create user',
+    label: 'Role: type "admin" or leave blank for "user"',
+    placeholder: 'user',
+    confirm: 'Create',
+  });
+  if (role === null) return;
+  try {
+    await api('/api/admin/users', {
+      method: 'POST',
+      body: JSON.stringify({
+        username: username.trim(),
+        password: password,
+        role: (role || '').trim() === 'admin' ? 'admin' : 'user',
+        assigned_profile: 'default',
+      }),
+    });
+    showToast('User created');
+    await loadAdminPanel();
+  } catch (e) {
+    showToast('Create failed: ' + (e.message || 'unknown'), 'error');
+  }
+}
+
+async function adminEditUser(userId){
+  const user = _adminUsers.find(u => u.id === userId);
+  if (!user) return;
+  const role = await showPromptDialog({
+    title: 'Edit ' + user.username,
+    label: 'Role: "admin" or "user"',
+    initial: user.role,
+    confirm: 'Save',
+  });
+  if (role === null) return;
+  try {
+    await api('/api/admin/users/' + userId, {
+      method: 'PATCH',
+      body: JSON.stringify({ role: role.trim() === 'admin' ? 'admin' : 'user' }),
+    });
+    showToast('User updated');
+    await loadAdminPanel();
+  } catch (e) {
+    showToast('Update failed: ' + (e.message || 'unknown'), 'error');
+  }
+}
+
+async function adminResetPassword(userId){
+  const user = _adminUsers.find(u => u.id === userId);
+  if (!user) return;
+  const newPw = await showPromptDialog({
+    title: 'Reset password for ' + user.username,
+    label: 'New password (min 8 chars). User will be required to change on next login.',
+    inputType: 'password',
+    confirm: 'Reset',
+  });
+  if (!newPw) return;
+  try {
+    await api('/api/admin/users/' + userId + '/password', {
+      method: 'POST',
+      body: JSON.stringify({ new_password: newPw }),
+    });
+    showToast('Password reset (user must change on next login)');
+    await loadAdminPanel();
+  } catch (e) {
+    showToast('Reset failed: ' + (e.message || 'unknown'), 'error');
+  }
+}
+
+async function adminDeleteUser(userId){
+  const user = _adminUsers.find(u => u.id === userId);
+  if (!user) return;
+  const confirmed = await showConfirmDialog({
+    title: 'Delete user',
+    body: 'Delete ' + user.username + '? Their session will be revoked immediately. This cannot be undone.',
+    confirm: 'Delete',
+    destructive: true,
+  });
+  if (!confirmed) return;
+  try {
+    await api('/api/admin/users/' + userId, { method: 'DELETE' });
+    showToast('User deleted');
+    await loadAdminPanel();
+  } catch (e) {
+    showToast('Delete failed: ' + (e.message || 'unknown'), 'error');
   }
 }
