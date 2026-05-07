@@ -1885,6 +1885,119 @@ def _public_user_view(user: dict) -> dict:
     return {k: v for k, v in user.items() if k != 'password_hash'}
 
 
+# ── Admin user endpoints (issue #2) ──────────────────────────────────────────
+
+_ADMIN_USERS_PATH = '/api/admin/users'
+
+
+def _admin_user_id_from_path(path: str):
+    """For paths under /api/admin/users/<id>[/password], return the id and
+    sub-action ('' or 'password'). Returns (None, None) if it doesn't match."""
+    if not path.startswith(_ADMIN_USERS_PATH + '/'):
+        return None, None
+    rest = path[len(_ADMIN_USERS_PATH) + 1:]
+    if not rest:
+        return None, None
+    parts = rest.split('/', 1)
+    user_id = parts[0]
+    action = parts[1] if len(parts) > 1 else ''
+    if not user_id or '/' in user_id:
+        return None, None
+    return user_id, action
+
+
+def _handle_admin_users_get(handler) -> bool:
+    """GET /api/admin/users — list every user, no password_hash."""
+    from api.auth import require_admin
+    if require_admin(handler) is None:
+        return True
+    from api.users import load_users
+    return j(handler, {'users': [_public_user_view(u) for u in load_users()]})
+
+
+def _handle_admin_users_post(handler, body) -> bool:
+    """POST /api/admin/users — create a user."""
+    from api.auth import require_admin
+    if require_admin(handler) is None:
+        return True
+    from api import users as users_mod
+    from api.users import UserValidationError
+    try:
+        user = users_mod.create_user(
+            username=(body.get('username') or '').strip(),
+            password=body.get('password') or '',
+            role=body.get('role') or 'user',
+            assigned_profile=(body.get('assigned_profile') or 'default').strip(),
+            allowed_profiles=body.get('allowed_profiles'),
+            permissions=body.get('permissions') or {},
+            must_change_password=bool(body.get('must_change_password', False)),
+        )
+    except UserValidationError as e:
+        return j(handler, {'error': str(e)}, status=400)
+    return j(handler, {'user': _public_user_view(user)}, status=201)
+
+
+def _handle_admin_user_patch(handler, body, user_id: str) -> bool:
+    """PATCH /api/admin/users/<id> — edit role, profiles, permissions."""
+    from api.auth import require_admin
+    if require_admin(handler) is None:
+        return True
+    from api import users as users_mod
+    from api.users import UserValidationError
+    patch = {}
+    for k in ('role', 'assigned_profile', 'allowed_profiles',
+              'permissions', 'must_change_password'):
+        if k in body:
+            patch[k] = body[k]
+    try:
+        user = users_mod.update_user(user_id, **patch)
+    except KeyError:
+        return j(handler, {'error': 'user not found'}, status=404)
+    except UserValidationError as e:
+        return j(handler, {'error': str(e)}, status=400)
+    return j(handler, {'user': _public_user_view(user)})
+
+
+def _handle_admin_user_delete(handler, user_id: str) -> bool:
+    """DELETE /api/admin/users/<id> — delete user; revoke their sessions."""
+    from api.auth import current_user, require_admin, invalidate_sessions_for_user
+    admin = require_admin(handler)
+    if admin is None:
+        return True
+    if admin['id'] == user_id:
+        return j(handler, {'error': 'cannot delete your own account'}, status=400)
+    from api import users as users_mod
+    from api.users import UserValidationError
+    try:
+        users_mod.delete_user(user_id)
+    except KeyError:
+        return j(handler, {'error': 'user not found'}, status=404)
+    except UserValidationError as e:
+        return j(handler, {'error': str(e)}, status=400)
+    revoked = invalidate_sessions_for_user(user_id)
+    return j(handler, {'ok': True, 'revoked_sessions': revoked})
+
+
+def _handle_admin_user_password_post(handler, body, user_id: str) -> bool:
+    """POST /api/admin/users/<id>/password — reset a user's password.
+    Sets must_change_password=True and revokes existing sessions so the
+    target user must log in fresh and set a new password."""
+    from api.auth import require_admin, invalidate_sessions_for_user
+    if require_admin(handler) is None:
+        return True
+    new_pw = body.get('new_password') or ''
+    from api import users as users_mod
+    from api.users import UserValidationError
+    try:
+        users_mod.set_password(user_id, new_pw, must_change=True)
+    except KeyError:
+        return j(handler, {'error': 'user not found'}, status=404)
+    except UserValidationError as e:
+        return j(handler, {'error': str(e)}, status=400)
+    revoked = invalidate_sessions_for_user(user_id)
+    return j(handler, {'ok': True, 'must_change': True, 'revoked_sessions': revoked})
+
+
 # ── Logs endpoint ─────────────────────────────────────────────────────────────
 _LOG_FILE_WHITELIST = {
     "agent": "agent.log",
@@ -2624,6 +2737,9 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/me":
         return _handle_me_get(handler)
+
+    if parsed.path == _ADMIN_USERS_PATH:
+        return _handle_admin_users_get(handler)
 
     if parsed.path == "/api/auth/status":
         from api.auth import is_auth_enabled, parse_cookie, verify_session
@@ -4672,6 +4788,13 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/auth/change_password":
         return _handle_change_password_post(handler, body)
 
+    # ── Admin user CRUD (POST) ──
+    if parsed.path == _ADMIN_USERS_PATH:
+        return _handle_admin_users_post(handler, body)
+    _admin_id, _admin_act = _admin_user_id_from_path(parsed.path)
+    if _admin_id is not None and _admin_act == 'password':
+        return _handle_admin_user_password_post(handler, body, _admin_id)
+
     # ── Checkpoints / Rollback (POST) ──
     if parsed.path == "/api/rollback/restore":
         if not body:
@@ -4701,6 +4824,9 @@ def handle_patch(handler, parsed) -> bool:
         from api.kanban_bridge import handle_kanban_patch
 
         return handle_kanban_patch(handler, parsed, body)
+    _admin_id, _admin_act = _admin_user_id_from_path(parsed.path)
+    if _admin_id is not None and _admin_act == '':
+        return _handle_admin_user_patch(handler, body, _admin_id)
     return False
 
 
@@ -4713,6 +4839,9 @@ def handle_delete(handler, parsed) -> bool:
         from api.kanban_bridge import handle_kanban_delete
 
         return handle_kanban_delete(handler, parsed, body)
+    _admin_id, _admin_act = _admin_user_id_from_path(parsed.path)
+    if _admin_id is not None and _admin_act == '':
+        return _handle_admin_user_delete(handler, _admin_id)
     return False
 
 # ── GET route helpers ─────────────────────────────────────────────────────────
