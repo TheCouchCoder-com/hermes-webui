@@ -3087,8 +3087,11 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/projects":
         # ── Profile scoping (#1614) ────────────────────────────────────────
         # Default: filter to the active profile. ?all_profiles=1 returns the
-        # aggregate list so settings/admin UIs can still see everything.
+        # aggregate list so settings/admin UIs can still see everything,
+        # subject to allowed_profiles for non-admins (issue #2).
         from api.profiles import get_active_profile_name
+        from api.auth import current_user
+        from api.users import has_users
         active_profile = get_active_profile_name()
         all_projects = load_projects()
         all_profiles = _all_profiles_query_flag(parsed)
@@ -3097,6 +3100,20 @@ def handle_get(handler, parsed) -> bool:
         else:
             scoped = [p for p in all_projects
                       if _profiles_match(p.get("profile"), active_profile)]
+
+        # Non-admin allowed_profiles enforcement: even with ?all_profiles=1,
+        # restricted users can only see projects in profiles they're allowed
+        # to switch to.
+        if has_users():
+            user = current_user(handler)
+            if user is not None and user.get('role') != 'admin':
+                allowed = user.get('allowed_profiles')
+                if allowed is not None:
+                    scoped = [p for p in scoped
+                              if (p.get('profile') or 'default') in allowed
+                              or _profiles_match(p.get('profile'), active_profile)
+                              and active_profile in allowed]
+
         return j(handler, {
             "projects": scoped,
             "all_profiles": all_profiles,
@@ -3365,10 +3382,21 @@ def handle_get(handler, parsed) -> bool:
     # ── Profile API (GET) ──
     if parsed.path == "/api/profiles":
         from api.profiles import list_profiles_api, get_active_profile_name
+        from api.auth import current_user
+        from api.users import has_users
 
+        all_profiles = list_profiles_api()
+        if has_users():
+            # Filter to allowed_profiles for non-admins (decision #6, issue #2).
+            user = current_user(handler)
+            if user is not None and user.get('role') != 'admin':
+                allowed = user.get('allowed_profiles')
+                if allowed is not None:
+                    all_profiles = [p for p in all_profiles
+                                    if (p.get('name') if isinstance(p, dict) else p) in allowed]
         return j(
             handler,
-            {"profiles": list_profiles_api(), "active": get_active_profile_name()},
+            {"profiles": all_profiles, "active": get_active_profile_name()},
         )
 
     if parsed.path == "/api/profile/active":
@@ -3633,6 +3661,11 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e), 500)
 
     if parsed.path == "/api/admin/reload":
+        from api.auth import require_admin
+        from api.users import has_users
+        if has_users():
+            if require_admin(handler) is None:
+                return True
         # Hot-reload api.models module to pick up code changes without restart.
         import importlib
         from api import models as _models
@@ -4121,6 +4154,20 @@ def handle_post(handler, parsed) -> bool:
 
     # ── Profile API (POST) ──
     if parsed.path == "/api/profile/switch":
+        from api.auth import current_user, require_perm
+        from api.users import has_users, is_profile_allowed
+
+        # When users are configured, enforce switch_profile permission AND
+        # allowed_profiles (issue #2). When users aren't configured (legacy
+        # env-var deployments), fall through to the unrestricted behavior.
+        if has_users():
+            user = require_perm(handler, 'switch_profile')
+            if user is None:
+                return True
+            target = (body.get("name") or "").strip()
+            if not is_profile_allowed(user, target):
+                return bad(handler, "Profile not allowed", 403)
+
         name = body.get("name", "").strip()
         if not name:
             return bad(handler, "name is required")
@@ -4146,6 +4193,15 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e), 409)
 
     if parsed.path == "/api/profile/create":
+        # Admin-only once users are configured (issue #2). Creating a
+        # profile changes what other users can be allowed onto, which is
+        # an admin-shaped action.
+        from api.auth import require_admin
+        from api.users import has_users
+        if has_users():
+            if require_admin(handler) is None:
+                return True
+
         name = body.get("name", "").strip()
         if not name:
             return bad(handler, "name is required")
@@ -4180,6 +4236,11 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
 
     if parsed.path == "/api/profile/delete":
+        from api.auth import require_admin
+        from api.users import has_users
+        if has_users():
+            if require_admin(handler) is None:
+                return True
         name = body.get("name", "").strip()
         if not name:
             return bad(handler, "name is required")
