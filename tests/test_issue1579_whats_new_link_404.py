@@ -190,16 +190,20 @@ def _read_ui_js():
 def test_whats_new_link_resets_display_and_href_on_every_render():
     """Without reset, a stale link from a prior banner can stay visible after
     a re-render where the new payload has current_sha=None.
+
+    Issue #6 moved the link wiring from _showUpdateBanner into the per-target
+    _renderUpdateBannerRow helper; the reset-on-every-render contract is
+    unchanged.
     """
     src = _read_ui_js()
-    # Find the "What's new" wiring block (~50-line window)
-    idx = src.find("Wire up \"What's new?\" link")
-    assert idx != -1, "What's-new link wiring block not found"
-    block = src[idx:idx + 800]
+    idx = src.find("function _renderUpdateBannerRow(")
+    assert idx != -1, "_renderUpdateBannerRow not found"
+    end = src.find("\n}", idx)
+    block = src[idx:end]
 
     # Reset must happen BEFORE the conditional href set
-    reset_idx = block.find("style.display='none'")
-    set_idx = block.find("style.display='inline'")
+    reset_idx = block.find("link.style.display='none'")
+    set_idx = block.find("link.style.display='inline'")
     href_clear_idx = block.find("removeAttribute('href')")
     href_set_idx = block.find("link.href=repoUrl")
 
@@ -210,11 +214,14 @@ def test_whats_new_link_resets_display_and_href_on_every_render():
 
 
 def test_whats_new_link_suppressed_when_curSha_falsy():
-    """The conditional must guard on all three of repoUrl/curSha/newSha."""
+    """The conditional must guard on all three of repoUrl/curSha/newSha.
+
+    Lives inside _renderUpdateBannerRow as of issue #6.
+    """
     src = _read_ui_js()
-    idx = src.find("Wire up \"What's new?\" link")
-    block = src[idx:idx + 800]
-    # Match "if(repoUrl && curSha && newSha)" with arbitrary whitespace
+    idx = src.find("function _renderUpdateBannerRow(")
+    end = src.find("\n}", idx)
+    block = src[idx:end]
     pattern = re.compile(r'if\s*\(\s*repoUrl\s*&&\s*curSha\s*&&\s*newSha\s*\)')
     assert pattern.search(block), (
         "Link must require all three of repoUrl, curSha, newSha to be truthy. "

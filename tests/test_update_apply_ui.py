@@ -24,7 +24,8 @@ def test_update_apply_network_error_has_recovery_message_not_raw_failed_to_fetch
 def test_update_apply_structured_server_errors_still_use_json_message_path():
     """Server-reachable JSON errors must keep the existing targeted message path."""
     src = _ui_js()
-    apply_start = src.index("async function applyUpdates()")
+    # applyUpdates() now takes an explicit target arg (issue #6 — per-row banner).
+    apply_start = src.index("async function applyUpdates(target)")
     show_error_call = src.index("_showUpdateError(target,res);", apply_start)
     reset_button = src.index("resetApplyButton(0);", show_error_call)
     assert show_error_call < reset_button
@@ -44,12 +45,18 @@ def test_update_apply_network_error_classifier_ignores_http_status_errors():
 
 
 def test_update_apply_prevents_duplicate_apply_requests_while_in_flight():
-    """Double-clicks should not send a second update apply request during restart race windows."""
+    """Double-clicks should not send a second update apply request during restart race windows.
+
+    The guard moved from a single boolean to a per-target map (issue #6 —
+    per-row banner) so a webui update doesn't lock the agent button. The
+    behavioral contract — short-circuit when already in flight, set on
+    entry, clear on exit — is unchanged.
+    """
     src = _ui_js()
-    apply_start = src.index("async function applyUpdates()")
+    apply_start = src.index("async function applyUpdates(target)")
     next_fn = src.index("function _showUpdateError", apply_start)
     body = src[apply_start:next_fn]
     assert "window._updateApplyInFlight" in body
-    assert "if(window._updateApplyInFlight) return;" in body
-    assert "window._updateApplyInFlight=true;" in body
-    assert "window._updateApplyInFlight=false;" in body
+    assert "if(window._updateApplyInFlight[target]) return;" in body
+    assert "window._updateApplyInFlight[target]=true;" in body
+    assert "window._updateApplyInFlight[target]=false;" in body
