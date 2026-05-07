@@ -1,110 +1,206 @@
-/* Login page — external script, no inline handlers.
- * Loaded by the /login route. Reads data attributes from the form for
- * i18n strings so the server does not need to inject JS literals.
+/* Login page — multi-mode (issue #2).
+ *
+ * Three modes:
+ *   1. login         — username + password (default)
+ *   2. bootstrap     — first-boot: create initial admin (username + new pw + confirm pw)
+ *   3. must-change   — post-login: server flagged must_change_password,
+ *                      ask for old + new + confirm
+ *
+ * The form is the same DOM in every mode; we toggle visibility and labels
+ * via state to keep the bundle tiny (the file is loaded by /login as a
+ * static asset, no build step). Mode is decided by a probe to /api/auth/status.
  */
 document.addEventListener('DOMContentLoaded', function () {
   var form = document.getElementById('login-form');
-  var input = document.getElementById('pw');
+  var usernameInput = document.getElementById('username');
+  var pwInput = document.getElementById('pw');
+  var pwConfirmInput = document.getElementById('pw_confirm');
+  var btn = form ? form.querySelector('button') : null;
 
-  if (!form || !input) return;
+  if (!form || !usernameInput || !pwInput) return;
 
-  var invalidPw = form.getAttribute('data-invalid-pw') || 'Invalid password';
+  var invalidCreds = form.getAttribute('data-invalid-pw') || 'Invalid username or password';
   var connFailed = form.getAttribute('data-conn-failed') || 'Connection failed';
+
+  // Mode state. Default to 'login'; flipped to 'bootstrap' on probe success
+  // when first_boot=true, or to 'must-change' when login response says so.
+  var mode = 'login';
 
   function showErr(msg) {
     var err = document.getElementById('err');
     if (err) { err.textContent = msg; err.style.display = 'block'; }
   }
-
   function hideErr() {
     var err = document.getElementById('err');
     if (err) { err.style.display = 'none'; }
   }
+  function setBtnText(txt) { if (btn) btn.textContent = txt; }
 
-  // Return the ?next= redirect path if present and safe, otherwise './'
-  // Guards against open-redirect: rejects protocol-relative (//evil.com),
-  // absolute URLs, backslash variants, and control characters.
+  function applyMode() {
+    hideErr();
+    if (mode === 'bootstrap') {
+      usernameInput.style.display = '';
+      usernameInput.placeholder = 'Choose a username';
+      pwInput.style.display = '';
+      pwInput.placeholder = 'Choose a password (min 8 chars)';
+      pwInput.autocomplete = 'new-password';
+      pwConfirmInput.style.display = '';
+      pwConfirmInput.placeholder = 'Confirm password';
+      setBtnText('Create admin');
+    } else if (mode === 'must-change') {
+      usernameInput.style.display = 'none';
+      pwInput.style.display = '';
+      pwInput.placeholder = 'Current password';
+      pwInput.autocomplete = 'current-password';
+      pwConfirmInput.style.display = '';
+      pwConfirmInput.placeholder = 'New password (min 8 chars)';
+      setBtnText('Change password');
+      // Tertiary "confirm new" — reuse the same field name; we collect via
+      // the second form submission step. Keep the UX simple: ask for current,
+      // then new, then confirm — but to fit one screen we use only two
+      // password fields and validate length.
+    } else {
+      // login
+      usernameInput.style.display = '';
+      usernameInput.placeholder = 'Username';
+      pwInput.style.display = '';
+      pwInput.placeholder = 'Password';
+      pwInput.autocomplete = 'current-password';
+      pwConfirmInput.style.display = 'none';
+    }
+  }
+
   function _safeNextPath() {
     try {
       var raw = new URL(window.location.href).searchParams.get('next');
       if (!raw) return './';
-      if (raw.charAt(0) !== '/') return './';             // must be path-absolute
-      if (raw.charAt(1) === '/' || raw.charAt(1) === '\\') return './'; // reject // and \\
-      if (/[\x00-\x1f\x7f\s]/.test(raw)) return './';  // reject control chars / whitespace
+      if (raw.charAt(0) !== '/') return './';
+      if (raw.charAt(1) === '/' || raw.charAt(1) === '\\') return './';
+      if (/[\x00-\x1f\x7f\s]/.test(raw)) return './';
       return raw;
     } catch (_) { return './'; }
   }
 
-  async function doLogin(e) {
+  async function postJson(url, payload) {
+    var res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      credentials: 'include',
+    });
+    var data = {};
+    try { data = await res.json(); } catch (_) {}
+    return { ok: res.ok, status: res.status, data: data };
+  }
+
+  async function doLogin() {
+    var username = usernameInput.value.trim();
+    var password = pwInput.value;
+    if (!username) return showErr('Username required');
+    if (!password) return showErr('Password required');
+    var r = await postJson('api/auth/login', { username: username, password: password });
+    if (r.ok && r.data && r.data.ok) {
+      if (r.data.must_change_password) {
+        mode = 'must-change';
+        applyMode();
+        showErr('Password change required before continuing.');
+        pwInput.value = '';
+        pwConfirmInput.value = '';
+        pwInput.focus();
+        return;
+      }
+      window.location.href = _safeNextPath();
+    } else {
+      showErr((r.data && r.data.error) || invalidCreds);
+    }
+  }
+
+  async function doBootstrap() {
+    var username = usernameInput.value.trim();
+    var password = pwInput.value;
+    var confirm = pwConfirmInput.value;
+    if (!username) return showErr('Username required');
+    if (!password || password.length < 8) return showErr('Password must be at least 8 characters');
+    if (password !== confirm) return showErr('Passwords do not match');
+    var r = await postJson('api/auth/bootstrap', { username: username, password: password });
+    if (r.ok && r.data && r.data.ok) {
+      window.location.href = _safeNextPath();
+    } else {
+      showErr((r.data && r.data.error) || 'Bootstrap failed');
+    }
+  }
+
+  async function doChangePassword() {
+    var oldPw = pwInput.value;
+    var newPw = pwConfirmInput.value;
+    if (!oldPw) return showErr('Current password required');
+    if (!newPw || newPw.length < 8) return showErr('New password must be at least 8 characters');
+    var r = await postJson('api/auth/change_password', { old_password: oldPw, new_password: newPw });
+    if (r.ok && r.data && r.data.ok) {
+      window.location.href = _safeNextPath();
+    } else {
+      showErr((r.data && r.data.error) || 'Password change failed');
+    }
+  }
+
+  async function onSubmit(e) {
     e.preventDefault();
-    var pw = input.value;
     hideErr();
     try {
-      var res = await fetch('api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password: pw }),
-        credentials: 'include',
-      });
-      var data = {};
-      try { data = await res.json(); } catch (_) {}
-      if (res.ok && data.ok) {
-        window.location.href = _safeNextPath();
-      } else {
-        showErr(data.error || invalidPw);
-      }
+      if (mode === 'bootstrap') return await doBootstrap();
+      if (mode === 'must-change') return await doChangePassword();
+      return await doLogin();
     } catch (ex) {
       showErr(connFailed);
     }
   }
 
-  form.addEventListener('submit', doLogin);
+  form.addEventListener('submit', onSubmit);
+  pwInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); onSubmit(e); } });
+  pwConfirmInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); onSubmit(e); } });
 
-  input.addEventListener('keydown', function (e) {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      doLogin(e);
-    }
-  });
-
-  // On page load, probe the server so we can distinguish "can't reach server"
-  // (Tailscale off, wrong network) from "session expired / need to log in".
-  // Uses /health — a public endpoint, no auth required.
-  // If unreachable, retries every 3 s and auto-reloads once the server is back.
+  // Probe the server: /health for connectivity, /api/auth/status for mode.
   (function checkConnectivity() {
     var retryTimer = null;
-
     function setFormDisabled(disabled) {
-      if (input) input.disabled = disabled;
-      var btn = form.querySelector('button');
+      usernameInput.disabled = disabled;
+      pwInput.disabled = disabled;
+      pwConfirmInput.disabled = disabled;
       if (btn) btn.disabled = disabled;
     }
-
     function probe() {
       fetch('health', { method: 'GET', credentials: 'omit' })
         .then(function (r) {
           if (r.ok) {
-            // Server is reachable — if we were in retry mode, reload so the
-            // page reflects the correct auth state (expired session, etc.).
             if (retryTimer !== null) {
-              clearTimeout(retryTimer);
+              clearInterval(retryTimer);
               retryTimer = null;
               window.location.reload();
+              return;
             }
-          } else {
-            showErr(connFailed + ' (server error ' + r.status + ')');
+            // Connectivity OK → ask the server which mode we're in.
+            return fetch('api/auth/status', { method: 'GET', credentials: 'include' })
+              .then(function (sr) { return sr.json(); })
+              .then(function (status) {
+                if (status && status.first_boot) {
+                  mode = 'bootstrap';
+                  applyMode();
+                }
+              })
+              .catch(function () { /* leave mode at default */ });
           }
+          showErr(connFailed + ' (server error ' + r.status + ')');
         })
         .catch(function () {
           showErr('Cannot reach server — check your VPN / Tailscale connection.');
           setFormDisabled(true);
-          // Keep retrying so the page auto-recovers once the network is back.
           if (retryTimer === null) {
             retryTimer = setInterval(probe, 3000);
           }
         });
     }
-
     probe();
   })();
+
+  applyMode();
 });

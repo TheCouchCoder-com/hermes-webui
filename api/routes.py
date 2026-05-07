@@ -1692,7 +1692,9 @@ button:hover{background:rgba(124,185,255,.25)}
   <h1>{{BOT_NAME}}</h1>
   <p class="sub">{{LOGIN_SUBTITLE}}</p>
   <form id="login-form" data-invalid-pw="{{LOGIN_INVALID_PW}}" data-conn-failed="{{LOGIN_CONN_FAILED}}">
-    <input type="password" id="pw" placeholder="{{LOGIN_PLACEHOLDER}}" autofocus>
+    <input type="text" id="username" placeholder="Username" autocomplete="username" autofocus>
+    <input type="password" id="pw" placeholder="{{LOGIN_PLACEHOLDER}}" autocomplete="current-password">
+    <input type="password" id="pw_confirm" placeholder="Confirm password" autocomplete="new-password" style="display:none">
     <button type="submit">{{LOGIN_BTN}}</button>
   </form>
   <div class="err" id="err"></div>
@@ -1700,6 +1702,187 @@ button:hover{background:rgba(124,185,255,.25)}
 <!-- Keep login.js relative so subpath mounts load it under the current scope. -->
 <script src="static/login.js?v={{WEBUI_VERSION}}"></script>
 </body></html>"""
+
+
+# ── Multi-user auth handlers (issue #2) ──────────────────────────────────────
+
+def _set_login_cookies(handler, *, user, session_cookie):
+    """Emit Set-Cookie headers for hermes_session AND hermes_profile.
+
+    Called after a successful login or bootstrap. The profile cookie is
+    HMAC-signed (api/helpers.py:build_profile_cookie) and pinned to the
+    user's assigned_profile so they land on their workspace immediately,
+    not whatever the previous browser session had.
+    """
+    from api.auth import set_auth_cookie
+    from api.helpers import build_profile_cookie
+    set_auth_cookie(handler, session_cookie)
+    handler.send_header("Set-Cookie", build_profile_cookie(user['assigned_profile']))
+
+
+def _handle_login_post(handler, body) -> bool:
+    """POST /api/auth/login — multi-user login.
+
+    Body: {"username": "...", "password": "..."}
+
+    On success, sets BOTH hermes_session AND hermes_profile cookies.
+
+    Backwards compatibility: if no users exist (env-var legacy deployments
+    or onboarding), falls back to the legacy single-shared-password path.
+    Once .users.json is populated, the legacy fallback is no longer reached.
+    """
+    from api.auth import (
+        _check_login_rate, _record_login_attempt,
+        create_session, is_auth_enabled, set_auth_cookie,
+        verify_password, verify_user_credentials,
+    )
+    from api.users import has_users, record_login
+
+    client_ip = handler.client_address[0]
+    username = (body.get("username") or "").strip().lower()
+    password = body.get("password") or ""
+
+    # Auth disabled and no users configured → silent success (legacy behavior).
+    if not is_auth_enabled() and not has_users():
+        return j(handler, {"ok": True, "message": "Auth not enabled"})
+
+    if not _check_login_rate(client_ip, username=username or None):
+        return j(handler, {"error": "Too many attempts. Try again in a minute."}, status=429)
+
+    user = None
+    if username:
+        user = verify_user_credentials(username, password)
+
+    # Legacy fallback: if no users exist (env-var deployment), accept the
+    # plain-password form. Once any user is created, this branch never runs
+    # again because the user-credential check above takes precedence.
+    if user is None and not has_users():
+        if verify_password(password):
+            cookie_val = create_session(user_id=None)
+            handler.send_response(200)
+            handler.send_header("Content-Type", "application/json")
+            handler.send_header("Cache-Control", "no-store")
+            _security_headers(handler)
+            set_auth_cookie(handler, cookie_val)
+            handler.end_headers()
+            handler.wfile.write(json.dumps({"ok": True}).encode())
+            return True
+
+    if user is None:
+        _record_login_attempt(client_ip, username=username or None)
+        return bad(handler, "Invalid username or password", 401)
+
+    cookie_val = create_session(user_id=user['id'])
+    record_login(user['id'])
+
+    handler.send_response(200)
+    handler.send_header("Content-Type", "application/json")
+    handler.send_header("Cache-Control", "no-store")
+    _security_headers(handler)
+    _set_login_cookies(handler, user=user, session_cookie=cookie_val)
+    handler.end_headers()
+    handler.wfile.write(json.dumps({
+        "ok": True,
+        "must_change_password": bool(user.get('must_change_password')),
+    }).encode())
+    return True
+
+
+def _handle_bootstrap_post(handler, body) -> bool:
+    """POST /api/auth/bootstrap — first-boot creation of the initial admin.
+
+    Public endpoint, but only succeeds when .users.json does not exist
+    AND HERMES_WEBUI_PASSWORD env var is not set. Race-protected: re-checks
+    under the users lock before creating.
+    """
+    from api.auth import _check_login_rate, _record_login_attempt, create_session
+    from api.startup import is_first_boot
+    from api import users as users_mod
+    from api.users import UserValidationError, record_login
+
+    client_ip = handler.client_address[0]
+    if not _check_login_rate(client_ip):
+        return j(handler, {"error": "Too many attempts. Try again in a minute."}, status=429)
+
+    if not is_first_boot():
+        # Race: users were created (or env var was set) between the page
+        # load and the form submit. 409 Conflict, not 401, to make the
+        # state mismatch unambiguous.
+        return j(handler, {"error": "Bootstrap already completed"}, status=409)
+
+    username = (body.get("username") or "").strip().lower()
+    password = body.get("password") or ""
+
+    try:
+        with users_mod._users_lock:
+            # Re-check under the lock to close the race against a parallel
+            # bootstrap attempt.
+            if users_mod.has_users():
+                _record_login_attempt(client_ip)
+                return j(handler, {"error": "Bootstrap already completed"}, status=409)
+            user = users_mod.create_user(
+                username=username,
+                password=password,
+                role='admin',
+                assigned_profile='default',
+                allowed_profiles=None,
+                permissions={},
+            )
+    except UserValidationError as e:
+        _record_login_attempt(client_ip)
+        return j(handler, {"error": str(e)}, status=400)
+
+    cookie_val = create_session(user_id=user['id'])
+    record_login(user['id'])
+
+    handler.send_response(200)
+    handler.send_header("Content-Type", "application/json")
+    handler.send_header("Cache-Control", "no-store")
+    _security_headers(handler)
+    _set_login_cookies(handler, user=user, session_cookie=cookie_val)
+    handler.end_headers()
+    handler.wfile.write(json.dumps({"ok": True}).encode())
+    return True
+
+
+def _handle_change_password_post(handler, body) -> bool:
+    """POST /api/auth/change_password — current user changes their own
+    password. Required for the must_change_password flow."""
+    from api.auth import current_user, require_user, verify_user_credentials
+    from api import users as users_mod
+    from api.users import UserValidationError
+
+    user = require_user(handler)
+    if user is None:
+        return True
+    old_pw = body.get("old_password") or ""
+    new_pw = body.get("new_password") or ""
+    if not isinstance(old_pw, str) or not isinstance(new_pw, str):
+        return bad(handler, "old_password and new_password required", 400)
+
+    # Verify the old password under constant time.
+    confirmed = verify_user_credentials(user['username'], old_pw)
+    if confirmed is None:
+        return bad(handler, "Old password incorrect", 401)
+    try:
+        users_mod.update_user(user['id'], password=new_pw, must_change_password=False)
+    except UserValidationError as e:
+        return j(handler, {"error": str(e)}, status=400)
+    return j(handler, {"ok": True})
+
+
+def _handle_me_get(handler) -> bool:
+    """GET /api/me — return the current user record (without password_hash)."""
+    from api.auth import current_user, require_user
+    user = require_user(handler)
+    if user is None:
+        return True
+    return j(handler, _public_user_view(user))
+
+
+def _public_user_view(user: dict) -> dict:
+    """Strip server-only fields from a user record before serialising."""
+    return {k: v for k, v in user.items() if k != 'password_hash'}
 
 
 # ── Logs endpoint ─────────────────────────────────────────────────────────────
@@ -2439,14 +2622,32 @@ def handle_get(handler, parsed) -> bool:
         )
         return t(handler, _page, content_type="text/html; charset=utf-8")
 
+    if parsed.path == "/api/me":
+        return _handle_me_get(handler)
+
     if parsed.path == "/api/auth/status":
         from api.auth import is_auth_enabled, parse_cookie, verify_session
+        from api.startup import is_first_boot
 
+        first_boot = is_first_boot()
+        # Auth is "enabled" once any user exists OR a legacy env-var password
+        # is configured. Either way, login is required.
+        try:
+            from api.users import has_users
+            users_configured = has_users()
+        except Exception:
+            users_configured = False
+
+        auth_enabled = is_auth_enabled() or users_configured
         logged_in = False
-        if is_auth_enabled():
+        if auth_enabled:
             cv = parse_cookie(handler)
             logged_in = bool(cv and verify_session(cv))
-        return j(handler, {"auth_enabled": is_auth_enabled(), "logged_in": logged_in})
+        return j(handler, {
+            "auth_enabled": auth_enabled,
+            "logged_in": logged_in,
+            "first_boot": first_boot,
+        })
 
     if parsed.path in ("/manifest.json", "/manifest.webmanifest"):
         static_root = Path(__file__).parent.parent / "static"
@@ -4377,39 +4578,11 @@ def handle_post(handler, parsed) -> bool:
 
     # ── Auth endpoints (POST) ──
     if parsed.path == "/api/auth/login":
-        from api.auth import (
-            verify_password,
-            create_session,
-            set_auth_cookie,
-            is_auth_enabled,
-        )
-        from api.auth import _check_login_rate, _record_login_attempt
-
-        if not is_auth_enabled():
-            return j(handler, {"ok": True, "message": "Auth not enabled"})
-        client_ip = handler.client_address[0]
-        if not _check_login_rate(client_ip):
-            return j(
-                handler,
-                {"error": "Too many attempts. Try again in a minute."},
-                status=429,
-            )
-        password = body.get("password", "")
-        if not verify_password(password):
-            _record_login_attempt(client_ip)
-            return bad(handler, "Invalid password", 401)
-        cookie_val = create_session()
-        handler.send_response(200)
-        handler.send_header("Content-Type", "application/json")
-        handler.send_header("Cache-Control", "no-store")
-        _security_headers(handler)
-        set_auth_cookie(handler, cookie_val)
-        handler.end_headers()
-        handler.wfile.write(json.dumps({"ok": True}).encode())
-        return True
+        return _handle_login_post(handler, body)
 
     if parsed.path == "/api/auth/logout":
         from api.auth import clear_auth_cookie, invalidate_session, parse_cookie
+        from api.helpers import build_profile_cookie  # noqa: F401  (imported for clarity)
 
         cookie_val = parse_cookie(handler)
         if cookie_val:
@@ -4419,9 +4592,24 @@ def handle_post(handler, parsed) -> bool:
         handler.send_header("Cache-Control", "no-store")
         _security_headers(handler)
         clear_auth_cookie(handler)
+        # Clear the hermes_profile cookie too — it's bound to the logged-in
+        # session conceptually, even though the cookie itself stays valid.
+        import http.cookies as _hc
+        _pc = _hc.SimpleCookie()
+        _pc['hermes_profile'] = ''
+        _pc['hermes_profile']['path'] = '/'
+        _pc['hermes_profile']['max-age'] = '0'
+        _pc['hermes_profile']['httponly'] = True
+        handler.send_header("Set-Cookie", _pc['hermes_profile'].OutputString())
         handler.end_headers()
         handler.wfile.write(json.dumps({"ok": True}).encode())
         return True
+
+    if parsed.path == "/api/auth/bootstrap":
+        return _handle_bootstrap_post(handler, body)
+
+    if parsed.path == "/api/auth/change_password":
+        return _handle_change_password_post(handler, body)
 
     # ── Checkpoints / Rollback (POST) ──
     if parsed.path == "/api/rollback/restore":
