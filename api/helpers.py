@@ -247,13 +247,41 @@ def read_body(handler) -> dict:
         return {}
 
 
-# ── Profile cookie helpers (issue #798) ─────────────────────────────────────
+# ── Profile cookie helpers (issue #798, hardened in #2) ─────────────────────
 
 PROFILE_COOKIE_NAME = 'hermes_profile'
 
+# Cookie format: "<profile_name>.<32-hex sig>" where sig is
+#   hmac_sha256(_signing_key, profile_name.encode())[:32].hex()
+# Identical scheme to the hermes_session cookie. The signature prevents a
+# logged-in user from hand-editing their cookie to escalate into another
+# profile (see issue #2 / multi-user RBAC); allowed_profiles enforcement on
+# /api/profile/switch is the hard wall, the signature is tamper-evidence.
+
+# Transition: an unsigned cookie (no '.') is silently rejected by default,
+# logging the user back to their assigned profile via the next switch. Set
+# HERMES_WEBUI_ACCEPT_UNSIGNED_PROFILE_COOKIE=1 to keep accepting the legacy
+# format for one transition release. Conftest enables this for tests.
+
+
+def _profile_cookie_signature(name: str) -> str:
+    """HMAC-SHA256 signature of a profile name. Hex, truncated to 32 chars
+    to match the hermes_session cookie format."""
+    import hashlib
+    import hmac
+    from api.auth import _signing_key
+    return hmac.new(_signing_key(), name.encode('utf-8'), hashlib.sha256).hexdigest()[:32]
+
+
+def _accept_unsigned_profile_cookie() -> bool:
+    import os
+    return os.environ.get('HERMES_WEBUI_ACCEPT_UNSIGNED_PROFILE_COOKIE', '').strip() == '1'
+
 
 def get_profile_cookie(handler) -> str | None:
-    """Extract the hermes_profile cookie value from the request, or None."""
+    """Extract and verify the hermes_profile cookie value from the request,
+    or None if the cookie is missing, malformed, or fails signature check."""
+    import hmac as _hmac
     cookie_header = handler.headers.get('Cookie', '')
     if not cookie_header:
         return None
@@ -264,30 +292,44 @@ def get_profile_cookie(handler) -> str | None:
     except _hc.CookieError:
         return None
     morsel = cookie.get(PROFILE_COOKIE_NAME)
-    if morsel and morsel.value:
-        # Validate against profile-name pattern before trusting
-        from api.profiles import _PROFILE_ID_RE
-        val = morsel.value
-        if val == 'default' or _PROFILE_ID_RE.fullmatch(val):
-            return val
+    if not morsel or not morsel.value:
+        return None
+    raw = morsel.value
+    name: str
+    if '.' in raw:
+        name, _, sig = raw.rpartition('.')
+        if not name:
+            return None
+        try:
+            expected = _profile_cookie_signature(name)
+        except Exception:
+            return None
+        if not _hmac.compare_digest(sig, expected):
+            return None
+    else:
+        # Legacy unsigned cookie (pre-issue #2). Accepted only during transition.
+        if not _accept_unsigned_profile_cookie():
+            return None
+        name = raw
+    # Validate the recovered name against the profile-name pattern.
+    from api.profiles import _PROFILE_ID_RE
+    if name == 'default' or _PROFILE_ID_RE.fullmatch(name):
+        return name
     return None
 
 
 def build_profile_cookie(name: str) -> str:
     """Build a Set-Cookie header value for the hermes_profile cookie.
 
-    Always persist the selected profile in the cookie, including 'default'.
-    Clearing the cookie causes the backend to fall back to process-global
-    _active_profile, which can unexpectedly switch clients back to another
-    profile.
-
-    Set HttpOnly because the UI reads the active profile from
-    /api/profile/active JSON and does not need to access this cookie via
-    document.cookie.
+    The cookie value is HMAC-signed (see module docstring). Always persists
+    the selected profile, including 'default', so the backend never falls
+    back to the process-global _active_profile mid-session.
     """
     import http.cookies as _hc
+    sig = _profile_cookie_signature(name)
+    signed = f"{name}.{sig}"
     cookie = _hc.SimpleCookie()
-    cookie[PROFILE_COOKIE_NAME] = name
+    cookie[PROFILE_COOKIE_NAME] = signed
     cookie[PROFILE_COOKIE_NAME]['path'] = '/'
     cookie[PROFILE_COOKIE_NAME]['httponly'] = True
     cookie[PROFILE_COOKIE_NAME]['samesite'] = 'Lax'

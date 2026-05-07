@@ -74,6 +74,14 @@ os.environ['HERMES_BASE_HOME'] = str(TEST_STATE_DIR)
 # tests that read/write config.yaml stay inside the isolated test home.
 os.environ['HERMES_CONFIG_PATH'] = str(TEST_STATE_DIR / 'config.yaml')
 
+# Transition flag for issue #2: many existing tests construct hermes_profile
+# cookies as bare strings (e.g. 'hermes_profile=work'). Honour the legacy
+# unsigned format during the transition window so those tests remain
+# meaningful while the multi-user RBAC machinery is wired in. The signed-
+# cookie code path is exercised explicitly by
+# tests/test_issue2_profile_cookie_signing.py and removed in commit 9.
+os.environ.setdefault('HERMES_WEBUI_ACCEPT_UNSIGNED_PROFILE_COOKIE', '1')
+
 # ── Server script: always relative to repo root ───────────────────────────
 SERVER_SCRIPT = REPO_ROOT / 'server.py'
 if not SERVER_SCRIPT.exists():
