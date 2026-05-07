@@ -12,9 +12,16 @@ def test_app_titlebar_no_longer_contains_tps_chip():
     assert 'id="tpsStat"' not in INDEX_HTML
 
 
-def test_app_titlebar_returns_to_centered_desktop_layout():
-    assert ".app-titlebar{display:flex;align-items:center;justify-content:center;" in STYLE_CSS
-    assert ".app-titlebar-inner{display:flex;align-items:center;gap:8px;min-width:0;max-width:100%;justify-content:center;}" in STYLE_CSS
+def test_app_titlebar_uses_three_column_flex_layout():
+    """
+    Issue #1 added a profile chip to the right of the titlebar, so the layout
+    moved from centered (justify-content:center) to three-column flex
+    (hamburger | inner | right). The inner block keeps justify-content:center
+    so the title stays visually centered when the right slot is empty.
+    """
+    assert ".app-titlebar{display:flex;align-items:center;justify-content:space-between;" in STYLE_CSS
+    assert ".app-titlebar-inner{display:flex;align-items:center;gap:8px;min-width:0;flex:1 1 auto;justify-content:center;}" in STYLE_CSS
+    assert ".app-titlebar-right{" in STYLE_CSS
 
 
 def test_app_titlebar_subtitle_shows_message_count_again():

@@ -865,7 +865,7 @@ def test_workspace_control_lives_in_mobile_overflow_panel():
 
     panels_js = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
     pos_start = panels_js.index("function _positionComposerWsDropdown()")
-    pos_end = panels_js.index("function _positionProfileDropdown()", pos_start)
+    pos_end = panels_js.index("function _positionProfileDropdown(", pos_start)
     position_body = panels_js[pos_start:pos_end]
     assert "composerMobileWorkspaceAction" in position_body, \
         "workspace dropdown positioning must know the mobile workspace action"

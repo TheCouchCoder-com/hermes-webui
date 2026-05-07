@@ -2962,16 +2962,25 @@ function _positionComposerWsDropdown(){
   dd.style.left=`${left}px`;
 }
 
-function _positionProfileDropdown(){
+function _positionProfileDropdown(anchor){
+  // Position the profile dropdown in viewport coordinates so it can attach to
+  // either the composer chip (opens above) or the titlebar chip (opens below).
   const dd=$('profileDropdown');
-  const chip=$('profileChip');
-  const footer=document.querySelector('.composer-footer');
-  if(!dd||!chip||!footer)return;
-  const chipRect=chip.getBoundingClientRect();
-  const footerRect=footer.getBoundingClientRect();
-  let left=chipRect.left-footerRect.left;
-  const maxLeft=Math.max(0, footer.clientWidth-dd.offsetWidth);
-  left=Math.max(0, Math.min(left, maxLeft));
+  const anchorEl=anchor||$('profileChip');
+  if(!dd||!anchorEl)return;
+  const r=anchorEl.getBoundingClientRect();
+  // Open below for titlebar chip (top of page), above for composer chip (bottom of page).
+  const openBelow = anchorEl.id === 'profileChipTitlebar';
+  const ddH = dd.offsetHeight || 380;
+  const ddW = dd.offsetWidth || 260;
+  const gap = 4;
+  let top  = openBelow ? (r.bottom + gap) : (r.top - ddH - gap);
+  // Prefer right-align under the titlebar chip; left-align under the composer chip.
+  let left = openBelow ? (r.right - ddW) : r.left;
+  // Clamp to viewport so the dropdown is always fully visible.
+  left = Math.max(8, Math.min(left, window.innerWidth - ddW - 8));
+  top  = Math.max(8, Math.min(top,  window.innerHeight - ddH - 8));
+  dd.style.top=`${top}px`;
   dd.style.left=`${left}px`;
 }
 
@@ -3737,33 +3746,39 @@ function renderProfileDropdown(data) {
   dd.appendChild(mgmt);
 }
 
-function toggleProfileDropdown() {
+function toggleProfileDropdown(anchor) {
   const dd = $('profileDropdown');
   if (!dd) return;
   if (dd.classList.contains('open')) { closeProfileDropdown(); return; }
   closeWsDropdown(); // close workspace dropdown if open
   if(typeof closeModelDropdown==='function') closeModelDropdown();
+  // Remember which chip opened the dropdown so resize/reposition stays correct.
+  const anchorEl = (anchor && anchor.id) ? anchor : $('profileChip');
+  dd.dataset.anchorId = anchorEl ? anchorEl.id : 'profileChip';
   api('/api/profiles').then(data => {
     renderProfileDropdown(data);
     dd.classList.add('open');
-    _positionProfileDropdown();
-    const chip=$('profileChip');
-    if(chip) chip.classList.add('active');
+    _positionProfileDropdown(anchorEl);
+    _forEachProfileChip(c => { c.classList.add('active'); c.setAttribute('aria-expanded','true'); });
   }).catch(e => { showToast(t('profiles_load_failed')); });
 }
 
 function closeProfileDropdown() {
   const dd = $('profileDropdown');
-  if (dd) dd.classList.remove('open');
-  const chip=$('profileChip');
-  if(chip) chip.classList.remove('active');
+  if (dd) { dd.classList.remove('open'); dd.removeAttribute('data-anchor-id'); }
+  _forEachProfileChip(c => { c.classList.remove('active'); c.setAttribute('aria-expanded','false'); });
 }
 document.addEventListener('click', e => {
-  if (!e.target.closest('#profileChipWrap') && !e.target.closest('#profileDropdown')) closeProfileDropdown();
+  if (!e.target.closest('#profileChipWrap')
+      && !e.target.closest('#profileChipTitlebarWrap')
+      && !e.target.closest('#profileDropdown')) closeProfileDropdown();
 });
 window.addEventListener('resize',()=>{
   const dd=$('profileDropdown');
-  if(dd&&dd.classList.contains('open')) _positionProfileDropdown();
+  if(dd&&dd.classList.contains('open')){
+    const anchorId = dd.dataset.anchorId || 'profileChip';
+    _positionProfileDropdown(document.getElementById(anchorId));
+  }
 });
 
 async function switchToProfile(name) {
@@ -3778,8 +3793,11 @@ async function switchToProfile(name) {
   const _chipLabel = $('profileChipLabel');
   const _prevProfileName = S.activeProfile || 'default';
   if (_chip) { _chip.classList.add('switching'); _chip.disabled = true; }
-  // Optimistic name update — shows the target name right away
+  // Mirror the spinner/disabled state on the titlebar chip so both surfaces feel coherent.
+  _forEachProfileChip(c => { if (c !== _chip) { c.classList.add('switching'); c.disabled = true; } });
+  // Optimistic name update — shows the target name right away on both chips.
   if (_chipLabel) _chipLabel.textContent = name;
+  _setProfileChipLabel(name);
 
   // Determine whether the current session has any messages.
   // A session with messages is "in progress" and belongs to the current profile —
@@ -3890,12 +3908,14 @@ async function switchToProfile(name) {
     if (_currentPanel === 'workspaces') await loadWorkspacesPanel();
 
   } catch (e) {
-    // Revert the optimistic name update on error
+    // Revert the optimistic name update on error (both chips).
     if (_chipLabel) _chipLabel.textContent = _prevProfileName;
+    _setProfileChipLabel(_prevProfileName);
     showToast(t('switch_failed') + e.message);
   } finally {
-    // Always remove loading indicator regardless of success or failure
+    // Always remove loading indicator regardless of success or failure (both chips).
     if (_chip) { _chip.classList.remove('switching'); _chip.disabled = false; }
+    _forEachProfileChip(c => { if (c !== _chip) { c.classList.remove('switching'); c.disabled = false; } });
   }
 }
 

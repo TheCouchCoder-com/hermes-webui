@@ -3592,6 +3592,30 @@ async function checkInflightOnBoot(sid) {
   } catch(e) { clearInflight(); }
 }
 
+// Profile chip helpers — both the composer footer (#profileChip) and the
+// app titlebar (#profileChipTitlebar) render the active profile and drive
+// the same dropdown. Use these helpers to keep them in sync.
+function _setProfileChipLabel(name){
+  const a=document.getElementById('profileChipLabel');
+  const b=document.getElementById('profileChipTitlebarLabel');
+  if(a) a.textContent=name;
+  if(b) b.textContent=name;
+  // On phone widths the titlebar chip collapses to icon-only, so the visible
+  // label is hidden. Carry the profile name in aria-label for screen readers.
+  const tb=document.getElementById('profileChipTitlebar');
+  if(tb){
+    const tpl=(typeof t==='function')?t('profile_switch_title'):'Switch profile';
+    tb.setAttribute('aria-label', tpl + ' (' + name + ')');
+  }
+}
+function _forEachProfileChip(fn){
+  const ids=['profileChip','profileChipTitlebar'];
+  for(const id of ids){
+    const c=document.getElementById(id);
+    if(c) fn(c);
+  }
+}
+
 function syncTopbar(){
   if(!S.session){
     document.title=window._botName||'Hermes';
@@ -3606,9 +3630,10 @@ function syncTopbar(){
       }
     }
     if(typeof syncAppTitlebar==='function') syncAppTitlebar();
-    // Update profile chip even when no session is active (e.g. right after profile switch)
-    const _profileLabel=$('profileChipLabel');
-    if(_profileLabel) _profileLabel.textContent=S.activeProfile||'default';
+    // Update profile chip even when no session is active (e.g. right after profile switch).
+    // Both #profileChipLabel (composer) and #profileChipTitlebarLabel (titlebar) are kept
+    // in sync via _setProfileChipLabel.
+    _setProfileChipLabel(S.activeProfile||'default');
     return;
   }
   const sessionTitle=S.session.title||t('untitled');
@@ -3684,9 +3709,8 @@ function syncTopbar(){
   if(typeof syncWorkspaceDisplays==='function') syncWorkspaceDisplays();
   if(typeof syncTerminalButton==='function') syncTerminalButton();
   // modelSelect already set above
-  // Update profile chip label
-  const profileLabel=$('profileChipLabel');
-  if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
+  // Update profile chip labels (composer + titlebar)
+  _setProfileChipLabel(S.activeProfile||'default');
 }
 
 function msgContent(m){

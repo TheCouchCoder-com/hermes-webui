@@ -1314,9 +1314,11 @@ function applyBotName(){
   }
   // Fetch active profile
   try{const p=await api('/api/profile/active');S.activeProfile=p.name||'default';}catch(e){S.activeProfile='default';}
-  // Update profile chip label immediately
-  const profileLabel=$('profileChipLabel');
-  if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
+  // Update profile chip labels (composer + titlebar) immediately and reveal
+  // the titlebar chip wrap once we know the active profile.
+  _setProfileChipLabel(S.activeProfile||'default');
+  const _tbWrap=$('profileChipTitlebarWrap');
+  if(_tbWrap) _tbWrap.removeAttribute('hidden');
   // Fetch current user (issue #2). Reveal admin tabs only for admin role.
   // 401 is expected when auth is disabled (legacy / fresh install) — don't
   // surface those as errors.
