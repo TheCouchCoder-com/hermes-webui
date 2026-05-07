@@ -292,17 +292,47 @@ def require_user(handler):
     record. Sends 401 and returns None on failure; returns the user record
     on success.
 
+    When auth is disabled (no legacy password and no users configured),
+    returns a synthetic "anonymous admin" record so any caller that gates
+    on require_user / require_admin / require_perm passes through. This
+    preserves the legacy "auth off = wide open" contract that existing
+    callers (and tests) depend on. Once any user is created, real auth
+    kicks in and this fallback is bypassed.
+
     Callers pattern:
         u = require_user(handler)
         if u is None:
             return True   # response already sent; abort handler
         ...
     """
+    if not is_auth_enabled():
+        return _ANONYMOUS_ADMIN
     user = current_user(handler)
     if user is None:
         _send_json(handler, 401, {'error': 'authentication required'})
         return None
     return user
+
+
+# Synthetic record returned by require_* when auth is disabled. role==admin
+# so require_admin and require_perm both pass; manage_users is True so the
+# admin endpoints behave consistently. Not persisted, not returned by
+# /api/me — only handed back from require_user as an in-memory shim.
+_ANONYMOUS_ADMIN = {
+    'id': '__anonymous__',
+    'username': '__anonymous__',
+    'role': 'admin',
+    'assigned_profile': 'default',
+    'allowed_profiles': None,
+    'permissions': {
+        'switch_profile': True,
+        'edit_settings': True,
+        'manage_cron': True,
+        'manage_skills': True,
+        'manage_users': True,
+    },
+    'must_change_password': False,
+}
 
 
 def require_admin(handler):

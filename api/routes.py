@@ -4182,38 +4182,56 @@ def handle_post(handler, parsed) -> bool:
     # See GET-side comment above: wrap in cron_profile_context so writes go
     # to the TLS-active profile's jobs.json instead of the process default.
     if parsed.path == "/api/crons/create":
+        from api.auth import require_perm
         from api.profiles import cron_profile_context
 
+        if require_perm(handler, 'manage_cron') is None:
+            return True
         with cron_profile_context():
             return _handle_cron_create(handler, body)
 
     if parsed.path == "/api/crons/update":
+        from api.auth import require_perm
         from api.profiles import cron_profile_context
 
+        if require_perm(handler, 'manage_cron') is None:
+            return True
         with cron_profile_context():
             return _handle_cron_update(handler, body)
 
     if parsed.path == "/api/crons/delete":
+        from api.auth import require_perm
         from api.profiles import cron_profile_context
 
+        if require_perm(handler, 'manage_cron') is None:
+            return True
         with cron_profile_context():
             return _handle_cron_delete(handler, body)
 
     if parsed.path == "/api/crons/run":
+        from api.auth import require_perm
         from api.profiles import cron_profile_context
 
+        if require_perm(handler, 'manage_cron') is None:
+            return True
         with cron_profile_context():
             return _handle_cron_run(handler, body)
 
     if parsed.path == "/api/crons/pause":
+        from api.auth import require_perm
         from api.profiles import cron_profile_context
 
+        if require_perm(handler, 'manage_cron') is None:
+            return True
         with cron_profile_context():
             return _handle_cron_pause(handler, body)
 
     if parsed.path == "/api/crons/resume":
+        from api.auth import require_perm
         from api.profiles import cron_profile_context
 
+        if require_perm(handler, 'manage_cron') is None:
+            return True
         with cron_profile_context():
             return _handle_cron_resume(handler, body)
 
@@ -4259,9 +4277,15 @@ def handle_post(handler, parsed) -> bool:
 
     # ── Skills (POST) ──
     if parsed.path == "/api/skills/save":
+        from api.auth import require_perm
+        if require_perm(handler, 'manage_skills') is None:
+            return True
         return _handle_skill_save(handler, body)
 
     if parsed.path == "/api/skills/delete":
+        from api.auth import require_perm
+        if require_perm(handler, 'manage_skills') is None:
+            return True
         return _handle_skill_delete(handler, body)
 
     # ── Memory (POST) ──
@@ -4377,9 +4401,25 @@ def handle_post(handler, parsed) -> bool:
             create_session,
             is_auth_enabled,
             parse_cookie,
+            require_perm,
             set_auth_cookie,
             verify_session,
         )
+
+        # Gate settings mutations behind the edit_settings permission, with
+        # an allowlist of personal-display keys that any logged-in user may
+        # toggle (theme, skin, show_thinking, show_token_usage). Anything
+        # else — bot_name, default_workspace, password set/clear, etc. —
+        # requires the perm. Admins always pass.
+        # Skipped on the legacy / first-boot path (no users configured) so
+        # the /api/auth/bootstrap → set-password flow keeps working.
+        from api.users import has_users
+        _PERSONAL_SETTINGS_KEYS = {'theme', 'skin', 'show_thinking', 'show_token_usage'}
+        _body_keys = set(body.keys()) if isinstance(body, dict) else set()
+        _wants_admin_only_change = bool(_body_keys - _PERSONAL_SETTINGS_KEYS)
+        if has_users() and _wants_admin_only_change:
+            if require_perm(handler, 'edit_settings') is None:
+                return True
 
         if "bot_name" in body:
             body["bot_name"] = (str(body["bot_name"]) or "").strip() or "Hermes"
