@@ -178,6 +178,21 @@ def test_admin_form_validates_password_confirmation():
         "Mismatch must surface inline to the admin"
 
 
+def test_main_admin_view_is_gated_by_showing_admin_class():
+    """The .main-view container is shared by every panel; each one is
+    hidden by default and revealed only when its showing-* class is on
+    main.main. If #mainAdmin isn't in all three rules (hide list, chat
+    fallback :not() chain, and showing-admin reveal), the admin pane
+    bleeds through on top of chat and other panels."""
+    css = (ROOT / 'static' / 'style.css').read_text(encoding='utf-8')
+    assert 'main.main > #mainAdmin' in css, \
+        "#mainAdmin missing from the hide-by-default block — it'll show on every page"
+    assert ':not(.showing-admin)' in css, \
+        "chat fallback :not() chain must exclude showing-admin"
+    assert 'main.main.showing-admin > #mainAdmin{display:flex' in css, \
+        "no rule reveals #mainAdmin when admin tab is active"
+
+
 def test_admin_admin_role_greys_allowed_profiles_with_note():
     """When role=admin the allowed-profiles checklist is disabled and a
     note reminds the operator that admins access all profiles."""
