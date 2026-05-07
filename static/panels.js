@@ -5547,20 +5547,44 @@ async function _restoreCheckpoint(workspace,checkpoint,message){
 }
 
 // ── Admin panel (issue #2: multi-user RBAC) ────────────────────────────────-
-// Render-only logic — every mutation goes through /api/admin/users endpoints
-// which enforce role==admin server-side. The admin tab is hidden from
-// non-admins via #adminRailBtn / #adminMobileBtn display:none controlled at
-// boot.js by the /api/me probe.
+// Three-pane layout mirrors the Profiles panel: the sidebar lists users, the
+// middle pane shows detail + inline forms, and header buttons drive mode
+// transitions. Every mutation goes through /api/admin/users which enforces
+// role==admin server-side. The admin tab is hidden from non-admins via
+// #adminRailBtn / #adminMobileBtn (controlled by boot.js's /api/me probe).
+
+const ADMIN_PERMISSION_KEYS = ['switch_profile','edit_settings','manage_cron','manage_skills'];
+const ADMIN_PERMISSION_LABELS = {
+  switch_profile: 'Switch profile',
+  edit_settings: 'Edit settings',
+  manage_cron: 'Manage cron',
+  manage_skills: 'Manage skills',
+};
 
 let _adminUsers = [];
+let _adminProfiles = [];           // [{name, ...}, ...] from /api/profiles
+let _currentAdminUser = null;      // currently-selected user record, or null
+let _adminMode = 'empty';          // 'empty' | 'read' | 'edit' | 'create' | 'reset'
 
 async function loadAdminPanel(){
   const root = document.getElementById('adminPanel');
   if (!root) return;
   try {
-    const data = await api('/api/admin/users');
-    _adminUsers = (data && data.users) || [];
+    const [usersData, profilesData] = await Promise.all([
+      api('/api/admin/users'),
+      api('/api/profiles').catch(() => ({ profiles: [] })),
+    ]);
+    _adminUsers = (usersData && usersData.users) || [];
+    _adminProfiles = (profilesData && profilesData.profiles) || [];
     _renderAdminUserList(root);
+    // Re-render detail with fresh data if we have one and we're not in a form.
+    if (_currentAdminUser && _adminMode === 'read') {
+      const refreshed = _adminUsers.find(u => u.id === _currentAdminUser.id);
+      if (refreshed) _renderAdminDetail(refreshed);
+      else _clearAdminDetail();
+    } else if (_adminMode === 'empty') {
+      _clearAdminDetail();
+    }
   } catch (e) {
     root.innerHTML = '<div style="color:var(--error);font-size:12px;padding:8px">' +
       esc(e.message || 'Failed to load users') + '</div>';
@@ -5568,133 +5592,391 @@ async function loadAdminPanel(){
 }
 
 function _renderAdminUserList(root){
+  root.innerHTML = '';
   if (!_adminUsers.length){
     root.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:8px">No users yet.</div>';
     return;
   }
-  const items = _adminUsers.map(u => {
+  for (const u of _adminUsers) {
+    const card = document.createElement('div');
+    card.className = 'profile-card';
+    card.dataset.userId = u.id;
     const roleBadge = u.role === 'admin'
-      ? '<span style="color:var(--accent-text);font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;background:var(--accent-bg)">ADMIN</span>'
-      : '<span style="color:var(--muted);font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;background:var(--hover-bg)">USER</span>';
+      ? '<span class="detail-badge active" style="margin-left:6px">admin</span>'
+      : '';
     const lastLogin = u.last_login_at
-      ? '<div style="color:var(--muted);font-size:11px">last login: ' + esc(u.last_login_at) + '</div>'
-      : '<div style="color:var(--muted);font-size:11px">never logged in</div>';
-    return (
-      '<div class="detail-card" style="margin-bottom:8px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface)">' +
-        '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">' +
-          '<strong>' + esc(u.username) + '</strong>' + roleBadge +
+      ? 'last login: ' + esc(u.last_login_at)
+      : 'never logged in';
+    const meta = 'profile: ' + esc(u.assigned_profile || 'default') + ' · ' + lastLogin;
+    card.innerHTML =
+      '<div class="profile-card-header">' +
+        '<div style="min-width:0;flex:1">' +
+          '<div class="profile-card-name">' + esc(u.username) + roleBadge + '</div>' +
+          '<div class="profile-card-meta">' + meta + '</div>' +
         '</div>' +
-        '<div style="color:var(--muted);font-size:11px">profile: ' + esc(u.assigned_profile || 'default') + '</div>' +
-        lastLogin +
-        '<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">' +
-          '<button class="panel-action-btn" onclick="adminEditUser(\'' + u.id + '\')">Edit</button>' +
-          '<button class="panel-action-btn" onclick="adminResetPassword(\'' + u.id + '\')">Reset password</button>' +
-          '<button class="panel-action-btn" style="color:var(--error)" onclick="adminDeleteUser(\'' + u.id + '\')">Delete</button>' +
-        '</div>' +
-      '</div>'
-    );
-  }).join('');
-  root.innerHTML = items;
+      '</div>';
+    card.onclick = () => openAdminUserDetail(u.id, card);
+    if (_currentAdminUser && _currentAdminUser.id === u.id) card.classList.add('active');
+    root.appendChild(card);
+  }
 }
 
-async function openAdminUserCreate(){
-  const username = await showPromptDialog({
-    title: 'Create user',
-    label: 'Username',
-    placeholder: 'lowercase letters, numbers, . _ -',
-    confirm: 'Next',
-  });
-  if (!username) return;
-  const password = await showPromptDialog({
-    title: 'Create user',
-    label: 'Password (min 8 chars)',
-    inputType: 'password',
-    confirm: 'Next',
-  });
-  if (!password) return;
-  const role = await showPromptDialog({
-    title: 'Create user',
-    label: 'Role: type "admin" or leave blank for "user"',
-    placeholder: 'user',
-    confirm: 'Create',
-  });
-  if (role === null) return;
+function openAdminUserDetail(userId, el){
+  const user = _adminUsers.find(u => u.id === userId);
+  if (!user) return;
+  document.querySelectorAll('#adminPanel .profile-card').forEach(e => e.classList.remove('active'));
+  const target = el || document.querySelector('#adminPanel .profile-card[data-user-id="' + CSS.escape(userId) + '"]');
+  if (target) target.classList.add('active');
+  _renderAdminDetail(user);
+}
+
+function _renderAdminDetail(user){
+  _currentAdminUser = user;
+  const title = $('adminDetailTitle');
+  const body = $('adminDetailBody');
+  const empty = $('adminDetailEmpty');
+  if (!title || !body) return;
+  title.textContent = user.username;
+  const isAdmin = user.role === 'admin';
+  const roleBadge = isAdmin
+    ? '<span class="detail-badge active">admin</span>'
+    : '<span class="detail-badge">user</span>';
+  const lastLogin = user.last_login_at
+    ? '<code>' + esc(user.last_login_at) + '</code>'
+    : '<span style="color:var(--muted)">never</span>';
+  const created = user.created_at
+    ? '<code>' + esc(user.created_at) + '</code>'
+    : '<span style="color:var(--muted)">unknown</span>';
+  const allowed = Array.isArray(user.allowed_profiles) && user.allowed_profiles.length
+    ? user.allowed_profiles.map(p => '<code>' + esc(p) + '</code>').join(' ')
+    : (isAdmin ? '<span style="color:var(--muted)">all profiles (admin)</span>'
+                : '<span style="color:var(--muted)">all profiles</span>');
+  const perms = ADMIN_PERMISSION_KEYS.map(k => {
+    const on = isAdmin || ((user.permissions || {})[k] === true);
+    const dot = on ? '✓' : '—';
+    const cls = on ? 'detail-badge active' : 'detail-badge';
+    return '<div class="detail-row"><div class="detail-row-label">' + esc(ADMIN_PERMISSION_LABELS[k]) + '</div>' +
+      '<div class="detail-row-value"><span class="' + cls + '">' + dot + '</span></div></div>';
+  }).join('');
+  body.innerHTML =
+    '<div class="main-view-content">' +
+      '<div class="detail-card">' +
+        '<div class="detail-card-title">User</div>' +
+        '<div class="detail-row"><div class="detail-row-label">Username</div><div class="detail-row-value"><code>' + esc(user.username) + '</code></div></div>' +
+        '<div class="detail-row"><div class="detail-row-label">Role</div><div class="detail-row-value">' + roleBadge + '</div></div>' +
+        '<div class="detail-row"><div class="detail-row-label">Assigned profile</div><div class="detail-row-value"><code>' + esc(user.assigned_profile || 'default') + '</code></div></div>' +
+        '<div class="detail-row"><div class="detail-row-label">Allowed profiles</div><div class="detail-row-value">' + allowed + '</div></div>' +
+        '<div class="detail-row"><div class="detail-row-label">Last login</div><div class="detail-row-value">' + lastLogin + '</div></div>' +
+        '<div class="detail-row"><div class="detail-row-label">Created</div><div class="detail-row-value">' + created + '</div></div>' +
+      '</div>' +
+      '<div class="detail-card" style="margin-top:12px">' +
+        '<div class="detail-card-title">Permissions</div>' +
+        perms +
+      '</div>' +
+    '</div>';
+  body.style.display = '';
+  if (empty) empty.style.display = 'none';
+  _adminMode = 'read';
+  _setAdminHeaderButtons('read');
+}
+
+function _clearAdminDetail(){
+  _currentAdminUser = null;
+  _adminMode = 'empty';
+  const title = $('adminDetailTitle');
+  const body = $('adminDetailBody');
+  const empty = $('adminDetailEmpty');
+  if (title) title.textContent = '';
+  if (body) { body.innerHTML = ''; body.style.display = 'none'; }
+  if (empty) empty.style.display = '';
+  _setAdminHeaderButtons('empty');
+}
+
+function _setAdminHeaderButtons(mode){
+  const editBtn = $('btnEditAdminUser');
+  const resetBtn = $('btnResetPwAdminUser');
+  const delBtn = $('btnDeleteAdminUser');
+  const cancelBtn = $('btnCancelAdminDetail');
+  const saveBtn = $('btnSaveAdminDetail');
+  const show = b => b && (b.style.display = '');
+  const hide = b => b && (b.style.display = 'none');
+  [editBtn, resetBtn, delBtn, cancelBtn, saveBtn].forEach(hide);
+  if (mode === 'read') { show(editBtn); show(resetBtn); show(delBtn); }
+  else if (mode === 'edit' || mode === 'create' || mode === 'reset') { show(cancelBtn); show(saveBtn); }
+}
+
+// ── Form rendering ─────────────────────────────────────────────────────────
+// All three forms (create / edit / reset) render inside #adminDetailBody so
+// the action buttons in the header act on whichever form is mounted.
+
+function _profileSelectOptions(selected){
+  const names = _adminProfiles.length ? _adminProfiles.map(p => p.name) : ['default'];
+  return names.map(n =>
+    '<option value="' + esc(n) + '"' + (n === selected ? ' selected' : '') + '>' + esc(n) + '</option>'
+  ).join('');
+}
+
+function _allowedProfilesChecklist(allowed, isAdmin){
+  const names = _adminProfiles.length ? _adminProfiles.map(p => p.name) : ['default'];
+  const allowedSet = new Set(Array.isArray(allowed) ? allowed : []);
+  const noneAllowed = !Array.isArray(allowed); // null/undefined = all
+  const note = isAdmin
+    ? '<div style="color:var(--muted);font-size:11px;margin-top:4px">Admins can access all profiles regardless of this setting.</div>'
+    : '<div style="color:var(--muted);font-size:11px;margin-top:4px">Leave all unchecked to allow every profile.</div>';
+  const items = names.map(n => {
+    const checked = noneAllowed ? false : allowedSet.has(n);
+    return '<label style="display:inline-flex;align-items:center;gap:6px;margin-right:12px;font-size:13px">' +
+      '<input type="checkbox" data-profile-allow="' + esc(n) + '"' +
+        (checked ? ' checked' : '') + (isAdmin ? ' disabled' : '') + '>' +
+      esc(n) + '</label>';
+  }).join('');
+  return '<div' + (isAdmin ? ' style="opacity:.55"' : '') + '>' + items + '</div>' + note;
+}
+
+function _renderAdminFormError(msg){
+  const el = $('adminFormError');
+  if (!el) return;
+  if (msg) { el.textContent = msg; el.style.display = ''; }
+  else { el.textContent = ''; el.style.display = 'none'; }
+}
+
+function adminBeginCreate(){
+  _currentAdminUser = null;
+  document.querySelectorAll('#adminPanel .profile-card').forEach(e => e.classList.remove('active'));
+  const title = $('adminDetailTitle');
+  const body = $('adminDetailBody');
+  const empty = $('adminDetailEmpty');
+  if (title) title.textContent = 'Create user';
+  if (empty) empty.style.display = 'none';
+  if (!body) return;
+  body.style.display = '';
+  body.innerHTML =
+    '<div class="main-view-content">' +
+      '<div class="detail-card">' +
+        '<div class="detail-card-title">New user</div>' +
+        '<div id="adminFormError" class="detail-form-error" style="display:none;color:var(--error);font-size:12px;padding:6px 0"></div>' +
+        _formRow('Username', '<input type="text" id="adminFormUsername" placeholder="lowercase letters, numbers, . _ -" autocomplete="off" style="width:100%">') +
+        _formRow('Password', '<input type="password" id="adminFormPassword" placeholder="min 8 characters" autocomplete="new-password" style="width:100%">') +
+        _formRow('Confirm password', '<input type="password" id="adminFormPasswordConfirm" placeholder="re-enter password" autocomplete="new-password" style="width:100%">') +
+        _formRow('Role',
+          '<select id="adminFormRole" style="width:100%">' +
+            '<option value="user" selected>user</option>' +
+            '<option value="admin">admin</option>' +
+          '</select>') +
+        _formRow('Assigned profile',
+          '<select id="adminFormAssignedProfile" style="width:100%">' + _profileSelectOptions('default') + '</select>') +
+        _formRow('Allowed profiles', _allowedProfilesChecklist(null, false)) +
+      '</div>' +
+    '</div>';
+  // Hook role change to grey/un-grey the allowed-profiles list live.
+  const roleSel = $('adminFormRole');
+  if (roleSel) roleSel.addEventListener('change', _adminRefreshAllowedFromForm);
+  _adminMode = 'create';
+  _setAdminHeaderButtons('create');
+  setTimeout(() => { const u = $('adminFormUsername'); if (u) u.focus(); }, 0);
+}
+
+function adminBeginEdit(){
+  if (!_currentAdminUser) return;
+  const u = _currentAdminUser;
+  const title = $('adminDetailTitle');
+  const body = $('adminDetailBody');
+  if (title) title.textContent = 'Edit ' + u.username;
+  if (!body) return;
+  body.innerHTML =
+    '<div class="main-view-content">' +
+      '<div class="detail-card">' +
+        '<div class="detail-card-title">Edit user</div>' +
+        '<div id="adminFormError" class="detail-form-error" style="display:none;color:var(--error);font-size:12px;padding:6px 0"></div>' +
+        _formRow('Username', '<code>' + esc(u.username) + '</code> <span style="color:var(--muted);font-size:11px">(immutable)</span>') +
+        _formRow('Role',
+          '<select id="adminFormRole" style="width:100%">' +
+            '<option value="user"' + (u.role === 'user' ? ' selected' : '') + '>user</option>' +
+            '<option value="admin"' + (u.role === 'admin' ? ' selected' : '') + '>admin</option>' +
+          '</select>') +
+        _formRow('Assigned profile',
+          '<select id="adminFormAssignedProfile" style="width:100%">' + _profileSelectOptions(u.assigned_profile || 'default') + '</select>') +
+        _formRow('Allowed profiles', _allowedProfilesChecklist(u.allowed_profiles, u.role === 'admin')) +
+      '</div>' +
+    '</div>';
+  const roleSel = $('adminFormRole');
+  if (roleSel) roleSel.addEventListener('change', _adminRefreshAllowedFromForm);
+  _adminMode = 'edit';
+  _setAdminHeaderButtons('edit');
+}
+
+function adminBeginResetPassword(){
+  if (!_currentAdminUser) return;
+  const u = _currentAdminUser;
+  const title = $('adminDetailTitle');
+  const body = $('adminDetailBody');
+  if (title) title.textContent = 'Reset password for ' + u.username;
+  if (!body) return;
+  body.innerHTML =
+    '<div class="main-view-content">' +
+      '<div class="detail-card">' +
+        '<div class="detail-card-title">Reset password</div>' +
+        '<div id="adminFormError" class="detail-form-error" style="display:none;color:var(--error);font-size:12px;padding:6px 0"></div>' +
+        '<div style="color:var(--muted);font-size:12px;padding:0 0 8px">The user will be required to change this password on next login.</div>' +
+        _formRow('New password', '<input type="password" id="adminFormPassword" placeholder="min 8 characters" autocomplete="new-password" style="width:100%">') +
+        _formRow('Confirm password', '<input type="password" id="adminFormPasswordConfirm" placeholder="re-enter password" autocomplete="new-password" style="width:100%">') +
+      '</div>' +
+    '</div>';
+  _adminMode = 'reset';
+  _setAdminHeaderButtons('reset');
+  setTimeout(() => { const p = $('adminFormPassword'); if (p) p.focus(); }, 0);
+}
+
+function _adminRefreshAllowedFromForm(){
+  // Re-render the allowed-profiles row when role flips so the "admin = all"
+  // greying matches the live form state without losing other field values.
+  const roleSel = $('adminFormRole');
+  if (!roleSel) return;
+  const isAdmin = roleSel.value === 'admin';
+  // Snapshot current selections so we can preserve them when re-rendering.
+  const checked = Array.from(document.querySelectorAll('input[data-profile-allow]:checked'))
+    .map(cb => cb.dataset.profileAllow);
+  const allowed = checked.length ? checked : null;
+  const target = roleSel.closest('.detail-card');
+  if (!target) return;
+  // The "Allowed profiles" row is the last detail-row in the card.
+  const rows = target.querySelectorAll('.detail-row');
+  const allowedRow = rows[rows.length - 1];
+  if (!allowedRow) return;
+  const valueCell = allowedRow.querySelector('.detail-row-value');
+  if (!valueCell) return;
+  valueCell.innerHTML = _allowedProfilesChecklist(allowed, isAdmin);
+}
+
+function _formRow(label, controlHtml){
+  return '<div class="detail-row">' +
+    '<div class="detail-row-label">' + esc(label) + '</div>' +
+    '<div class="detail-row-value">' + controlHtml + '</div>' +
+  '</div>';
+}
+
+function adminCancelForm(){
+  if (_adminMode === 'create') {
+    _clearAdminDetail();
+  } else if (_currentAdminUser) {
+    _renderAdminDetail(_currentAdminUser);
+  } else {
+    _clearAdminDetail();
+  }
+}
+
+async function adminSaveForm(){
+  _renderAdminFormError('');
+  if (_adminMode === 'create') return _adminSubmitCreate();
+  if (_adminMode === 'edit') return _adminSubmitEdit();
+  if (_adminMode === 'reset') return _adminSubmitResetPassword();
+}
+
+function _readAllowedProfilesFromForm(isAdmin){
+  if (isAdmin) return null; // admins: backend ignores; null = all
+  const checked = Array.from(document.querySelectorAll('input[data-profile-allow]:checked'))
+    .map(cb => cb.dataset.profileAllow);
+  // Backend treats null/empty as "no restriction"; only send a list when
+  // the admin actually picked one or more boxes.
+  return checked.length ? checked : null;
+}
+
+async function _adminSubmitCreate(){
+  const username = ($('adminFormUsername') || {}).value || '';
+  const password = ($('adminFormPassword') || {}).value || '';
+  const confirm = ($('adminFormPasswordConfirm') || {}).value || '';
+  const role = ($('adminFormRole') || {}).value || 'user';
+  const assignedProfile = ($('adminFormAssignedProfile') || {}).value || 'default';
+  if (!username.trim()) return _renderAdminFormError('Username is required');
+  if (password.length < 8) return _renderAdminFormError('Password must be at least 8 characters');
+  if (password !== confirm) return _renderAdminFormError('Passwords do not match');
+  const isAdmin = role === 'admin';
   try {
-    await api('/api/admin/users', {
+    const res = await api('/api/admin/users', {
       method: 'POST',
       body: JSON.stringify({
         username: username.trim(),
         password: password,
-        role: (role || '').trim() === 'admin' ? 'admin' : 'user',
-        assigned_profile: 'default',
+        role: isAdmin ? 'admin' : 'user',
+        assigned_profile: assignedProfile,
+        allowed_profiles: _readAllowedProfilesFromForm(isAdmin),
       }),
     });
     showToast('User created');
     await loadAdminPanel();
+    const created = (res && res.user && res.user.id) ? _adminUsers.find(u => u.id === res.user.id) : null;
+    if (created) openAdminUserDetail(created.id);
   } catch (e) {
-    showToast('Create failed: ' + (e.message || 'unknown'), 'error');
+    _renderAdminFormError(e.message || 'Create failed');
   }
 }
 
-async function adminEditUser(userId){
-  const user = _adminUsers.find(u => u.id === userId);
-  if (!user) return;
-  const role = await showPromptDialog({
-    title: 'Edit ' + user.username,
-    label: 'Role: "admin" or "user"',
-    initial: user.role,
-    confirm: 'Save',
-  });
-  if (role === null) return;
+async function _adminSubmitEdit(){
+  if (!_currentAdminUser) return;
+  const role = ($('adminFormRole') || {}).value || 'user';
+  const assignedProfile = ($('adminFormAssignedProfile') || {}).value || 'default';
+  const isAdmin = role === 'admin';
   try {
-    await api('/api/admin/users/' + userId, {
+    await api('/api/admin/users/' + _currentAdminUser.id, {
       method: 'PATCH',
-      body: JSON.stringify({ role: role.trim() === 'admin' ? 'admin' : 'user' }),
+      body: JSON.stringify({
+        role: isAdmin ? 'admin' : 'user',
+        assigned_profile: assignedProfile,
+        allowed_profiles: _readAllowedProfilesFromForm(isAdmin),
+      }),
     });
     showToast('User updated');
+    const id = _currentAdminUser.id;
     await loadAdminPanel();
+    const refreshed = _adminUsers.find(u => u.id === id);
+    if (refreshed) openAdminUserDetail(refreshed.id);
   } catch (e) {
-    showToast('Update failed: ' + (e.message || 'unknown'), 'error');
+    _renderAdminFormError(e.message || 'Update failed');
   }
 }
 
-async function adminResetPassword(userId){
-  const user = _adminUsers.find(u => u.id === userId);
-  if (!user) return;
-  const newPw = await showPromptDialog({
-    title: 'Reset password for ' + user.username,
-    label: 'New password (min 8 chars). User will be required to change on next login.',
-    inputType: 'password',
-    confirm: 'Reset',
-  });
-  if (!newPw) return;
+async function _adminSubmitResetPassword(){
+  if (!_currentAdminUser) return;
+  const password = ($('adminFormPassword') || {}).value || '';
+  const confirm = ($('adminFormPasswordConfirm') || {}).value || '';
+  if (password.length < 8) return _renderAdminFormError('Password must be at least 8 characters');
+  if (password !== confirm) return _renderAdminFormError('Passwords do not match');
   try {
-    await api('/api/admin/users/' + userId + '/password', {
+    await api('/api/admin/users/' + _currentAdminUser.id + '/password', {
       method: 'POST',
-      body: JSON.stringify({ new_password: newPw }),
+      body: JSON.stringify({ new_password: password }),
     });
-    showToast('Password reset (user must change on next login)');
+    showToast('Password reset');
+    const id = _currentAdminUser.id;
     await loadAdminPanel();
+    const refreshed = _adminUsers.find(u => u.id === id);
+    if (refreshed) openAdminUserDetail(refreshed.id);
   } catch (e) {
-    showToast('Reset failed: ' + (e.message || 'unknown'), 'error');
+    _renderAdminFormError(e.message || 'Reset failed');
   }
 }
 
-async function adminDeleteUser(userId){
-  const user = _adminUsers.find(u => u.id === userId);
-  if (!user) return;
-  const confirmed = await showConfirmDialog({
-    title: 'Delete user',
-    body: 'Delete ' + user.username + '? Their session will be revoked immediately. This cannot be undone.',
-    confirm: 'Delete',
-    destructive: true,
+async function adminDeleteCurrent(){
+  if (!_currentAdminUser) return;
+  const u = _currentAdminUser;
+  const ok = await showConfirmDialog({
+    title: 'Delete ' + u.username + '?',
+    message: 'Their session will be revoked immediately. This cannot be undone.',
+    confirmLabel: 'Delete',
+    danger: true,
+    focusCancel: true,
   });
-  if (!confirmed) return;
+  if (!ok) return;
   try {
-    await api('/api/admin/users/' + userId, { method: 'DELETE' });
+    await api('/api/admin/users/' + u.id, { method: 'DELETE' });
     showToast('User deleted');
+    _clearAdminDetail();
     await loadAdminPanel();
   } catch (e) {
-    showToast('Delete failed: ' + (e.message || 'unknown'), 'error');
+    showToast('Delete failed: ' + (e.message || 'unknown'));
   }
 }
+
+// Sidebar `+` button entry point — kept under the original name so the
+// inline onclick in static/index.html (#adminNewUserBtn) keeps working.
+function openAdminUserCreate(){ adminBeginCreate(); }
