@@ -10,9 +10,9 @@ import json
 import logging
 import os
 import secrets
-import tempfile
 import time
 
+from api._atomic import atomic_write_json
 from api.config import STATE_DIR, load_settings
 
 logger = logging.getLogger(__name__)
@@ -50,25 +50,9 @@ def _load_sessions() -> dict[str, float]:
 
 
 def _save_sessions(sessions: dict[str, float]) -> None:
-    """Atomically persist sessions to STATE_DIR/.sessions.json (0600).
-
-    Uses a temp file + os.replace() so a crash mid-write never leaves a
-    truncated file.  Mirrors the same pattern as .signing_key persistence.
-    """
+    """Atomically persist sessions to STATE_DIR/.sessions.json (0600)."""
     try:
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=STATE_DIR, suffix='.sessions.tmp')
-        try:
-            with os.fdopen(fd, 'w', encoding='utf-8') as f:
-                json.dump(sessions, f)
-            os.chmod(tmp, 0o600)
-            os.replace(tmp, _SESSIONS_FILE)
-        except Exception:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise
+        atomic_write_json(_SESSIONS_FILE, sessions, mode=0o600)
     except Exception as e:
         logger.debug("Failed to persist sessions: %s", e)
 
