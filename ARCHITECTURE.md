@@ -1823,3 +1823,79 @@ an existing workspace. Strict: path must be under home, in the saved workspace l
 
 The distinction matters because add uses permissive validation to avoid the circular
 dependency: you cannot get a path into the saved list if you need the saved list to add it.
+
+
+## LLM Wiki: status + browse (issue #3)
+
+The Hermes agent's long-term knowledge base lives on disk under `WIKI_PATH` (env)
+→ `<HERMES_HOME>/.env` `WIKI_PATH=` → `skills.config.wiki.path` → `wiki.path` →
+`~/wiki`, with categories `entities/`, `concepts/`, `comparisons/`, `queries/`
+plus top-level `index.md` / `SCHEMA.md` / `log.md` and a `raw/` sidecar tree.
+Path resolution is `_llm_wiki_resolve_path()` in `api/routes.py`. Profile-scoped
+through `_llm_wiki_active_hermes_home()`.
+
+### Endpoints
+
+All four endpoints are read-only, profile-scoped, and inherit `check_auth` from
+`server.py`. Walks are bounded by `_LLM_WIKI_MAX_FILES = 10000` and refuse the
+`_LLM_WIKI_FORBIDDEN_ROOTS` blocklist (`/`, `/etc`, `/usr`, `/var`, `/opt`,
+`/sys`, `/proc`).
+
+    GET /api/wiki/status        Metadata only (counts, mtimes). Never reads page bodies.
+                                Existing endpoint — used by Insights and as the
+                                "wiki detected" signal for the Wiki menu reveal.
+    GET /api/wiki/pages         Lists pages grouped by category with H1-or-stem
+                                titles, size, mtime. Sort by title.
+    GET /api/wiki/page?path=    Returns markdown for one page. Rejects paths
+                                outside the wiki root (404), non-`.md` extensions
+                                (400), files > 2 MB (413). All client paths go
+                                through `safe_resolve()` from `api/helpers.py`.
+    GET /api/wiki/raw?path=     Streams an asset from `<wiki>/raw/`, restricted
+                                to an extension allow-list (`png/jpg/jpeg/webp/
+                                gif/svg/pdf/txt`) and capped at 10 MB.
+
+### Frontend
+
+The rail+mobile menu buttons (`#wikiRailBtn`, `#wikiMobileBtn`) are rendered
+with `style="display:none"`. `static/boot.js` calls `/api/wiki/status` after
+`/api/me` and reveals them only when `available === true`. Same pattern as the
+Admin button.
+
+The Wiki view follows the Memory/Skills/Admin layout: `panel-view` left
+(`#panelWiki` — search box + collapsible category tree), `main-view` middle
+(`#mainWiki` — breadcrumb, back/forward, rendered markdown). `switchPanel('wiki')`
+in `static/panels.js` calls `loadWikiPanel()`, which fetches `/api/wiki/pages`
+once per session and caches it on `S.wikiPages`. Clicking a page calls
+`openWikiPage(path)` which fetches `/api/wiki/page` and renders via
+`renderMd(md, { wikiContext: { rootRelativeTo: path } })`. An in-memory
+`S.wikiHistory = { back, forward }` stack drives the back/forward buttons; the
+last-viewed page persists in `localStorage['hermes-webui-wiki-last']`.
+
+A delegated click handler on `#wikiPageContent` intercepts `<a data-wiki-path>`
+and `<a data-wiki-link>` clicks, resolves them in-app, and pushes onto the wiki
+history stack.
+
+### `renderMd()` `wikiContext` extension
+
+`renderMd(raw, opts)` accepts an optional `opts.wikiContext = { rootRelativeTo }`.
+When set:
+
+- Relative `.md` links — `[label](./other.md)`, `[label](../foo/bar.md)` —
+  emit `<a href="#" data-wiki-path="<path>">label</a>`.
+- `[[WikiLink]]` / `[[WikiLink|Label]]` syntax emits
+  `<a href="#" data-wiki-link="<title>">label</a>`. Resolved against the
+  cached page-title index; misses render plain (no `data-wiki-link` consumer
+  → click is inert).
+- `[label](#anchor)` in-page anchor links are honoured (the standard markdown
+  link regex only handles `https?://`, so without this they'd render as plain
+  text).
+- Heading regexes always emit `id="<slug>"`, but the `_tag()` sanitizer only
+  passes the id through when `wikiContext` is set — chat transcripts continue
+  to render plain `<h1>..<h6>` exactly as before.
+
+`SAFE_TAGS` and `_isSafeUrl()` are unchanged. The wiki affordance is
+href="#" + data-attribute, with the data-attributes added to the `_tag()`
+allow-list for `<a>` only. The values are `esc()`-escaped, and the click
+handler that consumes them is bound only on `#wikiPageContent` — so chat
+messages with `[[Foo]]` or `[link](./bar.md)` render as plain text and are
+never silently rewritten.

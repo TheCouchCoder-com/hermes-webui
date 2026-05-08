@@ -1,5 +1,11 @@
 # Hermes Web UI -- Changelog
 
+## Fork unreleased
+
+### Added
+
+- **Wiki browse panel (issue #3).** New left-rail menu item that opens a two-pane Wiki view: category tree on the left (`entities`, `concepts`, `comparisons`, `queries` plus top-level `index.md`/`SCHEMA.md`/`log.md`), rendered markdown on the right. The rail+mobile buttons stay hidden until `/api/wiki/status` reports `available: true`, so the menu only surfaces for profiles that actually have a wiki on disk. New read-only endpoints: `GET /api/wiki/pages`, `GET /api/wiki/page?path=`, `GET /api/wiki/raw?path=` — all profile-scoped, auth-gated, and path-traversal-safe via `safe_resolve()` plus an extension allow-list on `/raw`. `renderMd()` gains an optional `wikiContext` arg that resolves relative `.md` links and `[[WikiLink]]` syntax to in-app navigation, and emits heading anchor ids for in-page jump links — chat transcript rendering is unaffected (the wiki extensions are gated on the new context). 22 regression tests in `tests/test_issue_wiki_browse.py`.
+
 > **Fork notice.** This is a fork of [`nesquena/hermes-webui`](https://github.com/nesquena/hermes-webui).
 > Entries below this notice document upstream releases and were not written by the fork maintainers.
 > Fork-specific changes will be added above this notice as they ship.

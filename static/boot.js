@@ -1340,6 +1340,15 @@ function applyBotName(){
   }catch(e){
     S.currentUser=null;
   }
+  // Reveal Wiki rail/mobile buttons only when a wiki is actually detected
+  // (issue #3). Best-effort: if the status call fails, leave hidden.
+  try{
+    const ws=await api('/api/wiki/status');
+    if(ws && ws.available){
+      const wb=$('wikiRailBtn'); if(wb) wb.style.display='';
+      const wm=$('wikiMobileBtn'); if(wm) wm.style.display='';
+    }
+  }catch(e){ /* silently leave hidden */ }
   // Fetch available models without blocking session restore. The static HTML
   // options are enough for first paint; the dynamic provider list can settle
   // after the saved session is visible.

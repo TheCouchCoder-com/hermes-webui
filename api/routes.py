@@ -2285,6 +2285,241 @@ def _handle_llm_wiki_status(handler, parsed) -> bool:
     return True
 
 
+# ── LLM Wiki browse: pages list, single page, raw assets ──────────────────────
+# Read-only, profile-scoped, auth-gated (via server.py:check_auth like every
+# /api/* route). Path safety via safe_resolve() — all client-supplied paths must
+# resolve inside the wiki root, and the /raw endpoint additionally constrains
+# inside <wiki>/raw with an extension allow-list.
+
+_LLM_WIKI_TOP_LEVEL_FILES = ("index.md", "SCHEMA.md", "log.md")
+_LLM_WIKI_MAX_PAGE_BYTES = 2 * 1024 * 1024   # 2 MB hard cap on a single page
+_LLM_WIKI_MAX_RAW_BYTES = 10 * 1024 * 1024   # 10 MB hard cap on a raw asset
+_LLM_WIKI_TITLE_SCAN_BYTES = 4096            # bytes scanned to find an H1
+_LLM_WIKI_RAW_ALLOWED_EXTS = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+    ".svg": "image/svg+xml",
+    ".pdf": "application/pdf",
+    ".txt": "text/plain; charset=utf-8",
+}
+
+
+def _llm_wiki_extract_title(path: Path) -> str:
+    """Read up to TITLE_SCAN_BYTES looking for the first '# H1' line.
+
+    Falls back to the filename stem so titles are always non-empty.
+    """
+    try:
+        with path.open("rb") as fh:
+            head = fh.read(_LLM_WIKI_TITLE_SCAN_BYTES)
+        text = head.decode("utf-8", errors="replace")
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("# "):
+                return stripped[2:].strip() or path.stem
+            # Stop scanning once we leave the front-matter / preamble area.
+            if stripped and not stripped.startswith("#") and not stripped.startswith("---"):
+                break
+    except Exception:
+        pass
+    return path.stem
+
+
+def _llm_wiki_entry(wiki_root: Path, abs_path: Path) -> dict:
+    try:
+        st = abs_path.stat()
+        size = st.st_size
+        mtime = _llm_wiki_safe_iso(st.st_mtime)
+    except Exception:
+        size = 0
+        mtime = None
+    try:
+        rel = abs_path.relative_to(wiki_root).as_posix()
+    except Exception:
+        rel = abs_path.name
+    return {
+        "path": rel,
+        "title": _llm_wiki_extract_title(abs_path),
+        "size": size,
+        "mtime": mtime,
+    }
+
+
+def _llm_wiki_top_level_pages(wiki_root: Path) -> list[Path]:
+    pages: list[Path] = []
+    for name in _LLM_WIKI_TOP_LEVEL_FILES:
+        candidate = wiki_root / name
+        try:
+            if candidate.is_file():
+                pages.append(candidate)
+        except Exception:
+            continue
+    return pages
+
+
+def _llm_wiki_category_pages(wiki_root: Path, category: str) -> list[Path]:
+    section = wiki_root / category
+    pages: list[Path] = []
+    if not section.exists() or not section.is_dir():
+        return pages
+    iterated = 0
+    for item in section.rglob("*.md"):
+        iterated += 1
+        if iterated > _LLM_WIKI_MAX_FILES:
+            break
+        try:
+            rel = item.relative_to(section)
+            if item.is_file() and not any(part.startswith(".") for part in rel.parts):
+                pages.append(item)
+        except Exception:
+            continue
+    return pages
+
+
+def _llm_wiki_resolve_in_root(wiki_root: Path, requested: str) -> Path:
+    """Resolve a wiki-relative path safely inside wiki_root.
+
+    Raises ValueError on traversal, hidden segments, absolute paths, or empty.
+    """
+    if not requested or not isinstance(requested, str):
+        raise ValueError("path required")
+    cleaned = requested.strip().lstrip("/")
+    if not cleaned:
+        raise ValueError("path required")
+    # Reject hidden segments up-front (defence in depth — safe_resolve won't catch this).
+    parts = [p for p in cleaned.replace("\\", "/").split("/") if p not in ("", ".")]
+    if any(part.startswith(".") for part in parts if part != ".."):
+        raise ValueError("hidden path segment")
+    return safe_resolve(wiki_root, cleaned)
+
+
+def _handle_llm_wiki_pages(handler, parsed) -> bool:
+    """GET /api/wiki/pages — list every page grouped by category."""
+    try:
+        wiki_path, path_source, _configured = _llm_wiki_resolve_path()
+    except Exception as exc:
+        return bad(handler, _sanitize_error(exc), status=500)
+    if not wiki_path.exists() or not wiki_path.is_dir():
+        return bad(handler, "wiki not available", status=404)
+    try:
+        if str(wiki_path.resolve()) in _LLM_WIKI_FORBIDDEN_ROOTS:
+            return bad(handler, "wiki path is a forbidden root", status=400)
+    except Exception:
+        return bad(handler, "wiki path could not be resolved", status=400)
+
+    categories: dict[str, list[dict]] = {}
+    for dirname in _LLM_WIKI_PAGE_DIRS:
+        entries = [_llm_wiki_entry(wiki_path, p) for p in _llm_wiki_category_pages(wiki_path, dirname)]
+        entries.sort(key=lambda e: (e.get("title") or "").lower())
+        categories[dirname] = entries
+    top_level = [_llm_wiki_entry(wiki_path, p) for p in _llm_wiki_top_level_pages(wiki_path)]
+    top_level.sort(key=lambda e: (e.get("title") or "").lower())
+
+    return j(handler, {
+        "root": str(wiki_path),
+        "path_source": path_source,
+        "categories": categories,
+        "top_level": top_level,
+    })
+
+
+def _handle_llm_wiki_page(handler, parsed) -> bool:
+    """GET /api/wiki/page?path=<rel> — return raw markdown for a single page."""
+    try:
+        wiki_path, _src, _cfg = _llm_wiki_resolve_path()
+    except Exception as exc:
+        return bad(handler, _sanitize_error(exc), status=500)
+    if not wiki_path.exists() or not wiki_path.is_dir():
+        return bad(handler, "wiki not available", status=404)
+
+    qs = parse_qs(parsed.query or "")
+    requested = (qs.get("path") or [""])[0]
+    try:
+        target = _llm_wiki_resolve_in_root(wiki_path, requested)
+    except ValueError:
+        # Path traversal, hidden segment, or empty — return 404 (not 500) and
+        # do not leak the resolved path. Match behaviour of the issue spec.
+        return bad(handler, "page not found", status=404)
+    if target.suffix.lower() != ".md":
+        return bad(handler, "only .md pages are readable", status=400)
+    if not target.exists() or not target.is_file():
+        return bad(handler, "page not found", status=404)
+    try:
+        size = target.stat().st_size
+    except Exception:
+        return bad(handler, "page not readable", status=500)
+    if size > _LLM_WIKI_MAX_PAGE_BYTES:
+        return bad(handler, "page too large", status=413)
+    try:
+        markdown = target.read_text(encoding="utf-8", errors="replace")
+    except Exception as exc:
+        return bad(handler, _sanitize_error(exc), status=500)
+    try:
+        rel = target.relative_to(wiki_path).as_posix()
+    except Exception:
+        rel = target.name
+    return j(handler, {
+        "path": rel,
+        "title": _llm_wiki_extract_title(target),
+        "markdown": markdown,
+        "size": size,
+        "mtime": _llm_wiki_safe_iso(target.stat().st_mtime),
+    })
+
+
+def _handle_llm_wiki_raw(handler, parsed) -> bool:
+    """GET /api/wiki/raw?path=<rel> — serve a file from <wiki>/raw/.
+
+    Constrained to the raw/ subdirectory with an extension allow-list.
+    """
+    try:
+        wiki_path, _src, _cfg = _llm_wiki_resolve_path()
+    except Exception as exc:
+        return bad(handler, _sanitize_error(exc), status=500)
+    raw_root = wiki_path / "raw"
+    if not raw_root.exists() or not raw_root.is_dir():
+        return bad(handler, "raw assets not available", status=404)
+
+    qs = parse_qs(parsed.query or "")
+    requested = (qs.get("path") or [""])[0]
+    # Strip a leading "raw/" so callers can pass either "raw/foo.png" or "foo.png".
+    if requested.startswith("raw/"):
+        requested = requested[4:]
+    try:
+        target = _llm_wiki_resolve_in_root(raw_root, requested)
+    except ValueError:
+        return bad(handler, "asset not found", status=404)
+    ext = target.suffix.lower()
+    if ext not in _LLM_WIKI_RAW_ALLOWED_EXTS:
+        return bad(handler, "asset type not allowed", status=415)
+    if not target.exists() or not target.is_file():
+        return bad(handler, "asset not found", status=404)
+    try:
+        size = target.stat().st_size
+    except Exception:
+        return bad(handler, "asset not readable", status=500)
+    if size > _LLM_WIKI_MAX_RAW_BYTES:
+        return bad(handler, "asset too large", status=413)
+    try:
+        body = target.read_bytes()
+    except Exception as exc:
+        return bad(handler, _sanitize_error(exc), status=500)
+    content_type = _LLM_WIKI_RAW_ALLOWED_EXTS[ext]
+    try:
+        handler.send_response(200)
+        handler.send_header("Content-Type", content_type)
+        handler.send_header("Content-Length", str(len(body)))
+        _security_headers(handler)
+        handler.end_headers()
+        handler.wfile.write(body)
+    except Exception:
+        return False
+    return True
+
+
 def _handle_insights(handler, parsed) -> bool:
     """Return usage analytics from local WebUI session data."""
     import collections
@@ -2828,6 +3063,12 @@ def handle_get(handler, parsed) -> bool:
         return handle_kanban_get(handler, parsed)
     if parsed.path == "/api/wiki/status":
         return _handle_llm_wiki_status(handler, parsed)
+    if parsed.path == "/api/wiki/pages":
+        return _handle_llm_wiki_pages(handler, parsed)
+    if parsed.path == "/api/wiki/page":
+        return _handle_llm_wiki_page(handler, parsed)
+    if parsed.path == "/api/wiki/raw":
+        return _handle_llm_wiki_raw(handler, parsed)
     if parsed.path == "/api/logs":
         return _handle_logs(handler, parsed)
 

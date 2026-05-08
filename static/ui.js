@@ -1822,7 +1822,17 @@ function _sanitizeThinkingDisplayText(text){
   return stripped.trim();
 }
 
-function renderMd(raw){
+function renderMd(raw, opts){
+  // opts.wikiContext = { rootRelativeTo: 'concepts/foo.md' } enables in-app
+  // wiki link rewriting (issue #3): relative .md links and [[WikiLink]] both
+  // emit href="#" with the target stashed on a data-attribute that the wiki
+  // click handler in panels.js consumes. Without wikiContext the existing
+  // behaviour is preserved verbatim — chat transcripts are unaffected.
+  const _wikiCtx = (opts && opts.wikiContext) || null;
+  // Slug helper used to give every heading an id="..." anchor. The id is only
+  // surfaced to the DOM by the _tag() sanitizer when _wikiCtx is set, so chat
+  // messages render the same as before.
+  const _slugify = t => String(t||'').toLowerCase().replace(/[^a-z0-9\s-]/g,'').trim().replace(/\s+/g,'-').replace(/-+/g,'-').slice(0,80);
   let s=(raw||'').replace(/\r\n/g,'\n').replace(/\r/g,'\n');
   // ── Entity decode: must run FIRST so &gt; lines become > for the blockquote
   // pre-pass below. LLMs sometimes emit HTML-entity-encoded output; without this
@@ -2050,6 +2060,15 @@ function renderMd(raw){
     // Stash [label](url) links before autolink so the URL in href= is not re-linked
     const _link_stash=[];
     t=t.replace(/\[([^\]]+)\]\((https?:\/\/[^\)]+)\)/g,(_,lb,u)=>{_link_stash.push(`<a href="${u.replace(/"/g,'%22')}" target="_blank" rel="noopener">${esc(lb)}</a>`);return `\x00L${_link_stash.length-1}\x00`;});
+    // Wiki internal links (issue #3) — only when wikiContext is set.
+    if (_wikiCtx) {
+      // [[WikiLink]] / [[WikiLink|Label]]
+      t=t.replace(/\[\[([^\]|\n]+)(?:\|([^\]\n]+))?\]\]/g,(_,title,lb)=>{const safeTitle=esc(String(title).trim());const label=esc(String(lb||title).trim());_link_stash.push(`<a href="#" data-wiki-link="${safeTitle}">${label}</a>`);return `\x00L${_link_stash.length-1}\x00`;});
+      // [label](relative.md) and [label](relative.md#anchor) — paths must not start with a scheme or "#".
+      t=t.replace(/\[([^\]]+)\]\(((?!https?:|#|mailto:|javascript:|data:|vbscript:)[^\s)]+\.md(?:#[^)\s]+)?)\)/g,(_,lb,p)=>{const safePath=esc(String(p));_link_stash.push(`<a href="#" data-wiki-path="${safePath}">${esc(lb)}</a>`);return `\x00L${_link_stash.length-1}\x00`;});
+      // [label](#anchor) — in-page anchor links.
+      t=t.replace(/\[([^\]]+)\]\((#[A-Za-z0-9_-]+)\)/g,(_,lb,a)=>{_link_stash.push(`<a href="${esc(a)}">${esc(lb)}</a>`);return `\x00L${_link_stash.length-1}\x00`;});
+    }
     t=t.replace(/(https?:\/\/[^\s<>"')\]]+)/g,(url)=>{const trail=url.match(/[.,;:!?)]$/)?url.slice(-1):'';const clean=trail?url.slice(0,-1):url;return `<a href="${clean}" target="_blank" rel="noopener">${esc(clean)}</a>${trail}`;});
     t=t.replace(/\x00L(\d+)\x00/g,(_,i)=>_link_stash[+i]);
     t=t.replace(/\x00G(\d+)\x00/g,(_,i)=>_img_stash[+i]);
@@ -2068,7 +2087,10 @@ function renderMd(raw){
   s=s.replace(/\*([^*\n]+)\*/g,(_,t)=>`<em>${esc(t)}</em>`);
   s=s.replace(/~~(.+?)~~/g,(_,t)=>`<del>${esc(t)}</del>`);
   s=s.replace(/\x00O(\d+)\x00/g,(_,i)=>_ob_stash[+i]);
-  s=s.replace(/^###### (.+)$/gm,(_,t)=>`<h6>${inlineMd(t)}</h6>`).replace(/^##### (.+)$/gm,(_,t)=>`<h5>${inlineMd(t)}</h5>`).replace(/^#### (.+)$/gm,(_,t)=>`<h4>${inlineMd(t)}</h4>`).replace(/^### (.+)$/gm,(_,t)=>`<h3>${inlineMd(t)}</h3>`).replace(/^## (.+)$/gm,(_,t)=>`<h2>${inlineMd(t)}</h2>`).replace(/^# (.+)$/gm,(_,t)=>`<h1>${inlineMd(t)}</h1>`);
+  // Headings emit id="<slug>"; the _tag() sanitizer only passes the id through
+  // when wikiContext is set, so chat transcripts continue to render plain <h1..6>.
+  const _headingTag = (level, t) => {const id=_slugify(t); return `<${level}${id?` id="${id}"`:''}>${inlineMd(t)}</${level}>`;};
+  s=s.replace(/^###### (.+)$/gm,(_,t)=>_headingTag('h6',t)).replace(/^##### (.+)$/gm,(_,t)=>_headingTag('h5',t)).replace(/^#### (.+)$/gm,(_,t)=>_headingTag('h4',t)).replace(/^### (.+)$/gm,(_,t)=>_headingTag('h3',t)).replace(/^## (.+)$/gm,(_,t)=>_headingTag('h2',t)).replace(/^# (.+)$/gm,(_,t)=>_headingTag('h1',t));
   s=s.replace(/^---+$/gm,'<hr>');
   // (Blockquotes are handled by the pre-pass at the top of renderMd, before
   // fence_stash. The per-line passes below never see > prefixes.)
@@ -2128,6 +2150,12 @@ function renderMd(raw){
   const _a_stash=[];
   s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>)/g,m=>{_a_stash.push(m);return `\x00A${_a_stash.length-1}\x00`;});
   s=s.replace(/\[([^\]]+)\]\((https?:\/\/[^\)]+)\)/g,(_,label,url)=>`<a href="${url.replace(/"/g,'%22')}" target="_blank" rel="noopener">${esc(label)}</a>`);
+  // Wiki internal links at paragraph level (issue #3) — only when wikiContext is set.
+  if (_wikiCtx) {
+    s=s.replace(/\[\[([^\]|\n]+)(?:\|([^\]\n]+))?\]\]/g,(_,title,lb)=>`<a href="#" data-wiki-link="${esc(String(title).trim())}">${esc(String(lb||title).trim())}</a>`);
+    s=s.replace(/\[([^\]]+)\]\(((?!https?:|#|mailto:|javascript:|data:|vbscript:)[^\s)]+\.md(?:#[^)\s]+)?)\)/g,(_,label,p)=>`<a href="#" data-wiki-path="${esc(String(p))}">${esc(label)}</a>`);
+    s=s.replace(/\[([^\]]+)\]\((#[A-Za-z0-9_-]+)\)/g,(_,label,a)=>`<a href="${esc(a)}">${esc(label)}</a>`);
+  }
   s=s.replace(/\x00A(\d+)\x00/g,(_,i)=>_a_stash[+i]);
   // Restore raw <pre> only after markdown rewrites so literal preformatted
   // content stays placeholder-protected, then let the sanitizer normalize tags.
@@ -2178,6 +2206,13 @@ function renderMd(raw){
       const cls=/^language-[a-z0-9_+-]+$/i.test(a.class||'')?` class="${esc(a.class)}"`:'';
       return `<code${cls}>`;
     }
+    // Heading id="<slug>" passthrough — only when wikiContext is set so chat
+    // transcripts continue to render plain <h1>..<h6> exactly as before.
+    if(_wikiCtx && /^h[1-6]$/.test(name)){
+      const ha=_attrs(rawAttrs);
+      const id=/^[a-z0-9][a-z0-9-]{0,79}$/.test(ha.id||'')?` id="${esc(ha.id)}"`:'';
+      return `<${name}${id}>`;
+    }
     if(plain.includes(name)) return `<${name}>`;
     const a=_attrs(rawAttrs);
     if(name==='li'){
@@ -2200,7 +2235,12 @@ function renderMd(raw){
       const rel=a.rel==='noopener'?' rel="noopener"':'';
       const cls=_cls(a.class,['msg-media-link','skill-linked-file','skill-file-back']);
       const download=a.download?` download="${esc(a.download)}"`:'';
-      return `<a${cls} href="${esc(_safeAttrValue(a.href))}"${target}${rel}${download}>`;
+      // Wiki internal-link affordances (issue #3): href stays "#" / "#anchor",
+      // the actual target lives in a data-attribute that the click handler in
+      // panels.js consumes. Inert outside #wikiPageContent (no listener bound).
+      const wp=a['data-wiki-path']?` data-wiki-path="${esc(_safeAttrValue(a['data-wiki-path']))}"`:'';
+      const wl=a['data-wiki-link']?` data-wiki-link="${esc(_safeAttrValue(a['data-wiki-link']))}"`:'';
+      return `<a${cls} href="${esc(_safeAttrValue(a.href))}"${target}${rel}${download}${wp}${wl}>`;
     }
     if(name==='img'){
       if(!_isSafeUrl(a.src,true)) return '';

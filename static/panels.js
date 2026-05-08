@@ -200,7 +200,7 @@ async function switchPanel(name, opts = {}) {
   // showing-<name> class on <main>; no class means chat (the default).
   const mainEl = document.querySelector('main.main');
   if (mainEl) {
-    ['settings','skills','memory','tasks','kanban','workspaces','profiles','admin','insights','logs'].forEach(p => {
+    ['settings','skills','memory','tasks','kanban','workspaces','profiles','admin','insights','wiki','logs'].forEach(p => {
       mainEl.classList.toggle('showing-' + p, nextPanel === p);
     });
   }
@@ -214,6 +214,7 @@ async function switchPanel(name, opts = {}) {
   if (nextPanel === 'admin') await loadAdminPanel();
   if (nextPanel === 'todos') loadTodos();
   if (nextPanel === 'insights') await loadInsights();
+  if (nextPanel === 'wiki') await loadWikiPanel();
   if (nextPanel === 'logs') await loadLogs();
   _syncLogsAutoRefresh();
   if (typeof _syncSystemHealthMonitorVisibility === 'function') _syncSystemHealthMonitorVisibility();
@@ -6000,3 +6001,243 @@ async function adminDeleteCurrent(){
 // Sidebar `+` button entry point — kept under the original name so the
 // inline onclick in static/index.html (#adminNewUserBtn) keeps working.
 function openAdminUserCreate(){ adminBeginCreate(); }
+
+// ── Wiki panel (issue #3) ─────────────────────────────────────────────────
+// Read-only browse of the LLM wiki. Mirrors the Memory/Skills layout pattern:
+// the left panel-view shows a category tree, the middle main-view renders the
+// selected page. Visibility of the rail/mobile buttons is controlled in
+// boot.js via /api/wiki/status.
+
+const WIKI_STORAGE_KEY = 'hermes-webui-wiki-last';
+const WIKI_TOP_LEVEL_KEY = '__top__';
+let _wikiClickBound = false;
+
+function _wikiInitState(){
+  if (!S.wikiHistory) S.wikiHistory = { back: [], forward: [] };
+  if (!S.wikiCurrent) S.wikiCurrent = null;
+}
+
+async function loadWikiPanel(force){
+  _wikiInitState();
+  const list = $('wikiCategoryList');
+  if (!list) return;
+  if (!S.wikiPages || force){
+    list.innerHTML = '<div class="wiki-empty" data-i18n="loading">Loading...</div>';
+    try {
+      S.wikiPages = await api('/api/wiki/pages');
+    } catch (e) {
+      list.innerHTML = '<div class="wiki-empty">Wiki not available.</div>';
+      S.wikiPages = null;
+      return;
+    }
+  }
+  _renderWikiCategoryList(S.wikiPages);
+  _wikiBindClickDelegation();
+  // Restore last-viewed page on first open.
+  if (!S.wikiCurrent){
+    let last = null;
+    try { last = localStorage.getItem(WIKI_STORAGE_KEY); } catch(e) {}
+    if (last && _wikiPagesFlat(S.wikiPages).some(p => p.path === last)){
+      openWikiPage(last, { pushHistory: false, skipPersist: true });
+    }
+  }
+  filterWikiPages();
+}
+
+function _wikiPagesFlat(data){
+  if (!data) return [];
+  const out = [];
+  const cats = data.categories || {};
+  Object.keys(cats).forEach(cat => {
+    (cats[cat] || []).forEach(p => out.push({ ...p, category: cat }));
+  });
+  (data.top_level || []).forEach(p => out.push({ ...p, category: WIKI_TOP_LEVEL_KEY }));
+  return out;
+}
+
+function _renderWikiCategoryList(data){
+  const list = $('wikiCategoryList');
+  if (!list) return;
+  if (!data){ list.innerHTML = '<div class="wiki-empty">Wiki not available.</div>'; return; }
+  const cats = data.categories || {};
+  const top = data.top_level || [];
+  const allEmpty = top.length === 0 && Object.keys(cats).every(k => !(cats[k] && cats[k].length));
+  if (allEmpty){
+    list.innerHTML = '<div class="wiki-empty">This wiki has no pages yet.</div>';
+    return;
+  }
+  const order = ['entities','concepts','comparisons','queries'];
+  const parts = [];
+  // Top-level pages first (index, SCHEMA, log)
+  if (top.length){
+    parts.push(_renderWikiCategoryBlock('Overview', WIKI_TOP_LEVEL_KEY, top));
+  }
+  order.forEach(cat => {
+    const entries = cats[cat] || [];
+    if (entries.length) parts.push(_renderWikiCategoryBlock(cat, cat, entries));
+  });
+  list.innerHTML = parts.join('');
+  if (S.wikiCurrent) _wikiHighlightActivePage(S.wikiCurrent);
+}
+
+function _renderWikiCategoryBlock(label, categoryKey, entries){
+  const safeLabel = esc(label.charAt(0).toUpperCase() + label.slice(1));
+  const safeCount = entries.length;
+  const pages = entries.map(p => {
+    const title = esc(p.title || p.path || 'Untitled');
+    const path = esc(p.path || '');
+    return `<button type="button" class="wiki-page-item" data-wiki-path="${path}" data-wiki-title="${title}" onclick="openWikiPage('${path.replace(/'/g, "\\'")}', { pushHistory: true })">${title}</button>`;
+  }).join('');
+  return `<details class="wiki-category" data-category="${esc(categoryKey)}" open><summary>${safeLabel}<span class="wiki-category-count">${safeCount}</span></summary>${pages}</details>`;
+}
+
+function filterWikiPages(){
+  const inp = $('wikiSearch');
+  const q = (inp && inp.value || '').trim().toLowerCase();
+  const items = document.querySelectorAll('#wikiCategoryList .wiki-page-item');
+  items.forEach(el => {
+    const title = (el.getAttribute('data-wiki-title') || '').toLowerCase();
+    const path = (el.getAttribute('data-wiki-path') || '').toLowerCase();
+    const hit = !q || title.includes(q) || path.includes(q);
+    el.classList.toggle('hidden', !hit);
+  });
+  // Collapse categories with zero matches to declutter; expand otherwise.
+  document.querySelectorAll('#wikiCategoryList .wiki-category').forEach(cat => {
+    const visible = cat.querySelectorAll('.wiki-page-item:not(.hidden)').length;
+    if (q){
+      cat.open = visible > 0;
+      cat.style.display = visible > 0 ? '' : 'none';
+    } else {
+      cat.open = true;
+      cat.style.display = '';
+    }
+  });
+}
+
+function _wikiHighlightActivePage(path){
+  document.querySelectorAll('#wikiCategoryList .wiki-page-item').forEach(el => {
+    el.classList.toggle('active', el.getAttribute('data-wiki-path') === path);
+  });
+}
+
+async function openWikiPage(path, opts){
+  _wikiInitState();
+  opts = opts || {};
+  if (!path) return;
+  const empty = $('wikiDetailEmpty');
+  const content = $('wikiPageContent');
+  if (!content) return;
+  if (opts.pushHistory && S.wikiCurrent && S.wikiCurrent !== path){
+    S.wikiHistory.back.push(S.wikiCurrent);
+    S.wikiHistory.forward = [];
+  }
+  if (empty) empty.style.display = 'none';
+  content.style.display = '';
+  content.innerHTML = '<div class="wiki-empty" data-i18n="loading">Loading...</div>';
+  let page;
+  try {
+    page = await api('/api/wiki/page?path=' + encodeURIComponent(path));
+  } catch (e){
+    content.innerHTML = '<div class="wiki-empty">Failed to load page: ' + esc(e && e.message || 'unknown') + '</div>';
+    return;
+  }
+  S.wikiCurrent = page.path;
+  if (!opts.skipPersist){
+    try { localStorage.setItem(WIKI_STORAGE_KEY, page.path); } catch(e) {}
+  }
+  const html = (typeof renderMd === 'function')
+    ? renderMd(page.markdown || '', { wikiContext: { rootRelativeTo: page.path } })
+    : esc(page.markdown || '');
+  content.innerHTML = html;
+  _renderWikiBreadcrumb(page.path, page.title);
+  _wikiHighlightActivePage(page.path);
+  _wikiUpdateHistoryButtons();
+}
+
+function _renderWikiBreadcrumb(path, title){
+  const el = $('wikiBreadcrumb');
+  if (!el) return;
+  const parts = (path || '').split('/').filter(Boolean);
+  const safeTitle = esc(title || (parts[parts.length-1] || 'Wiki'));
+  if (parts.length <= 1){
+    el.innerHTML = '<span data-i18n="tab_wiki">Wiki</span><span class="crumb-sep">/</span><span>' + safeTitle + '</span>';
+    return;
+  }
+  const cat = esc(parts[0]);
+  el.innerHTML = '<span data-i18n="tab_wiki">Wiki</span><span class="crumb-sep">/</span><span class="crumb-cat">' + cat + '</span><span class="crumb-sep">/</span><span>' + safeTitle + '</span>';
+}
+
+function wikiHistoryBack(){
+  _wikiInitState();
+  if (!S.wikiHistory.back.length) return;
+  const prev = S.wikiHistory.back.pop();
+  if (S.wikiCurrent) S.wikiHistory.forward.push(S.wikiCurrent);
+  openWikiPage(prev, { pushHistory: false });
+}
+
+function wikiHistoryForward(){
+  _wikiInitState();
+  if (!S.wikiHistory.forward.length) return;
+  const nxt = S.wikiHistory.forward.pop();
+  if (S.wikiCurrent) S.wikiHistory.back.push(S.wikiCurrent);
+  openWikiPage(nxt, { pushHistory: false });
+}
+
+function _wikiUpdateHistoryButtons(){
+  _wikiInitState();
+  const b = $('wikiBackBtn'); if (b) b.disabled = !S.wikiHistory.back.length;
+  const f = $('wikiForwardBtn'); if (f) f.disabled = !S.wikiHistory.forward.length;
+}
+
+function openWikiByTitle(title){
+  if (!S.wikiPages){ return; }
+  const needle = (title || '').trim().toLowerCase();
+  if (!needle) return;
+  const flat = _wikiPagesFlat(S.wikiPages);
+  // Prefer exact title match (case-insensitive); fall back to filename stem.
+  let match = flat.find(p => (p.title || '').toLowerCase() === needle);
+  if (!match){
+    match = flat.find(p => {
+      const stem = (p.path || '').split('/').pop().replace(/\.md$/i,'').toLowerCase();
+      return stem === needle;
+    });
+  }
+  if (match) openWikiPage(match.path, { pushHistory: true });
+}
+
+// Resolve a relative .md path against a base wiki page (POSIX-style).
+function _wikiResolveRelative(base, rel){
+  if (!rel) return rel;
+  // Already root-relative inside the wiki — strip leading slash.
+  if (rel.charAt(0) === '/') return rel.replace(/^\/+/, '');
+  const baseDir = (base || '').split('/').slice(0, -1);
+  const segs = rel.split('/');
+  const out = baseDir.slice();
+  for (const s of segs){
+    if (s === '' || s === '.') continue;
+    if (s === '..'){ if (out.length) out.pop(); continue; }
+    out.push(s);
+  }
+  return out.join('/');
+}
+
+function _wikiBindClickDelegation(){
+  if (_wikiClickBound) return;
+  const content = $('wikiPageContent');
+  if (!content) return;
+  content.addEventListener('click', (ev) => {
+    const a = ev.target.closest && ev.target.closest('a[data-wiki-path],a[data-wiki-link]');
+    if (!a) return;
+    ev.preventDefault();
+    if (a.dataset.wikiPath){
+      const base = S.wikiCurrent || '';
+      const resolved = _wikiResolveRelative(base, a.dataset.wikiPath);
+      openWikiPage(resolved, { pushHistory: true });
+      return;
+    }
+    if (a.dataset.wikiLink){
+      openWikiByTitle(a.dataset.wikiLink);
+    }
+  });
+  _wikiClickBound = true;
+}
