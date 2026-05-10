@@ -5193,6 +5193,11 @@ async function saveSettings(andClose){
 async function signOut(){
   try{
     await api('/api/auth/logout',{method:'POST',body:'{}'});
+    // Drop the last-opened session ID so the next login boots into a fresh
+    // empty chat instead of restoring this user's session — and prevents the
+    // ID leaking into a different profile that logs in on the same browser
+    // (issue #8).
+    try{ localStorage.removeItem('hermes-webui-session'); }catch(_){ }
     window.location.href='login';
   }catch(e){
     showToast(t('sign_out_failed')+e.message);

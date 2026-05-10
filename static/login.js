@@ -70,6 +70,14 @@ document.addEventListener('DOMContentLoaded', function () {
     }
   }
 
+  // After any successful auth transition, drop the previous user's last-opened
+  // session ID so the app boots into a fresh empty chat (issue #8). Without
+  // this, boot.js restores whatever session was in localStorage — including
+  // a chat from a previously logged-in profile.
+  function _clearSavedSession() {
+    try { localStorage.removeItem('hermes-webui-session'); } catch (_) {}
+  }
+
   function _safeNextPath() {
     try {
       var raw = new URL(window.location.href).searchParams.get('next');
@@ -109,6 +117,7 @@ document.addEventListener('DOMContentLoaded', function () {
         pwInput.focus();
         return;
       }
+      _clearSavedSession();
       window.location.href = _safeNextPath();
     } else {
       showErr((r.data && r.data.error) || invalidCreds);
@@ -124,6 +133,7 @@ document.addEventListener('DOMContentLoaded', function () {
     if (password !== confirm) return showErr('Passwords do not match');
     var r = await postJson('api/auth/bootstrap', { username: username, password: password });
     if (r.ok && r.data && r.data.ok) {
+      _clearSavedSession();
       window.location.href = _safeNextPath();
     } else {
       showErr((r.data && r.data.error) || 'Bootstrap failed');
@@ -137,6 +147,7 @@ document.addEventListener('DOMContentLoaded', function () {
     if (!newPw || newPw.length < 8) return showErr('New password must be at least 8 characters');
     var r = await postJson('api/auth/change_password', { old_password: oldPw, new_password: newPw });
     if (r.ok && r.data && r.data.ok) {
+      _clearSavedSession();
       window.location.href = _safeNextPath();
     } else {
       showErr((r.data && r.data.error) || 'Password change failed');
