@@ -17,6 +17,74 @@ const ICONS={
 // before the first request completes (#1060).
 let _loadingSessionId = null;
 
+// ── Composer draft persistence ────────────────────────────────────────────────
+
+// Debounced save — prevents hammering the server on every keystroke.
+let _draftSaveTimer = null;
+const _DRAFT_SAVE_DELAY_MS = 400;
+
+function _saveComposerDraft(sid, text, files) {
+  if (!sid) return;
+  clearTimeout(_draftSaveTimer);
+  _draftSaveTimer = setTimeout(() => {
+    api('/api/session/draft', {
+      method: 'POST',
+      body: JSON.stringify({ session_id: sid, text: text || '', files: files || [] }),
+    }).catch(() => {});
+  }, _DRAFT_SAVE_DELAY_MS);
+}
+
+// Fire-and-forget immediate save (used before session switches).
+function _saveComposerDraftNow(sid, text, files) {
+  if (!sid) return;
+  clearTimeout(_draftSaveTimer);
+  api('/api/session/draft', {
+    method: 'POST',
+    body: JSON.stringify({ session_id: sid, text: text || '', files: files || [] }),
+  }).catch(() => {});
+}
+
+// Restore composer draft from server onto #msg textarea.
+// Only restores if there's actual text (skip empty/None drafts).
+// Guards against double-restore when rapidly switching sessions.
+function _restoreComposerDraft(draft, targetSid) {
+  const ta = $('msg');
+  if (!ta) return;
+  // targetSid is the session that was requested — if it no longer matches
+  // _loadingSessionId, a newer session switch has already begun, so skip.
+  if (targetSid && _loadingSessionId !== null && _loadingSessionId !== targetSid) return;
+  const text = (draft && typeof draft.text === 'string') ? draft.text : '';
+  const files = (draft && Array.isArray(draft.files)) ? draft.files : [];
+  // If there's no text and no files, clear the textarea (a previous session's
+  // draft may still be sitting there from a cross-session switch).
+  if (!text && !files.length) {
+    if (ta.value) {
+      ta.value = '';
+      if (typeof autoResize === 'function') autoResize();
+      if (typeof updateSendBtn === 'function') updateSendBtn();
+    }
+    return;
+  }
+  // Only update if different to avoid cursor jumps on unrelated session switches.
+  const current = ta.value || '';
+  if (current !== text) {
+    ta.value = text;
+    if (typeof autoResize === 'function') autoResize();
+    if (typeof updateSendBtn === 'function') updateSendBtn();
+  }
+  // Files restoration is skipped for now (requires S.pendingFiles plumbing).
+}
+
+// Clear the saved draft for a session (called when message is sent).
+function _clearComposerDraft(sid) {
+  if (!sid) return;
+  clearTimeout(_draftSaveTimer);
+  api('/api/session/draft', {
+    method: 'POST',
+    body: JSON.stringify({ session_id: sid, text: '' }),
+  }).catch(() => {});
+}
+
 const SESSION_VIEWED_COUNTS_KEY = 'hermes-session-viewed-counts';
 const SESSION_COMPLETION_UNREAD_KEY = 'hermes-session-completion-unread';
 const SESSION_OBSERVED_STREAMING_KEY = 'hermes-session-observed-streaming';
@@ -345,11 +413,10 @@ async function loadSession(sid){
   // Show loading indicator immediately for responsiveness.
   // Cleared by renderMessages() once full session data arrives.
   // Persist the current composer draft before switching away so it can be
-  // restored when the user switches back (#1060).
+  // restored when the user switches back (#1060). Save to server now so the
+  // draft survives page refresh and syncs across clients.
   if (currentSid && currentSid !== sid) {
-    if (!S.composerDrafts) S.composerDrafts = {};
-    const draft = { text: ($('msg') || {}).value || '', files: S.pendingFiles ? [...S.pendingFiles] : [] };
-    if (draft.text || draft.files.length) S.composerDrafts[currentSid] = draft;
+    _saveComposerDraftNow(currentSid, ($('msg') || {}).value || '', S.pendingFiles ? [...S.pendingFiles] : []);
   }
   if (currentSid !== sid) {
     S.messages = [];
@@ -563,6 +630,15 @@ async function loadSession(sid){
     });
   }
   if(typeof _renderPendingPromptsForActiveSession==='function') _renderPendingPromptsForActiveSession();
+
+  // Restore server-persisted composer draft (synced across clients + survives refresh).
+  // Pass sid so _restoreComposerDraft can skip if this session is mid-load (guards
+  // against stale writes from slow responses racing to restore the previous draft).
+  const _draft = S.session && S.session.composer_draft;
+  if (_draft && (typeof _restoreComposerDraft === 'function')) {
+    _restoreComposerDraft(_draft, sid);
+  }
+
   _resolveSessionModelForDisplaySoon(sid);
   // Clear the in-flight session marker now that this load has completed (#1060).
   if (_loadingSessionId === sid) _loadingSessionId = null;
@@ -998,6 +1074,19 @@ let _loadingOlder = false;
 // oldest message currently loaded in S.messages. Starts at 0 when all
 // messages are loaded, or > 0 when truncated by msg_limit.
 let _oldestIdx = 0;
+// Generation token bumped every time S.messages is wholesale-replaced
+// (rather than incrementally extended). _loadOlderMessages snapshots it
+// before its `await` and re-checks after, so a late-resolving prefetch
+// does not prepend onto a transcript that was rebuilt under it
+// (e.g. by _ensureAllMessagesLoaded after a Start-jump). See #1937.
+let _messagesGeneration = 0;
+function _bumpMessagesGeneration() {
+  // Wrap to keep the counter bounded; the only operation that matters is
+  // strict inequality between the snapshot and the post-await read, so any
+  // monotonic bump is sufficient.
+  _messagesGeneration = (_messagesGeneration + 1) | 0;
+  return _messagesGeneration;
+}
 
 async function _loadOlderMessages() {
   if (_loadingOlder || !_messagesTruncated) return;
@@ -1005,6 +1094,11 @@ async function _loadOlderMessages() {
   if (!sid || !S.messages.length) return;
   if (_oldestIdx <= 0) { _messagesTruncated = false; return; }
   _loadingOlder = true;
+  // Snapshot the generation BEFORE we await. If S.messages is wholesale
+  // replaced while the request is in flight, the post-await check below
+  // bails out so we never prepend stale older messages onto a freshly
+  // rebuilt transcript (#1937).
+  const startGeneration = _messagesGeneration;
   try {
     const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${_oldestIdx}&msg_limit=${_INITIAL_MSG_LIMIT}`);
     // Guard: api() may have redirected (401) and returned undefined.
@@ -1017,6 +1111,13 @@ async function _loadOlderMessages() {
     if (!data || !data.session) return;
     if (!S.session || S.session.session_id !== sid) return;
     if (_loadingSessionId !== null && _loadingSessionId !== sid) return;
+    // Generation guard: another code path (typically jumpToSessionStart →
+    // _ensureAllMessagesLoaded) may have replaced S.messages while we were
+    // awaiting. Prepending older messages onto that replacement would
+    // duplicate the head of the transcript. Detect via the generation
+    // counter and abort cleanly. _oldestIdx and _messagesTruncated were
+    // already reset by the wholesale-replace path, so no rollback needed.
+    if (_messagesGeneration !== startGeneration) return;
     const olderMsgs = (data.session.messages || []).filter(m => m && m.role);
     if (!olderMsgs.length) { _messagesTruncated = false; return; }
     // Prepend older messages
@@ -1063,17 +1164,56 @@ async function _loadOlderMessages() {
 
 // Ensure the full message history is loaded (for undo, export, etc).
 // If the session was loaded with msg_limit, this fetches all messages.
+//
+// Race-safety (#1937): with the endless-scroll opt-in, _loadOlderMessages
+// may be in flight when this runs (e.g. user scrolled near the top, then
+// hit the Start jump pill). Two coordinated guards prevent the prefetch
+// from prepending duplicate messages onto our wholesale replacement:
+//   1. Hold the _loadingOlder mutex around the body so a NEW prefetch
+//      cannot start mid-replace (entry-gate check at line ~1003 returns
+//      early). The mutex is also self-protecting against concurrent
+//      ensure-all calls from rapid double-clicks on Start.
+//   2. Bump _messagesGeneration before mutating S.messages so any
+//      in-flight prefetch's post-await generation check bails out.
 async function _ensureAllMessagesLoaded() {
   if (!_messagesTruncated || !S.session) return;
-  const sid = S.session.session_id;
-  const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`);
-  // Guard: api() may have redirected (401) and returned undefined.
-  if (!data || !data.session) return;
-  const msgs = (data.session.messages || []).filter(m => m && m.role);
-  S.messages = msgs;
-  _messagesTruncated = false;
-  if(S.session && S.session.session_id === sid){
-    S.session.message_count = Number(data.session.message_count || msgs.length);
+  if (_loadingOlder) {
+    // A prefetch is mid-flight (between the `_loadingOlder = true` line
+    // and its post-await guards). Bumping the generation token now
+    // poisons that prefetch's continuation, but we still need to claim
+    // the mutex AFTER it releases. Yield until the prefetch finishes
+    // (its finally-block clears _loadingOlder) before fetching the full
+    // history ourselves. The generation bump below ensures any other
+    // future race against this same continuation also fails closed.
+    _bumpMessagesGeneration();
+    while (_loadingOlder) {
+      await new Promise(resolve => setTimeout(resolve, 16));
+    }
+    if (!_messagesTruncated || !S.session) return;
+  }
+  _loadingOlder = true;
+  try {
+    const sid = S.session.session_id;
+    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`);
+    // Guard: api() may have redirected (401) and returned undefined.
+    if (!data || !data.session) return;
+    // Session may have been switched while we awaited. Bail rather than
+    // overwrite the new session's messages.
+    if (!S.session || S.session.session_id !== sid) return;
+    if (_loadingSessionId !== null && _loadingSessionId !== sid) return;
+    const msgs = (data.session.messages || []).filter(m => m && m.role);
+    // Bump the generation BEFORE the wholesale replace so any racing
+    // prefetch (whose snapshot was taken before this call's mutex
+    // acquisition) sees the new value and aborts.
+    _bumpMessagesGeneration();
+    S.messages = msgs;
+    _messagesTruncated = false;
+    _oldestIdx = 0;
+    if (S.session && S.session.session_id === sid) {
+      S.session.message_count = Number(data.session.message_count || msgs.length);
+    }
+  } finally {
+    _loadingOlder = false;
   }
 }
 

@@ -1430,6 +1430,44 @@ def _base_url_points_at_local_server(base_url: str) -> bool:
         return False
 
 
+def _custom_slug_rest_looks_like_host_port(rest: str) -> bool:
+    """True when ``custom:<rest>`` is an endpoint-style slug ``host:port``.
+
+    WebUI sometimes derives ``custom:10.8.71.41:8080`` from ``base_url`` authority.
+    The #1776 peel must not treat that middle colon as part of an eaten model
+    segment — otherwise ``@custom:10.8.71.41:8080:Qwen3`` wrongly becomes model
+    ``8080:Qwen3``.
+    """
+    rest = str(rest or "").strip()
+    if ":" not in rest:
+        return False
+    host, port_s = rest.rsplit(":", 1)
+    if not host or ":" in host:
+        return False
+    if not port_s.isdigit():
+        return False
+    try:
+        port_n = int(port_s)
+    except ValueError:
+        return False
+    if not (1 <= port_n <= 65535):
+        return False
+    try:
+        import ipaddress
+
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        pass
+    hl = host.lower()
+    if hl == "localhost":
+        return True
+    # Typical DNS hostname used as proxy slug (contains at least one label dot).
+    if "." in host:
+        return True
+    return False
+
+
 def resolve_model_provider(model_id: str) -> tuple:
     """Resolve model name, provider, and base_url for AIAgent.
 
@@ -1516,15 +1554,20 @@ def resolve_model_provider(model_id: str) -> tuple:
     # ("@custom:my-key:some-model:free"), rsplit yields
     # provider_hint="custom:my-key:some-model", bare_model="free", and the
     # custom-prefix guard below skips the split-fallback. Detect the
-    # over-split structurally — custom hints carry exactly one segment after
-    # "custom:", so any provider_hint with 2+ colons that starts with
-    # "custom:" has eaten part of the model name. Peel one segment back.
+    # over-split structurally — custom hints normally carry one slug segment
+    # after ``custom:``. If ``provider_hint`` has extra ``:`` tokens because the
+    # model ID contained tags like ``:free``, peel one segment back (#1776).
+    #
+    # Exception: ``custom:<ip-or-host>:<port>`` is a single logical slug derived
+    # from OpenAI ``base_url`` authority and contains no eaten model segments.
     if model_id.startswith("@") and ":" in model_id:
         inner = model_id[1:]
         provider_hint, bare_model = inner.rsplit(":", 1)
         if provider_hint.startswith("custom:") and provider_hint.count(":") >= 2:
-            provider_hint, extra = provider_hint.rsplit(":", 1)
-            bare_model = f"{extra}:{bare_model}"
+            _slug_rest = provider_hint[len("custom:"):]
+            if not _custom_slug_rest_looks_like_host_port(_slug_rest):
+                provider_hint, extra = provider_hint.rsplit(":", 1)
+                bare_model = f"{extra}:{bare_model}"
         elif (provider_hint not in _PROVIDER_MODELS
                 and provider_hint not in _PROVIDER_DISPLAY
                 and not provider_hint.startswith("custom:")):
@@ -2949,7 +2992,7 @@ def get_available_models() -> dict:
         _custom_providers_cfg = cfg.get("custom_providers", [])
         _named_custom_groups: dict = {}
         if isinstance(_custom_providers_cfg, list):
-            _seen_custom_ids = {m["id"] for m in auto_detected_models}
+            _seen_custom_ids = set()
             for _cp in _custom_providers_cfg:
                 if not isinstance(_cp, dict):
                     continue
@@ -2970,9 +3013,10 @@ def get_available_models() -> dict:
                             _cp_model_ids.append(_m_id.strip())
 
                 for _cp_model in _cp_model_ids:
-                    if _cp_model and _cp_model not in _seen_custom_ids:
+                    _dedup_key = f"{_slug}:{_cp_model}" if _slug else _cp_model
+                    if _cp_model and _dedup_key not in _seen_custom_ids:
                         _cp_label = _get_label_for_model(_cp_model, [])
-                        _seen_custom_ids.add(_cp_model)
+                        _seen_custom_ids.add(_dedup_key)
                         if _slug:
                             detected_providers.add(_slug)
                             _cp_option_id = _cp_model
@@ -3606,6 +3650,8 @@ AGENT_INSTANCES: dict = {}  # stream_id -> AIAgent instance for interrupt propag
 STREAM_PARTIAL_TEXT: dict = {}  # stream_id -> partial assistant text accumulated during streaming
 STREAM_REASONING_TEXT: dict = {}  # stream_id -> reasoning trace accumulated during streaming (#1361 §A)
 STREAM_LIVE_TOOL_CALLS: dict = {}  # stream_id -> live tool calls accumulated during streaming (#1361 §B)
+STREAM_GOAL_RELATED: dict = {}  # stream_id -> bool: only evaluate goal for goal-related turns (#1932)
+PENDING_GOAL_CONTINUATION: set = set()  # session_ids awaiting a goal continuation turn (#1932)
 SERVER_START_TIME = time.time()
 
 # Agent cache: reuse AIAgent across messages in the same WebUI session so that

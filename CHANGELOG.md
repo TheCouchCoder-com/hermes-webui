@@ -10,6 +10,78 @@
 
 ## [v0.51.29] — 2026-05-08 — 6-PR contributor batch (Release F: Docker hardening + login persistence + scroll/lineage fixes + i18n cleanup)
 
+## [v0.51.31] — 2026-05-09 — Release H (12-PR contributor batch: image-mode + race fixes + composer drafts + locale parity)
+
+### Added
+
+- **PR #1956** by @JKJameson — Persistent composer draft. The chat composer textarea (`#msg`) is now persisted per-session server-side under `Session.composer_draft = {text, files}`, so drafts survive page refreshes and sync across clients. New `POST/GET /api/session/draft` endpoints (input validation: text clamped to 50 KB, files clamped to 50 entries, types coerced to str/list — Stage-326 hardening per Opus advisor). Frontend: 400 ms debounced auto-save on textarea `input`, immediate fire-and-forget save before session switch, save on clarification card lock. `_restoreComposerDraft` guards against stale responses from rapid session switching. Co-authored by Minimax.
+
+- **PR #1957** by @hermes-gimmethebeans — Configurable session TTL. New `_resolve_session_ttl()` helper with three-layer precedence: `HERMES_WEBUI_SESSION_TTL` env var > `settings.json` `session_ttl_seconds` > 30-day default. Out-of-range values [60s, 1y] fall through to the default. Resolved dynamically at every `create_session()` and `set_auth_cookie()` call so settings changes take effect immediately without restart. The `SESSION_TTL = 86400 * 30` module constant is preserved as the named fallback (Stage-326 reconciliation: existing regression tests pin the constant; #1957 originally deleted it). Closes #1954.
+
+### Fixed
+
+- **PR #1939** by @ai-ag2026 — Test-only follow-up: tightens the theme-color bridge tests so the pre-paint script must update every theme-color meta tag and remove stale media attributes; asserts the runtime theme sync updates both the canonical id tag and fallback theme-color tags; adds regression coverage that service-worker shell assets use network-first with cache fallback.
+
+- **PR #1941** by @ai-ag2026 — Preserve chat scroll across final render. When a stream completed, the `done` handler replaced the live transcript with persisted session messages via `renderMessages({ preserveScroll: true })`. The `preserveScroll` path avoided forcing bottom-scroll, but did not preserve `scrollTop` itself; during the DOM rebuild the browser could reset `#messages.scrollTop` to `0`, sending a reader who had scrolled up to the first message. Now captures the scroll position before the rebuild and restores it for unpinned readers; pinned/near-bottom readers keep the existing bottom-follow behavior.
+
+- **PR #1945** by @franksong2702 — Localized the six session-jump-button keys (Start/End labels, aria labels, Appearance setting copy) for ja/ru/es/de/zh/zh-Hant/pt/ko. The opt-in `session_jump_buttons` setting in #1928 (Release G) had English fallbacks in non-English locale blocks; this completes the parity. Strengthened the regression test so future changes cannot leave English literals in non-English locales. Closes #1938.
+
+- **PR #1947** by @happy5318 — Show the same model from different named custom providers in the dropdown instead of silently dropping the second provider's entry. The `_seen_custom_ids` global bucket in `get_available_models()` was seeded from `auto_detected_models` and used a bare model id as the dedup key, so a second named provider exposing the same model id (e.g. both `baidu` and `huoshan` exposing `glm-5.1`) had its entry dropped. Switched the dedup key to `f"{slug}:{model_id}"` so each provider's models track independently. Maintainer-augmented with a regression test (`test_pr1947_same_model_multiple_custom_providers.py`) that fails on master and passes on the fix. Co-authored by @hacker1e7 (independently filed #1874 with broader scope; closed in favor of the narrower fix).
+
+- **PR #1949** by @Sanjays2402 — Closes the v0.51.30 regression race between endless-scroll prefetch and Start-jump's `_ensureAllMessagesLoaded` (Issue #1937). With both opt-ins ON, an in-flight `_loadOlderMessages` racing with `jumpToSessionStart → _ensureAllMessagesLoaded` could prepend a duplicate page if the prefetch resolved last. The naive same-flag-check approach (proposed in #1942 and #1962, both closed in favor of this PR) is a no-op for the post-await race because the prefetch has already cleared the entry-gate. The actual fix is a generation-token + mutex pair: (1) `_loadOlderMessages` snapshots a module-scoped `_messagesGeneration` counter before its `await api(...)` and re-checks it after, aborting the prepend cleanly if any wholesale-replace bumped the token mid-flight; (2) `_ensureAllMessagesLoaded` claims the `_loadingOlder` mutex, bumps the generation token before mutating `S.messages`, yields until any in-flight prefetch's `finally` releases the mutex, then claims the mutex itself. Also adds same-session and `_loadingSessionId` guards that the original ensure-all body was missing post-await. 12 new regression tests pin the wait → lock → fetch → mutate → unlock invariant. Co-authored by @franksong2702 and @Michaelyklam (parallel-discovery PRs). Closes #1937.
+
+- **PR #1950** by @franksong2702 — Mute stale stopped gateway heartbeat. When the root `gateway_state.json` had `gateway_state == "stopped"` and was older than the freshness threshold, the existing logic still treated it as a configured-but-down gateway, surfacing a persistent heartbeat-down alert for users running only profile-scoped gateways. New stale-stopped helper in `api/agent_health.py` reports `alive: null` with reason `gateway_stale_stopped_state` instead of `alive: false`. Fresh stopped states still report down (so a recently stopped configured root gateway continues to surface as an outage), and stale `gateway_state == "running"` still reports down (preserving the #1879 false-positive guard). Closes #1944.
+
+- **PR #1951** by @amlyczz — Gate the goal evaluation hook on goal-related turns only (Issue #1932). Pre-fix, `evaluate_goal_after_turn()` fired on every completed assistant turn when a goal was active, including unrelated user messages — burning the goal budget, triggering continuation prompts that interrupted unrelated conversations, and making `/goal status` numbers misleading. Added `STREAM_GOAL_RELATED` (dict) + `PENDING_GOAL_CONTINUATION` (set) flags in `api.config`; `_run_agent_streaming` accepts a `goal_related=False` kwarg and skips the goal evaluation section when not goal-related; `goal_continue` adds the session to `PENDING_GOAL_CONTINUATION` so the next stream is auto-marked; routes propagate the flag and the `/api/goal` kickoff path passes `goal_related=True`. Co-authored by @franksong2702 (parallel #1946 closed in favor of this PR's broader test coverage). Closes #1932. Stage-326 hotfix per Opus advisor: removed `PENDING_GOAL_CONTINUATION.discard(session_id)` from the streaming worker's `finally` block — that race-erased the marker before the consumer in `routes.py` could read it; the consumer already discards atomically on read. 5 new regression guards pin the corrected ordering.
+
+- **PR #1953** by @lucky-yonug — Skip the `#1776` provider-peel for custom host:port slugs. `model_with_provider_context` can emit `@custom:<host>:<port>:<model>` when the model provider is derived from an OpenAI `base_url` authority (e.g. `custom:10.8.0.1:8080`). The existing colon-count heuristic mistook those extra colons for an over-split model id and prepended the port segment onto the bare model (`8080:Qwen3-235B`), breaking WebUI while CLI/curl stayed correct. Now detects endpoint-style slugs (IPv4 / localhost / dotted-hostname + numeric port) and skips the peel in that case. References #1776.
+
+- **PR #1960** by @Michaelyklam — Translate the `workspace_show_hidden_files` label for ja/ru/es/de/zh/zh-Hant/pt/ko, replacing the English fallbacks in seven non-English locales. Closes #1841.
+
+- **PR #1961** by @sbe27 — WebUI now respects `image_input_mode` instead of unconditionally embedding native `image_url` parts. `_build_native_multimodal_message()` was bypassing the agent's `image_input_mode` config, causing silent turn failures with non-vision models or text-only fallbacks. Added `_resolve_image_input_mode(cfg)` mirroring `decide_image_input_mode()` and wired into the multimodal message builder; when mode resolves to `"text"`, returns a plain string so `vision_analyze` handles images instead. Closes #1959.
+
+### Cluster-resolution decisions
+
+Three duplicate-PR clusters consolidated to one canonical PR each, with `Co-authored-by` attribution preserved on the merge commit:
+
+- **#1937 race** — three competing fixes filed within 24h: #1942 (synchronous mutex), #1949 (generation-token + mutex), #1962 (serialization + browser evidence). Selected #1949 as the canonical fix; the synchronous-mutex approach in #1942/#1962 doesn't reach into a prefetch's resolved callback once it's past the entry-gate. Browser evidence under `docs/pr-media/1937/` was not absorbed (the fix in stage covers what the evidence demonstrates).
+
+- **#1932 goal hook** — same-shape fixes in #1946 and #1951. Selected #1951 for the materially better test coverage (10 dedicated regression tests vs handful in #1946); both PRs ship the `goal_related` flag through `/api/chat/start` → streaming worker.
+
+- **Custom-provider dedup** — #1874 (broad scope including a behavior change to `_deduplicate_model_ids`) vs #1947 (4-LOC minimum-correct fix). Selected #1947; #1874's `_deduplicate_model_ids` change can be revisited as a separate PR if the underlying gap is real.
+
+### Stage-326 fixes applied per Opus advisor
+
+- **CRITICAL #1951 PENDING_GOAL_CONTINUATION race fix.** The original PR's `finally`-block discard at `api/streaming.py:3553` race-erased the marker before the frontend's SSE-receive → `POST /api/chat/start` round-trip could consume it. Removed the discard; the consumer in `routes.py` discards atomically on read. 5 new regression guards in `tests/test_stage326_pending_goal_continuation_race.py` pin the corrected ordering.
+
+- **#1956 composer-draft input validation.** Added size + type clamps (text 50 KB max str-coerce, files 50 entries max list-coerce) to the `POST /api/session/draft` handler. Without this, a misbehaving client could persist multi-MB strings into the session JSON via the 400 ms debounced auto-save. 5 new validation tests in `tests/test_stage326_composer_draft_validation.py`.
+
+- **#1957 SESSION_TTL constant preserved.** The original PR deleted the `SESSION_TTL = 86400 * 30` module constant; existing regression tests (`test_v050258_opus_followups::test_redirect_session_ttl_30_days`, `test_auth_sessions::test_session_ttl_is_24_hours`) pin it as a guard against the daily-kick-out regression from #1419. Restored as the named fallback for `_resolve_session_ttl()`. Reconciled the new `TestSessionTtlResolution` class to use unittest setUp/tearDown env snapshotting rather than the pytest `monkeypatch` fixture (incompatible with `unittest.TestCase` subclasses) and aligned clamp tests with the actual fall-through-to-default behavior.
+
+### Tests
+
+5006 → **5028 collected, 5028 passing, 0 regressions** (+51 net new across the 12 PRs + 10 stage-326 hardening tests). Full suite ~143 s on Python 3.11 (HERMES_HOME isolated). JS syntax check (`node -c`) clean on all 5 modified `static/*.js` files. Browser API sanity harness (port 8789): all 11 endpoints + 20 QA tests PASS. Manual live verification on stage-326 server (port 8789): composer-draft validation working (50 KB clamp, 50-entry files clamp, type coercion); session TTL resolution honors env var (3600 s) and falls through on out-of-range. Opus advisor: SHIP-WITH-FIXES (all required + recommended fixes applied in `404e24ac` + `8782fd26` stage commits).
+
+### Pre-release verification
+
+- Full pytest under `HERMES_HOME` isolation: **5028 passed, 8 skipped, 1 xfailed, 2 xpassed, 1 warning, 8 subtests passed** in 142.61 s.
+- Browser API harness against port 8789: all 11 endpoints + 20 QA tests PASS (111.19 s).
+- Manual live verification on stage-326 server (port 8789): composer-draft API + TTL resolution + custom-provider model groups all behave as expected.
+- `node -c` on all 5 modified `static/*.js` files: clean.
+- `py_compile` on all 6 modified `api/*.py` files: clean.
+- No leftover merge-conflict markers anywhere in the tree (companion `tests/test_pwa_manifest_sw.py` regression check + grep sweep).
+- Stage diff: 28 files, +1609/-116.
+- Opus advisor pass: VERDICT=SHIP-WITH-FIXES with all critical + recommended fixes now applied. Re-verified on the patched stage HEAD.
+- Pre-stamp re-fetch of all 12 PR heads: no contributor force-push during the build window.
+
+### Closed in favor of canonical PRs (with Co-authored-by attribution)
+
+- **#1942** (franksong2702 — synchronous mutex for #1937) → closed in favor of #1949
+- **#1962** (Michaelyklam — serialization + browser evidence for #1937) → closed in favor of #1949
+- **#1946** (franksong2702 — goal_related flag for #1932) → closed in favor of #1951
+- **#1874** (hacker1e7 — broader custom-provider dedup) → closed in favor of #1947's 4-LOC fix
+- **#1311** (lost9999 — codex cache invalidation; superseded on master)
+
 ## [v0.51.30] — 2026-05-08 — 3-PR contributor batch (Release G: offline recovery + PWA hardening + opt-in session jump buttons + opt-in endless-scroll)
 
 ### Added (3 PRs, all from @ai-ag2026)
@@ -41,7 +113,7 @@
 
 ### Follow-up items filed (non-blocking)
 
-- **Race between endless-scroll prefetch and Start-jump's `_ensureAllMessagesLoaded`** — with both opt-ins ON, an in-flight prefetch (started by 1.5x-viewport trigger) racing with `jumpToSessionStart` → `_ensureAllMessagesLoaded` could produce duplicate messages if the prefetch resolves last. Narrow window, but the fix is to gate `_ensureAllMessagesLoaded` on the existing `_loadingOlder` flag.
+- **Race between endless-scroll prefetch and Start-jump's `_ensureAllMessagesLoaded`** — with both opt-ins ON, an in-flight prefetch (started by 1.5x-viewport trigger) racing with `jumpToSessionStart` → `_ensureAllMessagesLoaded` could produce duplicate messages if the prefetch resolves last. Narrow window, but the fix is to gate `_ensureAllMessagesLoaded` on the existing `_loadingOlder` flag. **Resolved in Unreleased — see #1937 entry above; final fix uses generation-token + mutex rather than the originally-suggested flag gate, which would not have closed the race.**
 - **#1928 locale parity** — `session_jump_*` and `settings_*_session_jump_buttons` keys are English literals in ja/ru/es/de/zh/zh-Hant/pt/ko. Default-OFF + English fallback works, but breaks the locale-parity standard set by #1929 and #1891 in the same release.
 
 

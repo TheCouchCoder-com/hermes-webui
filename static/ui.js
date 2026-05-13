@@ -2727,6 +2727,13 @@ let _composerLockState=null;
 function lockComposerForClarify(placeholderText){
   const input=$('msg');
   if(!input) return;
+  // Save the current composer text as a server-side draft before locking,
+  // so the user's draft is preserved if they switch sessions while a clarify
+  // card is active (and survives page refresh / syncs across clients).
+  const sid = S && S.session && S.session.session_id;
+  if (sid && typeof _saveComposerDraftNow === 'function') {
+    _saveComposerDraftNow(sid, input.value || '', S.pendingFiles ? [...S.pendingFiles] : []);
+  }
   if(!_composerLockState){
     _composerLockState={
       disabled: input.disabled,
@@ -4713,12 +4720,28 @@ function clearMessageRenderCache(){
   _sessionHtmlCacheSid=null;
 }
 
-function _scrollAfterMessageRender(preserveScroll){
+function _captureMessageScrollSnapshot(){
+  const el=$('messages');
+  if(!el) return null;
+  return {top:el.scrollTop};
+}
+function _restoreMessageScrollSnapshot(snapshot){
+  const el=$('messages');
+  if(!el||!snapshot) return;
+  const maxTop=Math.max(0,el.scrollHeight-el.clientHeight);
+  _programmaticScroll=true;
+  el.scrollTop=Math.max(0,Math.min(Number(snapshot.top)||0,maxTop));
+  _lastScrollTop=el.scrollTop;
+  requestAnimationFrame(()=>{ setTimeout(()=>{_programmaticScroll=false;},0); });
+}
+function _scrollAfterMessageRender(preserveScroll, scrollSnapshot){
   // Terminal stream renders can happen after S.activeStreamId is cleared.
   // In that case, preserveScroll asks the normal pin-state helper to decide:
-  // pinned users stay at bottom; users who manually scrolled up stay put.
+  // pinned users stay at bottom; users who manually scrolled up get their
+  // pre-render scrollTop restored after the DOM replacement.
   if(preserveScroll){
-    scrollIfPinned();
+    if(_scrollPinned) scrollIfPinned();
+    else _restoreMessageScrollSnapshot(scrollSnapshot);
     return;
   }
   if(S.activeStreamId){
@@ -4730,6 +4753,7 @@ function _scrollAfterMessageRender(preserveScroll){
 
 function renderMessages(options){
   const preserveScroll=!!(options&&options.preserveScroll);
+  const scrollSnapshot=preserveScroll?_captureMessageScrollSnapshot():null;
   const inner=$('msgInner');
   const sid=S.session?S.session.session_id:null;
   const msgCount=S.messages.length;
@@ -4755,7 +4779,7 @@ function renderMessages(options){
       _sessionHtmlCacheSid=sid;
       _wireMessageWindowLoadEarlierButton();
       if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
-      _scrollAfterMessageRender(preserveScroll);
+      _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
       requestAnimationFrame(()=>{highlightCode();addCopyButtons();loadDiffInline();loadCsvInline();loadExcalidrawInline();loadPdfInline();loadHtmlInline();renderMermaidBlocks();renderKatexBlocks();});
       requestAnimationFrame(()=>{highlightCode();addCopyButtons();initTreeViews();loadPdfInline();loadHtmlInline();renderMermaidBlocks();renderKatexBlocks();});
       if(typeof _initMediaPlaybackObserver==='function') _initMediaPlaybackObserver();
@@ -5295,7 +5319,7 @@ function renderMessages(options){
   // Only force-scroll when not actively streaming — mid-stream re-renders
   // (tool completion, session switch) must not override the user's scroll position.
   // scrollIfPinned() respects _scrollPinned, so it's a no-op if user scrolled up.
-  _scrollAfterMessageRender(preserveScroll);
+  _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
   // Apply syntax highlighting after DOM is built
   requestAnimationFrame(()=>{highlightCode();addCopyButtons();loadDiffInline();loadCsvInline();loadExcalidrawInline();loadPdfInline();loadHtmlInline();renderMermaidBlocks();renderKatexBlocks();});
   requestAnimationFrame(()=>{highlightCode();addCopyButtons();initTreeViews();loadPdfInline();loadHtmlInline();renderMermaidBlocks();renderKatexBlocks();}); 

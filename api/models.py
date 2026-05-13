@@ -335,6 +335,7 @@ class Session:
                  llm_title_generated: bool=False,
                 parent_session_id: str=None,
                 enabled_toolsets=None,
+                composer_draft=None,
                 **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.title = title
@@ -373,6 +374,7 @@ class Session:
         self.session_source = kwargs.get('session_source')
         self.source_label = kwargs.get('source_label')
         self.enabled_toolsets = enabled_toolsets  # List[str] or None — per-session toolset override
+        self.composer_draft = composer_draft if isinstance(composer_draft, dict) else {}
         self._metadata_message_count = None
 
     @property
@@ -413,7 +415,7 @@ class Session:
             'gateway_routing', 'gateway_routing_history', 'llm_title_generated',
             'parent_session_id',
             'is_cli_session', 'source_tag', 'raw_source', 'session_source', 'source_label',
-            'enabled_toolsets',
+            'enabled_toolsets', 'composer_draft',
         ]
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
         meta['messages'] = self.messages
@@ -590,6 +592,7 @@ class Session:
             'session_source': self.session_source,
             'source_label': self.source_label,
             'enabled_toolsets': self.enabled_toolsets,
+            'composer_draft': self.composer_draft if isinstance(self.composer_draft, dict) else {},
             'is_streaming': _is_streaming_session(
                 self.active_stream_id, active_stream_ids
             ) if include_runtime else False,

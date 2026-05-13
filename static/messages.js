@@ -189,6 +189,8 @@ async function send(){
   if(!msgText){setComposerStatus('Nothing to send');return;}
 
   $('msg').value='';autoResize();
+  // Clear persisted composer draft since message was sent.
+  if (activeSid && typeof _clearComposerDraft === 'function') _clearComposerDraft(activeSid);
   const displayText=text||(uploaded.length?`Uploaded: ${uploadedNames.join(', ')}`:'(file upload)');
   const userMsg={role:'user',content:displayText,attachments:uploaded.length?uploadedNames:undefined,_ts:Date.now()/1000};
   S.toolCalls=[];  // clear tool calls from previous turn

@@ -779,6 +779,8 @@ from api.config import (
     set_reasoning_effort,
     create_stream_channel,
     get_webui_session_save_mode,
+    STREAM_GOAL_RELATED,
+    PENDING_GOAL_CONTINUATION,
 )
 from api.helpers import (
     require,
@@ -4349,6 +4351,57 @@ def handle_post(handler, parsed) -> bool:
             s.save()
         return j(handler, {"ok": True, "enabled_toolsets": s.enabled_toolsets})
 
+    if parsed.path == "/api/session/draft":
+        # GET ?session_id=X  → return current draft
+        # POST body          → save draft { session_id, text?, files? }
+        # HTTP method is in handler.command (e.g. "POST", "GET"), parsed has no .method
+        if handler.command == "GET":
+            query = parse_qs(parsed.query)
+            sid = query.get("session_id", [""])[0] if parsed.query else ""
+            if not sid:
+                return bad(handler, "session_id is required", 400)
+            try:
+                s = get_session(sid)
+            except KeyError:
+                return bad(handler, "Session not found", 404)
+            draft = getattr(s, "composer_draft", {}) or {}
+            return j(handler, {"draft": draft})
+        # POST
+        try:
+            require(body, "session_id")
+        except ValueError as e:
+            return bad(handler, str(e))
+        sid = body["session_id"]
+        text = body.get("text")
+        files = body.get("files")
+        # Stage-326 hardening (per Opus advisor): size + type validation on
+        # the draft inputs. Without this, a misbehaving or malicious client
+        # can persist multi-MB strings into the session JSON on every keystroke
+        # via the 400ms debounced auto-save.
+        _MAX_DRAFT_TEXT = 50_000  # 50 KB cap on textarea content
+        _MAX_DRAFT_FILES = 50  # max number of attached file references
+        if text is not None and not isinstance(text, str):
+            text = ""
+        if isinstance(text, str) and len(text) > _MAX_DRAFT_TEXT:
+            text = text[:_MAX_DRAFT_TEXT]
+        if files is not None and not isinstance(files, list):
+            files = []
+        if isinstance(files, list) and len(files) > _MAX_DRAFT_FILES:
+            files = files[:_MAX_DRAFT_FILES]
+        try:
+            s = get_session(sid)
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+        with _get_session_agent_lock(sid):
+            draft = getattr(s, "composer_draft", {}) or {}
+            if text is not None:
+                draft["text"] = text
+            if files is not None:
+                draft["files"] = files
+            s.composer_draft = draft
+            s.save()
+        return j(handler, {"ok": True, "draft": s.composer_draft})
+
     if parsed.path == "/api/session/update":
         try:
             require(body, "session_id")
@@ -6869,6 +6922,7 @@ def _start_chat_stream_for_session(
     model_provider=None,
     normalized_model: bool = False,
     diag=None,
+    goal_related: bool = False,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn."""
     attachments = attachments or []
@@ -6891,6 +6945,14 @@ def _start_chat_stream_for_session(
         # Stale stream id from a previous run; clear and continue.
         diag.stage("stale_stream_cleanup") if diag else None
         _clear_stale_stream_state(s)
+
+    # #1932: check if this session has a pending goal continuation flag.
+    # The streaming hook sets PENDING_GOAL_CONTINUATION when goal_continue fires,
+    # so the next chat/start for this session is automatically treated as goal-related.
+    if not goal_related and s.session_id in PENDING_GOAL_CONTINUATION:
+        goal_related = True
+        PENDING_GOAL_CONTINUATION.discard(s.session_id)
+
     stream_id = uuid.uuid4().hex
     session_lock = _get_session_agent_lock(s.session_id)
     diag.stage("session_lock_wait") if diag else None
@@ -6911,11 +6973,14 @@ def _start_chat_stream_for_session(
     stream = create_stream_channel()
     with STREAMS_LOCK:
         STREAMS[stream_id] = stream
+    # #1932: mark stream as goal-related so the streaming hook evaluates the goal.
+    if goal_related:
+        STREAM_GOAL_RELATED[stream_id] = True
     diag.stage("worker_thread_start") if diag else None
     thr = threading.Thread(
         target=_run_agent_streaming,
         args=(s.session_id, msg, model, workspace, stream_id, attachments),
-        kwargs={"model_provider": model_provider},
+        kwargs={"model_provider": model_provider, "goal_related": goal_related},
         daemon=True,
     )
     thr.start()
@@ -7039,6 +7104,7 @@ def _handle_goal_command(handler, body):
             model=model,
             model_provider=model_provider,
             normalized_model=normalized_model,
+            goal_related=True,
         )
         status = int(stream_response.pop("_status", 200) or 200)
         payload.update(stream_response)

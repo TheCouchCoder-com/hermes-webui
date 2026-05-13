@@ -872,6 +872,11 @@ $('modelSelect').onchange=async()=>{
 $('msg').addEventListener('input',()=>{
   autoResize();
   updateSendBtn();
+  // Persist composer draft to server (debounced in _saveComposerDraft).
+  const sid = S && S.session && S.session.session_id;
+  if (sid && typeof _saveComposerDraft === 'function') {
+    _saveComposerDraft(sid, $('msg').value, S.pendingFiles ? [...S.pendingFiles] : []);
+  }
   const text=$('msg').value;
   if(text.startsWith('/')&&text.indexOf('\n')===-1){
     if(typeof getSlashAutocompleteMatches==='function'){
