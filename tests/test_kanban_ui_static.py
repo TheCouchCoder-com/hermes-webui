@@ -1062,3 +1062,51 @@ console.log(JSON.stringify(results));
     # directly into the style attribute.
     assert "_kanbanSafeColor(b.color)" in PANELS
     assert "color:${esc(b.color)}" not in PANELS
+
+
+def test_kanban_locale_parity():
+    """Every kanban_* i18n key in the English locale must exist in all
+    non-English locale blocks.  The kanban panel has its own set of ~86
+    keys (kanban_board, kanban_task, …) that are rendered via t() — a
+    missing key silently falls back to English, which is acceptable for
+    content keys but confusing for UI labels the user expects to see
+    translated.
+
+    This test catches regressions where a new kanban key is added to the
+    English block but not to one or more locale blocks.  Pattern borrowed
+    from test_lineage_segment_locale_keys_are_defined_for_sidebar_locales
+    in test_session_lineage_collapse.py.
+
+    Refs: #1973
+    """
+    locale_blocks = _locale_blocks_with_body(I18N)
+    assert locale_blocks, "No locale blocks found in i18n.js"
+
+    # Collect the kanban_* keys from the English block.
+    en_name = "en"
+    en_body = None
+    for name, body in locale_blocks:
+        if name == en_name:
+            en_body = body
+            break
+    assert en_body is not None, "English locale block not found"
+
+    en_keys = set(re.findall(r"(kanban_\w+)\s*:", en_body))
+    assert en_keys, "No kanban_* keys found in English locale"
+
+    # Verify each non-English locale has the same set.
+    failures = []
+    for name, body in locale_blocks:
+        if name == en_name:
+            continue
+        loc_keys = set(re.findall(r"(kanban_\w+)\s*:", body))
+        missing = en_keys - loc_keys
+        extra = loc_keys - en_keys
+        if missing:
+            failures.append(f"{name}: missing {sorted(missing)}")
+        if extra:
+            failures.append(f"{name}: extra {sorted(extra)}")
+
+    assert not failures, (
+        "Kanban i18n key parity violations:\n" + "\n".join(failures)
+    )

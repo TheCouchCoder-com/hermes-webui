@@ -33,6 +33,7 @@ from api.config import (
     model_with_provider_context,
 )
 from api.helpers import redact_session_data, _redact_text
+from api.compression_anchor import visible_messages_for_anchor
 from api.metering import meter
 
 # Global lock for os.environ writes. Per-session locks (_agent_lock) prevent
@@ -1606,44 +1607,6 @@ def _compression_anchor_message_key(message):
     return {'role': role, 'ts': ts, 'text': text, 'attachments': attach_count}
 
 
-def _visible_messages_for_compression_anchor(messages):
-    out = []
-    for m in messages or []:
-        if not isinstance(m, dict):
-            continue
-        role = m.get('role')
-        if not role or role == 'tool':
-            continue
-        content = m.get('content', '')
-        has_attachments = bool(m.get('attachments'))
-        has_tool_calls = bool(isinstance(m.get('tool_calls'), list) and m.get('tool_calls'))
-        has_tool_use = False
-        has_reasoning = bool(m.get('reasoning'))
-        if isinstance(content, list):
-            text = '\n'.join(
-                str(p.get('text') or p.get('content') or '')
-                for p in content
-                if isinstance(p, dict)
-                and p.get('type') in {'text', 'input_text', 'output_text'}
-            ).strip()
-            for part in content:
-                if not isinstance(part, dict):
-                    continue
-                if part.get('type') == 'tool_use':
-                    has_tool_use = True
-            if not text:
-                has_reasoning = has_reasoning or any(
-                    isinstance(part, dict)
-                    and part.get('type') in {'thinking', 'reasoning'}
-                    for part in content
-                )
-        else:
-            text = str(content or '').strip()
-        if text or has_attachments or has_tool_calls or has_tool_use or has_reasoning:
-            out.append(m)
-    return out
-
-
 def _compression_summary_from_messages(messages):
     for m in reversed(messages or []):
         if not isinstance(m, dict):
@@ -2256,13 +2219,18 @@ def _run_agent_streaming(
         # two concurrent tabs on different profiles don't clobber each other via the
         # process-level active-profile global.  Falls back gracefully.
         try:
-            from api.profiles import get_hermes_home_for_profile, get_profile_runtime_env
+            from api.profiles import (
+                _patch_skill_home_modules,
+                get_hermes_home_for_profile,
+                get_profile_runtime_env,
+            )
             _profile_home_path = get_hermes_home_for_profile(getattr(s, 'profile', None))
             _profile_home = str(_profile_home_path)
             _profile_runtime_env = get_profile_runtime_env(_profile_home_path)
         except ImportError:
             _profile_home = os.environ.get('HERMES_HOME', '')
             _profile_runtime_env = {}
+            _patch_skill_home_modules = None
         
         # Capture the resolved profile name now, while profile context is
         # reliable. Used in the compression migration block to stamp s.profile
@@ -2315,23 +2283,8 @@ def _run_agent_streaming(
                 # above, so we only do lightweight sys.modules lookups and
                 # attribute assignments here — no first-time import under
                 # the lock (#2024).
-                from pathlib import Path as _P
-                import sys as _sys
-                _ph = _P(_profile_home)
-                _sk = _sys.modules.get('tools.skills_tool')
-                if _sk is not None:
-                    try:
-                        _sk.HERMES_HOME = _ph
-                        _sk.SKILLS_DIR = _ph / 'skills'
-                    except AttributeError:
-                        pass
-                _sm = _sys.modules.get('tools.skill_manager_tool')
-                if _sm is not None:
-                    try:
-                        _sm.HERMES_HOME = _ph
-                        _sm.SKILLS_DIR = _ph / 'skills'
-                    except AttributeError:
-                        pass
+                if _patch_skill_home_modules is not None:
+                    _patch_skill_home_modules(Path(_profile_home))
         # Lock released — agent runs without holding it
         # ── MCP Server Discovery (lazy import, idempotent) ──
         # MUST run AFTER the HERMES_HOME mutation above — `discover_mcp_tools()`
@@ -3370,7 +3323,7 @@ def _run_agent_streaming(
                         _compressed = True
                 # Notify the frontend that compression happened
                 if _compressed:
-                    visible_after = _visible_messages_for_compression_anchor(s.messages)
+                    visible_after = visible_messages_for_anchor(s.messages, auto_compression=True)
                     s.compression_anchor_visible_idx = (
                         max(0, len(visible_after) - 1) if visible_after else None
                     )

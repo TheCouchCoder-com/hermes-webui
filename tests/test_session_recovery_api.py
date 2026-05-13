@@ -27,6 +27,7 @@ def test_repair_safe_session_recovery_restores_backup_and_rebuilds_index(tmp_pat
 
     result = repair_safe_session_recovery(tmp_path)
 
+    assert result["clean"] is True
     assert result["ok"] is True
     assert result["repaired"] == 1
     assert live.exists()
@@ -50,10 +51,19 @@ def test_repair_safe_session_recovery_leaves_unsafe_orphan_for_manual_review(tmp
 
     result = repair_safe_session_recovery(tmp_path, state_db_path=db)
 
+    assert result["clean"] is False
     assert result["ok"] is False
     assert result["repaired"] == 0
     assert not live.exists()
     assert result["after"]["status"] == "needs_manual_review"
+
+
+def test_repair_safe_route_uses_clean_flag_for_status_code():
+    from pathlib import Path
+
+    src = Path("api/routes.py").read_text(encoding="utf-8")
+
+    assert 'status=200 if result.get("clean") else 409' in src
 
 
 def test_recovery_audit_routes_are_registered():

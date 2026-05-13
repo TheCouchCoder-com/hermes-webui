@@ -24,6 +24,7 @@ from typing import Any
 from api.config import (
     _PROVIDER_DISPLAY,
     _PROVIDER_MODELS,
+    _custom_provider_slug_from_name,
     _get_label_for_model,
     _models_from_live_provider_ids,
     _read_live_provider_model_ids,
@@ -35,6 +36,19 @@ from api.config import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _custom_provider_name_matches(provider_id: str, name: object) -> bool:
+    """Return True when *provider_id* refers to a named custom provider."""
+    pid = str(provider_id or "").strip().lower()
+    raw_name = str(name or "").strip().lower()
+    if not pid or not raw_name:
+        return False
+    slug = _custom_provider_slug_from_name(raw_name)
+    candidates = {raw_name, f"custom:{raw_name}"}
+    if slug:
+        candidates.add(slug)
+    return pid in candidates
 
 _OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key"
 _PROVIDER_QUOTA_TIMEOUT_SECONDS = 3.0
@@ -395,8 +409,7 @@ def _provider_has_key(provider_id: str) -> bool:
     if isinstance(custom_providers, list):
         for cp in custom_providers:
             if isinstance(cp, dict):
-                cp_name = (cp.get("name") or "").strip().lower().replace(" ", "-")
-                if f"custom:{cp_name}" == provider_id or cp.get("name", "").strip().lower() == provider_id:
+                if _custom_provider_name_matches(provider_id, cp.get("name")):
                     if str(cp.get("api_key") or "").strip():
                         return True
     return False
@@ -440,8 +453,7 @@ def _get_provider_api_key(provider_id: str) -> str | None:
         for cp in custom_providers:
             if not isinstance(cp, dict):
                 continue
-            cp_name = str(cp.get("name") or "").strip().lower().replace(" ", "-")
-            if f"custom:{cp_name}" == provider_id or str(cp.get("name", "")).strip().lower() == provider_id:
+            if _custom_provider_name_matches(provider_id, cp.get("name")):
                 cp_key = str(cp.get("api_key") or "").strip()
                 if cp_key.startswith("${") and cp_key.endswith("}"):
                     return os.getenv(cp_key[2:-1], "").strip() or None
@@ -1033,7 +1045,13 @@ def get_providers() -> dict[str, Any]:
             if not isinstance(cp, dict) or not cp.get("name"):
                 continue
             cp_name = str(cp["name"]).strip()
-            cp_id = f"custom:{cp_name}"
+            cp_id = _custom_provider_slug_from_name(cp_name)
+            if not cp_id:
+                logger.warning(
+                    "Custom provider entry %r produced empty slug; skipping",
+                    cp_name,
+                )
+                continue
             # Collect models from `models` list or `model` single
             cp_models = []
             if isinstance(cp.get("models"), list):
@@ -1206,8 +1224,7 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
             if isinstance(custom_providers, list):
                 for cp in custom_providers:
                     if isinstance(cp, dict):
-                        cp_name = (cp.get("name") or "").strip().lower().replace(" ", "-")
-                        if f"custom:{cp_name}" == provider_id or cp.get("name", "").strip().lower() == provider_id:
+                        if _custom_provider_name_matches(provider_id, cp.get("name")):
                             if cp.get("api_key"):
                                 del cp["api_key"]
                                 changed = True

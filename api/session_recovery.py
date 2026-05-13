@@ -177,7 +177,12 @@ def _orphaned_backup_live_paths(
     return paths
 
 
-def _read_state_db_missing_sidecar_rows(session_dir: Path, state_db_path: Path | None) -> list[dict]:
+def _read_state_db_missing_sidecar_rows(
+    session_dir: Path,
+    state_db_path: Path | None,
+    *,
+    include_empty: bool = False,
+) -> list[dict]:
     """Return WebUI-origin state.db rows whose JSON sidecar is missing."""
     if state_db_path is None or not state_db_path.exists():
         return []
@@ -229,9 +234,10 @@ def _read_state_db_missing_sidecar_rows(session_dir: Path, state_db_path: Path |
                         if msg['timestamp'] is not None:
                             message['timestamp'] = msg['timestamp']
                         message_rows.append(message)
-                if not message_rows:
+                if not message_rows and not include_empty:
                     continue
                 data['messages'] = message_rows
+                data['_state_db_empty_messages'] = not message_rows
                 rows.append(data)
             return rows
     except Exception as exc:
@@ -323,6 +329,7 @@ def recover_missing_sidecars_from_state_db(session_dir: Path, state_db_path: Pat
         # Session.save() convention).
         tmp_suffix = f".json.reconcile.tmp.{os.getpid()}.{threading.current_thread().ident}"
         tmp = target.with_suffix(tmp_suffix)
+        detail_recorded = False
         try:
             tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
         except OSError as exc:
@@ -345,6 +352,7 @@ def recover_missing_sidecars_from_state_db(session_dir: Path, state_db_path: Pat
             pass
         except OSError as exc:
             details.append({'session_id': sid, 'materialized': False, 'error': str(exc)})
+            detail_recorded = True
         finally:
             try:
                 tmp.unlink(missing_ok=True)
@@ -353,7 +361,7 @@ def recover_missing_sidecars_from_state_db(session_dir: Path, state_db_path: Pat
         if materialized_now:
             materialized += 1
             details.append({'session_id': sid, 'materialized': True, 'messages': len(payload.get('messages') or [])})
-        elif not any(d.get('session_id') == sid for d in details[-1:]):
+        elif not detail_recorded:
             details.append({'session_id': sid, 'materialized': False, 'skipped': 'sidecar_appeared_during_reconcile'})
     return {'scanned': len(rows), 'materialized': materialized, 'details': details}
 
@@ -458,8 +466,18 @@ def audit_session_recovery(session_dir: Path, state_db_path: Path | None = None)
                 _msg_count(session_dir / f"{session_id}.json"), -1,
             ))
 
-    for row in _read_state_db_missing_sidecar_rows(session_dir, state_db_path):
+    for row in _read_state_db_missing_sidecar_rows(session_dir, state_db_path, include_empty=True):
         sid = str(row.get('id') or '')
+        if row.get('_state_db_empty_messages'):
+            items.append(_new_audit_item(
+                sid,
+                "state_db_orphan_webui_row",
+                "unsafe_to_repair",
+                "manual_review",
+                -1,
+                -1,
+            ))
+            continue
         items.append(_new_audit_item(
             sid,
             "state_db_missing_sidecar",
@@ -506,8 +524,10 @@ def repair_safe_session_recovery(session_dir: Path, state_db_path: Path | None =
     after = audit_session_recovery(session_dir, state_db_path=state_db_path)
     unsafe_remaining = int((after.get("summary") or {}).get("unsafe_to_repair") or 0)
     repairable_remaining = int((after.get("summary") or {}).get("repairable") or 0)
+    clean = unsafe_remaining == 0 and repairable_remaining == 0
     return {
-        "ok": unsafe_remaining == 0 and repairable_remaining == 0,
+        "clean": clean,
+        "ok": clean,
         "repaired": int(backup_repair.get("restored") or 0) + int(sidecar_repair.get("materialized") or 0),
         "before": before,
         "backup_repair": backup_repair,

@@ -241,6 +241,14 @@ class TestMediaEndpointUnit(unittest.TestCase):
         self.assertIn("MEDIA_ALLOWED_ROOTS", routes_src,
                       "MEDIA_ALLOWED_ROOTS env var must be parsed in _handle_media")
 
+    def test_media_allowed_roots_uses_os_pathsep(self):
+        """MEDIA_ALLOWED_ROOTS must use the platform path separator."""
+        routes_src = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
+        start = routes_src.index("extra_roots =")
+        block = routes_src[start:start + 900]
+        self.assertIn(".split(_os.pathsep)", block)
+        self.assertNotIn('.split(":")', block)
+
     def test_media_endpoints_advertise_byte_range_support(self):
         routes_src = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
         self.assertIn("Accept-Ranges", routes_src)

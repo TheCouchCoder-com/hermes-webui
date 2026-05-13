@@ -69,6 +69,29 @@ def test_audit_reports_state_db_row_missing_sidecar(tmp_path):
     )
 
 
+def test_empty_state_db_webui_row_is_unsafe_not_materialized(tmp_path):
+    sid = _make_state_db(tmp_path / "state.db", sid="empty_state_row", messages=0)
+
+    audit = audit_session_recovery(tmp_path, state_db_path=tmp_path / "state.db")
+
+    assert any(
+        item["session_id"] == sid
+        and item["kind"] == "state_db_orphan_webui_row"
+        and item["category"] == "unsafe_to_repair"
+        and item["recommendation"] == "manual_review"
+        for item in audit["items"]
+    )
+    assert not any(
+        item["session_id"] == sid and item["kind"] == "state_db_missing_sidecar"
+        for item in audit["items"]
+    )
+
+    result = recover_missing_sidecars_from_state_db(tmp_path, tmp_path / "state.db")
+
+    assert result["materialized"] == 0
+    assert not (tmp_path / f"{sid}.json").exists()
+
+
 def test_materialized_sidecar_round_trips_through_session_load(tmp_path, monkeypatch):
     """Schema parity guard: a materialized sidecar must be readable by Session.load
     and the resulting Session must have the same messages we put in state.db.
