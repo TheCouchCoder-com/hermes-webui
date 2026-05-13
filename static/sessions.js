@@ -392,6 +392,17 @@ async function newSession(flash){
   updateSendBtn();
   setStatus('');
   setComposerStatus('');
+  if(typeof _setLiveAssistantTps==='function') _setLiveAssistantTps(null);
+  if(typeof _syncCtxIndicator==='function'){
+    _syncCtxIndicator({
+      input_tokens:data.session.input_tokens||0,
+      output_tokens:data.session.output_tokens||0,
+      estimated_cost:data.session.estimated_cost||0,
+      context_length:data.session.context_length||0,
+      last_prompt_tokens:data.session.last_prompt_tokens||0,
+      threshold_tokens:data.session.threshold_tokens||0,
+    });
+  }
   updateQueueBadge(S.session.session_id);
   syncTopbar();renderMessages();loadDir('.');
   // don't call renderSessionList here - callers do it when needed

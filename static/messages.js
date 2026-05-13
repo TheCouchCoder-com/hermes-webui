@@ -210,6 +210,7 @@ async function send(){
   startClarifyPolling(activeSid);
   _fetchYoloState(activeSid);  // sync YOLO pill with backend state
   S.activeStreamId = null;  // will be set after stream starts
+  if(typeof updateSendBtn==='function') updateSendBtn();
 
   // Set provisional title from user message immediately so session appears
   // in the sidebar right away with a meaningful name (server may refine later)
@@ -243,6 +244,7 @@ async function send(){
       profile:S.activeProfile||S.session.profile||'default',
       attachments:uploaded.length?uploaded:undefined
     })});
+
     if(startData.effective_model && S.session){
       S.session.model=startData.effective_model;
       S.session.model_provider=startData.effective_model_provider||S.session.model_provider||null;
@@ -259,6 +261,9 @@ async function send(){
     }
     streamId=startData.stream_id;
     S.activeStreamId = streamId;
+    // setBusy(true) already ran with activeStreamId=null; refresh now that we
+    // have a stream id so the primary button can switch to Stop (see getComposerPrimaryAction).
+    if(typeof updateSendBtn==='function') updateSendBtn();
     if(S.session&&typeof startData.pending_started_at==='number'){
       S.session.pending_started_at=startData.pending_started_at;
     }
@@ -1174,6 +1179,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       try{
         const d=JSON.parse(e.data||'{}');
         if((d.session_id||activeSid)!==activeSid) return;
+        if(d.usage&&typeof _syncCtxIndicator==='function'){
+          S.lastUsage={...(S.lastUsage||{}),...d.usage};
+          _syncCtxIndicator(S.lastUsage);
+        }
         if(d.estimated===true||d.tps_available!==true||typeof d.tps!=='number'||d.tps<=0){
           if(typeof _setLiveAssistantTps==='function') _setLiveAssistantTps(null);
           return;

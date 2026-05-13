@@ -10,6 +10,32 @@
 
 ## [v0.51.29] — 2026-05-08 — 6-PR contributor batch (Release F: Docker hardening + login persistence + scroll/lineage fixes + i18n cleanup)
 
+## [v0.51.39] — 2026-05-10 — Release O (4-PR contributor batch — Railway docker fix + Stop-button race + provider resolver + live context tracking)
+
+### Fixed
+
+- **PR #2017** by @michael-dg — `docker_init.bash` failed on user-namespaced rootless container runtimes (Railway). In-container UID 0 maps to a host UID outside the writable subuid range, so `save_env /tmp/hermeswebui_root_env.txt` failed with `Permission denied` even though `id -u` returns 0. The existing read-only-rootfs guard at `:192-197` only covered `/etc/group` / `/etc/passwd` writability and didn't catch this signature. Adds a writability probe before `save_env` and a fallback chain (`${itdir}/hermeswebui_root_env.txt` → `/app/.hermeswebui_root_env`); exports `_HW_ROOT_ENV_PATH` so the post-su phase finds the same file. State-dir verifier left intact (silent degradation there would mask real volume-permission misconfig). Closes #2010.
+
+- **PR #2018** by @rhelmer — Stop button didn't refresh after `/api/chat/start` returned a `stream_id`. The client became busy before it had a new stream id, updated the send button at that moment, but never updated again once the id arrived — so the Stop button only fixed itself when something else triggered a refresh (e.g. the user typing). Now refreshes when the new stream id is received and again when an old `activeStreamId` is cleared, so the button doesn't lie about whether stop/cancel is valid. Includes regression coverage in `tests/test_1062_busy_input_modes.py`.
+
+- **PR #2022** by @Michaelyklam — `resolve_model_provider()` in `api/config.py` checked `custom_providers[]` first, so when the configured default model also appeared in a custom provider entry, the request routed to `custom:<name>` instead of the explicit active provider. Users hit confusing 401/auth errors from a provider they didn't intend to use (#1922). The narrow fix skips custom-provider shadowing only for the configured default model when the active provider is an explicit non-custom provider. Existing custom-provider routing for explicitly selected custom-models and slash-containing endpoint model IDs is preserved. Regression tests added for `ai-gateway` and `xiaomi` overlap cases. Closes #1922.
+
+### Added
+
+- **PR #2009** by @dobby-d-elf — Live context-window tracking during streaming. Two gaps closed in the WebUI context indicator:
+  - **Updates during tool calls.** Token usage and context length were previously updated only after a full response completed; the indicator now receives live `usage` events mid-stream while tools are executing, so users see real-time consumption instead of stale numbers. Server emits `_live_usage_snapshot()` payloads during tool execution; frontend merges them via `_syncCtxIndicator()`. Tracks input tokens, output tokens, estimated cost, context length, threshold tokens, and last prompt tokens.
+  - **Reset on new sessions.** `_syncCtxIndicator()` is now called from `newSession()` so the indicator starts from the fresh session's reading instead of carrying stale values from the previous conversation.
+
+  Live metering events are tagged with the real WebUI `session_id` so the frontend session filter accepts them. Token-driven metering events include the live `usage` payload to keep the indicator moving while the agent is actively streaming. Reused cached agents refresh `tool_start_callback` and `tool_complete_callback` so live tracking continues after the first turn in a session.
+
+### Tests
+
+5066+ → **5071+ passing, 0 regressions** (+5 net new across `test_1062_busy_input_modes.py`, `test_model_resolver.py`, `test_issue1617_tps_message_header.py`). Full suite under 160s on Python 3.11 with `HERMES_HOME` isolation.
+
+### Notes
+
+- 4 PRs from 4 different authors. `static/messages.js` was the only multi-PR file (#2009 + #2018), with disjoint hunks at lines ~1159 and ~210/244/261 respectively. `api/streaming.py` only touched by #2009. Stage merge clean with no conflicts.
+
 ## [v0.51.38] — 2026-05-10 — Release N (UI polish — toast + mobile + diff renderer + sidebar)
 
 ### Fixed

@@ -1528,18 +1528,36 @@ def resolve_model_provider(model_id: str) -> tuple:
 
     # Custom providers declared in config.yaml should win over slash-based
     # OpenRouter heuristics. Their model IDs commonly contain '/' too.
-    custom_providers = cfg.get("custom_providers", [])
-    if isinstance(custom_providers, list):
+    # However, when the active provider is an explicit non-custom provider and
+    # the requested model_id is the configured default model, that active
+    # provider takes precedence over overlapping custom_providers[] entries.
+    # Otherwise WebUI routes to custom:<name> instead of the intended endpoint
+    # and can surface a 401 from the wrong provider (#1922).
+    # For all other cases, preserve custom_providers[] routing for explicitly
+    # selected custom provider models.
+    _is_explicit_non_custom_provider = (
+        config_provider is not None
+        and config_provider != 'custom'
+        and not config_provider.startswith('custom:')
+    )
+    _default_model = model_cfg.get('default') if isinstance(model_cfg, dict) else None
+    _skip_custom_providers = (
+        _is_explicit_non_custom_provider
+        and _default_model is not None
+        and model_id == _default_model
+    )
+    custom_providers = cfg.get('custom_providers', [])
+    if isinstance(custom_providers, list) and not _skip_custom_providers:
         for entry in custom_providers:
             if not isinstance(entry, dict):
                 continue
-            entry_model = (entry.get("model") or "").strip()
-            entry_name = (entry.get("name") or "").strip()
-            entry_base_url = (entry.get("base_url") or "").strip()
+            entry_model = (entry.get('model') or '').strip()
+            entry_name = (entry.get('name') or '').strip()
+            entry_base_url = (entry.get('base_url') or '').strip()
             entry_model_ids = set()
             if entry_model:
                 entry_model_ids.add(entry_model)
-            entry_models = entry.get("models")
+            entry_models = entry.get('models')
             if isinstance(entry_models, dict):
                 entry_model_ids.update(
                     key.strip()
@@ -1547,7 +1565,7 @@ def resolve_model_provider(model_id: str) -> tuple:
                     if isinstance(key, str) and key.strip()
                 )
             if entry_name and model_id in entry_model_ids:
-                provider_hint = "custom:" + entry_name.lower().replace(" ", "-")
+                provider_hint = 'custom:' + entry_name.lower().replace(' ', '-')
                 return model_id, provider_hint, entry_base_url or None
 
     # @provider:model format — explicit provider hint from the dropdown.
