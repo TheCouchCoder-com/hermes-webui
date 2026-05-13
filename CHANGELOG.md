@@ -4,6 +4,34 @@
 > Entries below this notice document upstream releases and were not written by the fork maintainers.
 > Fork-specific changes will be added above this notice as they ship.
 
+## [v0.51.15] — 2026-05-07 — 4-PR contributor batch + 1 self-built (cron spawn migration, context menu, codex quota, model prefix)
+
+### Fixed
+
+- **PR #1767** by @Michaelyklam — Use `spawn` for manual cron subprocesses (closes #1754, the architectural follow-up filed in v0.51.12). One-line context change `multiprocessing.get_context("fork")` → `"spawn"` at `api/routes.py:367` plus +207 LOC of regression coverage in `tests/test_issue1574_cron_profile_lock.py`. Validates: (a) source-level pin that the helper uses spawn, (b) end-to-end harness showing `fork` deadlocks on a parent-thread-held lock while `spawn` succeeds, (c) drain-large-result regression preserved, (d) executes-under-selected-profile-home regression preserved. **Auto-fix applied at stage**: 2 of the 5 tests fail on dev machines with an editable `hermes_agent` install (the spawn child resolves the real `cron.scheduler` first instead of the fake one written under `HERMES_WEBUI_AGENT_DIR`). Added `_real_hermes_agent_editable_install_present()` detector using `importlib.util.find_spec` origin check + `pytest.skip` guard. Tests skip on dev (where they cannot work as designed) and run cleanly on CI (where no editable install exists). Closes the fork-from-multi-threaded-WebUI hazard class noted in #1754: import-lock and logging-lock inheritance no longer apply, since spawn starts a fresh interpreter.
+- **PR #1770** by @Michaelyklam — Surface Codex usage exhaustion errors (closes #1765). New `quota_exhausted` SSE event for Codex 429/quota responses replaces the previous behavior (empty turn with no inline error) with a clear inline error card. `_classify_provider_error()` distinguishes quota-exhaustion (requires re-auth) from transient rate-limit (just needs to wait) — Opus stage-309 verified the classifier order (quota check first, rate-limit is `not _is_quota AND ...`) preserves the distinction. Detection covers Codex OAuth shapes: "plan limit reached", "usage_limit_exceeded", "reached the limit of messages", "used up your usage", plus the multi-token fallback. Both error paths properly clean up runtime state (INFLIGHT, approval/clarify pollers via `finally` block) and run `_materialize_pending_user_turn_before_error()` before `pending_user_message = None` clearing — preserving the user-turn data-loss fix from PR #1760 (v0.51.14). 62 LOC test coverage in `tests/test_issue1765_codex_quota.py`. Includes 2 PNG screenshots.
+- **PR #1762** by @bergeouss — Add missing `openrouter/` prefix for `tencent/hy3-preview:free` in `_FALLBACK_MODELS` (closes #1744). Pure data fix; resolves the model to the right provider. Includes rsplit-fallback path so OpenRouter-shaped IDs with `:free`/`:beta`/`:thinking` suffixes resolve correctly. **One edge case filed as follow-up #1776** (Opus stage-309 noted: `@custom:<key>:<model>:free` mis-resolves because the rsplit-fallback skips on `custom:` provider hint — uncommon combination, non-blocking).
+
+### Added
+
+- **PR #1769** by @nesquena-hermes — Three high-leverage context-menu essentials from #1764 (self-built, **independently APPROVED by @nesquena** at exact head SHA `102157bc`). Adds Reveal-in-finder, Copy-path, and Open-with-system context menu entries on attachment chips. Two new endpoints `_handle_file_reveal` + `_handle_file_path` in `api/routes.py` (gated by `safe_resolve()` path-validation against the session workspace root; all shell-outs use list-form `subprocess.Popen([...])` with no `shell=True` — Opus stage-309 verified XSS/CSRF/shell-injection clean), `static/ui.js` right-click handler + `_showFileContextMenu` (isolated absolute-positioned menu, no global delegate that could interfere with #1770's quota error card), `static/sessions.js` integration, locale strings × 6 in `static/i18n.js`. 343 LOC test coverage in `tests/test_1764_context_menu_essentials.py`.
+
+### Tests
+
+4662 → **4694 collected** (+32 across 4 new test files plus regression coverage tightening). 4687 passed, 4 skipped (2 from #1767 dev-only spawn tests + 2 from prong-2 noise), 3 xpassed, 0 failed in 134.82s.
+
+### Pre-release verification
+
+- All 4 PRs CI-green individually.
+- Auto-fix on #1767 verified (3 passed, 2 skipped on dev — would be 5 passed on CI).
+- `node -c` clean on all 4 changed JS files (`static/ui.js`, `static/messages.js`, `static/i18n.js`, `static/sessions.js`).
+- pytest: 4687 passed, 0 failed (single clean run, ~135s).
+- `scripts/run-browser-tests.sh`: all 11 endpoints PASS on isolated port 8789.
+- Pre-stamp re-fetch: all 4 PR heads still match local rebases — no late commits.
+- Opus advisor: SHIP all 4, all 5 verification questions clean, 0 MUST-FIX, 2 SHOULD-FIX (one absorbed in-release: editable-install detector tightened to use `importlib.util.find_spec`-origin check; one filed as follow-up #1776).
+
+Closes #1744, #1754, #1764, #1765.
+
 ## [v0.51.14] — 2026-05-06 — 4-PR contributor batch
 
 ### Fixed
