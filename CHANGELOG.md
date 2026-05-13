@@ -10,6 +10,12 @@
 
 ## [v0.51.29] — 2026-05-08 — 6-PR contributor batch (Release F: Docker hardening + login persistence + scroll/lineage fixes + i18n cleanup)
 
+## [Unreleased]
+
+### Fixed
+
+- **bug(profile/mcp): non-default profile MCP servers never load** ([#1968](https://github.com/nesquena/hermes-webui/issues/1968)). `_run_agent_streaming` called `discover_mcp_tools()` ~100 lines BEFORE the per-session `os.environ['HERMES_HOME'] = _profile_home` mutation, so MCP discovery always read the default profile's `~/.hermes/config.yaml` regardless of which profile the session was stamped with. Result: switching profiles in the WebUI dropdown was effectively cosmetic for MCP — non-default profiles never registered their stdio (npx/node) MCP servers. Fix relocates the `discover_mcp_tools()` call past the `_ENV_LOCK` env-mutation block so `get_hermes_home()` resolves to the session's actual profile home. Adds 4 static regression tests (`tests/test_issue1968_mcp_profile_discovery.py`) pinning the call ordering, lock-release placement, single call site, and try/except wrapping. **Caveat (out of scope, agent-side):** `_servers` in `tools/mcp_tool.py` is a process-global dict keyed only by server name, so concurrent use of multiple non-default profiles in the same WebUI process still has a "first profile wins per name" issue. Fully fixing that requires keying `_servers` by `(profile_home, name)` upstream in hermes-agent. This PR ships layer 1 only.
+
 ## [v0.51.31] — 2026-05-09 — Release H (12-PR contributor batch: image-mode + race fixes + composer drafts + locale parity)
 
 ### Added

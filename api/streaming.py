@@ -1919,15 +1919,10 @@ def _run_agent_streaming(
     old_hermes_home = None
     old_profile_env = {}
 
-    # ── MCP Server Discovery (lazy import, idempotent) ──
-    # discover_mcp_tools() is called here (rather than at server startup) so that
-    # the hermes-agent package is fully initialized before we try to connect.
-    # It is safe to call multiple times — already-connected servers are skipped.
-    try:
-        from tools.mcp_tool import discover_mcp_tools
-        discover_mcp_tools()
-    except Exception:
-        pass  # MCP not available or not configured — non-fatal
+    # MCP discovery moved to AFTER the per-profile HERMES_HOME mutation below
+    # (was here at v0.51.30) — the previous placement always read the default
+    # profile's mcp_servers because os.environ['HERMES_HOME'] hadn't been
+    # rewritten yet.  See https://github.com/nesquena/hermes-webui/issues/1968.
 
     # Sprint 10: create a cancel event for this stream
     cancel_event = threading.Event()
@@ -2052,6 +2047,27 @@ def _run_agent_streaming(
             if _profile_home:
                 os.environ['HERMES_HOME'] = _profile_home
         # Lock released — agent runs without holding it
+        # ── MCP Server Discovery (lazy import, idempotent) ──
+        # MUST run AFTER the HERMES_HOME mutation above — `discover_mcp_tools()`
+        # reads `~/.hermes/config.yaml` via `get_hermes_home()`, which uses
+        # `os.environ['HERMES_HOME']`.  Calling it before the mutation always
+        # loaded the default profile's `mcp_servers`, even when the session
+        # was stamped with a non-default profile.  See issue #1968.
+        #
+        # NOTE: `_servers` in `tools/mcp_tool.py` is a process-global registry
+        # keyed by server name.  This means once profile A registers a server
+        # named e.g. `postgres`, profile B's discovery sees it as already
+        # connected and skips it — even if B's config points at a different
+        # binary.  Fully fixing multi-profile concurrent use requires keying
+        # `_servers` by `(profile_home, name)` upstream in hermes-agent; that
+        # lives outside this WebUI repo.  This change fixes the headline bug
+        # for users who run a single non-default profile per WebUI process.
+        try:
+            from tools.mcp_tool import discover_mcp_tools
+            discover_mcp_tools()
+        except Exception:
+            pass  # MCP not available or not configured — non-fatal
+
         # Register a gateway-style notify callback so the approval system can
         # push the `approval` SSE event the moment a dangerous command is
         # detected, without waiting for the next on_tool() poll cycle.
