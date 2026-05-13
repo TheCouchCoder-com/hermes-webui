@@ -8,6 +8,39 @@
 
 ## [v0.51.28] — 2026-05-08 — 2-PR contributor batch (Release E2: MCP server Option A rewrite + WebUI /goal command)
 
+## [v0.51.29] — 2026-05-08 — 6-PR contributor batch (Release F: Docker hardening + login persistence + scroll/lineage fixes + i18n cleanup)
+
+### Added (1 PR)
+
+- **PR #1919** by @franksong2702 — Persist login rate limit attempts (closes #1910). Stores failed-login buckets in `STATE_DIR/.login_attempts.json` instead of in-process memory, so password-auth deployments keep the same failed-attempt window across restarts. Atomic temp+rename writes, `0600` permissions, prunes expired entries on load. If the file is missing, malformed, or unwritable, the auth path falls back to current in-memory behavior with debug-level logging — no infinite-loop risk.
+
+### Fixed (5 PRs)
+
+- **PR #1920** by @franksong2702 — Remove dead `kanban_card_start` i18n key. PR #1886 removed the Kanban card-level Start action (direct `running` transitions are now owned by the dispatcher), but the `kanban_card_start` locale key was left present in every locale block. Removed across all 9 locales and strengthened the Kanban static regression test so the dead key cannot be reintroduced.
+
+- **PR #1921** by @Michaelyklam — Production Docker image hardening (closes #1908). Removes passwordless sudo path, drops the `hermeswebuitoo` sudo-capable staging user, and reworks `docker_init.bash` so privileged setup runs in an explicit root init block before re-execing as the `hermeswebui` user without sudo. Init scratch state now uses owner-only permissions (`umask 0077`, `0700` directory, `0600` files). Added `docs/docker.md` with production-image security model notes. A shell gained through the WebUI runtime no longer has a passwordless sudo path to root inside the production container.
+
+- **PR #1926** by @ai-ag2026 — Prevent chat scroll resets after final render. The final-render path could write/rebuild DOM, queue native scroll events, and then lose the explicit bottom pin before delayed layout growth settled. Separately, clicking the already-open session still ran the `loadSession()` teardown/setup path. Fix: keep explicit bottom scroll pins stable across `renderMessages({preserveScroll: true})` and late Markdown/layout growth, and make clicking the currently-active sidebar session a no-op before `loadSession()` mutates state.
+
+- **PR #1927** by @ai-ag2026 — Preserve viewport when loading older messages. Pre-fix, prepending older history could snap the viewport to the bottom or surface only a larger hidden-count marker. Fix: expand transcript render window before rendering newly fetched older messages, then anchor at the current viewport instead of snapping. Adds focused regression coverage for older-history viewport anchoring.
+
+- **PR #1930** by @ai-ag2026 — Collapse stale compression sidebar segments. The sidebar collapse key treated any row whose `parent_session_id` pointed at another visible row as a non-collapsible child/fork row — correct for subagent/fork sessions, but wrong for automatic compression continuations that already carry `_lineage_root_id`/`lineage_root_id` and should collapse by lineage even when stale optimistic parent segments are still locally visible. Fix: prefer explicit lineage metadata before the visible-parent guard.
+
+### Tests
+
+4947 → **4960 collected, 4960 passing, 0 regressions** (+13 net new). Full suite ~145s on Python 3.11 (HERMES_HOME isolated). JS syntax check (`node -c`) clean on `static/i18n.js`, `static/sessions.js`, `static/ui.js`. Browser API sanity harness (port 8789): all 11 endpoints + 20 QA tests PASS. Opus advisor pass: SHIP-READY (only flag was a #1919 CHANGELOG conflict already auto-resolved during stage rebase).
+
+### Pre-release verification
+
+- Full pytest under `HERMES_HOME` isolation: **4960 passed, 11 skipped, 1 xfailed, 2 xpassed, 8 subtests passed** in 145.24s.
+- Browser API harness against stage-324 on port 8789: all 11 endpoints + 20 QA tests PASS (110.90s for QA phase).
+- `node -c` on all 3 modified `static/*.js` files: clean.
+- Stage diff: 18 files, +588/-150.
+- Opus advisor pass on stage-324 brief: VERDICT=SHIP-WITH-FIXES (single fix: #1919 CHANGELOG rebase — already auto-resolved during stage merge). Coexistence verified for #1926/#1927/#1930 sharing `static/sessions.js` (different functions, scroll-pin and viewport-anchor cannot fight; lineage metadata degrades gracefully on legacy sessions).
+- v0.51.28 carry-overs verified preserved (no in-batch changes to `api/routes.py:_strip_workspace_prefix`, `api/streaming.py:evaluate_goal_after_turn`, `api/profiles.py:_profiles_match`, `tests/test_mcp_server.py` module-restoration logic).
+- Pre-stamp re-fetch of all 6 PR heads: no contributor force-push during Opus window.
+
+
 ### Added (2 PRs)
 
 - **PR #1895** by @samuelgudi — MCP server Option A rewrite (#1616). Replaces the fragile MCP integration with a clean `mcp_server.py` (567 LOC) implementing project CRUD, session listing, and session mutations (rename/move) over Hermes's HTTP API. Imports `api.models` / `api.profiles` canonically rather than carrying duplicate slug-matching helpers. Relocates `_profiles_match` from `api/routes.py` into `api/profiles.py` as the single source of truth (mcp_server.py and api/routes.py both now import the canonical helper — re-introducing a local copy in either module trips a parity test immediately). Adds env-aware WEBUI_URL (`HERMES_WEBUI_HOST` / `HERMES_WEBUI_PORT`). New behaviour: `delete_project` REFUSES to touch session JSONs when `HERMES_WEBUI_PASSWORD` is unset, returning `{ok:true, unassigned_sessions:0, warning:"…"}` instead — preventing data-loss when an MCP client tries to delete a project on an unauthenticated server. 53-test coverage in `tests/test_mcp_server.py` (914 LOC) including HTTP wire-format integration tests, profile-scoped isolation, legacy untagged row visibility, and `--profile foo` CLI ordering regression. Closes #1616.

@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import secrets
+import tempfile
 import time
 
 from api._atomic import atomic_write_json
@@ -98,11 +99,61 @@ _sessions = _load_sessions()
 # ── Login rate limiter ──────────────────────────────────────────────────────
 # Two parallel buckets: per-IP and per-username (issue #2). The per-username
 # bucket prevents an attacker from cycling source IPs to brute-force one
-# account.
-_login_attempts = {}        # ip -> [timestamp, ...]
-_login_attempts_user = {}   # username (lower) -> [timestamp, ...]
+# account. Both buckets persist across restarts (upstream v0.51.29) so an
+# attacker can't dodge the limiter by triggering a process restart.
+_LOGIN_ATTEMPTS_FILE = STATE_DIR / '.login_attempts.json'
+_LOGIN_ATTEMPTS_USER_FILE = STATE_DIR / '.login_attempts_user.json'
 _LOGIN_MAX_ATTEMPTS = 5
 _LOGIN_WINDOW = 60  # seconds
+
+
+def _load_login_attempts_from(path) -> dict[str, list[float]]:
+    """Load persisted login attempts from *path*, pruning expired entries."""
+    try:
+        if path.exists():
+            data = json.loads(path.read_text(encoding='utf-8'))
+            if not isinstance(data, dict):
+                raise ValueError('malformed login-attempts file — expected dict')
+            now = time.time()
+            attempts: dict[str, list[float]] = {}
+            for key, raw_times in data.items():
+                if not isinstance(key, str) or not isinstance(raw_times, list):
+                    continue
+                fresh = [
+                    float(t)
+                    for t in raw_times
+                    if isinstance(t, (int, float)) and now - float(t) < _LOGIN_WINDOW
+                ]
+                if fresh:
+                    attempts[key] = fresh
+            return attempts
+    except Exception as e:
+        logger.debug("Failed to load login attempts file %s, starting fresh: %s", path, e)
+    return {}
+
+
+def _save_login_attempts_to(path, attempts: dict[str, list[float]]) -> None:
+    """Atomically persist login attempts to *path* (0600)."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=path.parent, suffix='.login_attempts.tmp')
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                json.dump(attempts, f)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, path)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    except Exception as e:
+        logger.debug("Failed to persist login attempts to %s: %s", path, e)
+
+
+_login_attempts = _load_login_attempts_from(_LOGIN_ATTEMPTS_FILE)              # ip -> [timestamp, ...]
+_login_attempts_user = _load_login_attempts_from(_LOGIN_ATTEMPTS_USER_FILE)    # username (lower) -> [timestamp, ...]
 
 
 def _check_login_rate(ip: str, username: str | None = None) -> bool:
@@ -110,13 +161,21 @@ def _check_login_rate(ip: str, username: str | None = None) -> bool:
     Either bucket exhausted (IP or username) blocks the attempt."""
     now = time.time()
     ip_attempts = [t for t in _login_attempts.get(ip, []) if now - t < _LOGIN_WINDOW]
-    _login_attempts[ip] = ip_attempts
+    if ip_attempts:
+        _login_attempts[ip] = ip_attempts
+    else:
+        _login_attempts.pop(ip, None)
+    _save_login_attempts_to(_LOGIN_ATTEMPTS_FILE, _login_attempts)
     if len(ip_attempts) >= _LOGIN_MAX_ATTEMPTS:
         return False
     if username:
         u = username.lower()
         u_attempts = [t for t in _login_attempts_user.get(u, []) if now - t < _LOGIN_WINDOW]
-        _login_attempts_user[u] = u_attempts
+        if u_attempts:
+            _login_attempts_user[u] = u_attempts
+        else:
+            _login_attempts_user.pop(u, None)
+        _save_login_attempts_to(_LOGIN_ATTEMPTS_USER_FILE, _login_attempts_user)
         if len(u_attempts) >= _LOGIN_MAX_ATTEMPTS:
             return False
     return True
@@ -125,8 +184,10 @@ def _check_login_rate(ip: str, username: str | None = None) -> bool:
 def _record_login_attempt(ip: str, username: str | None = None) -> None:
     now = time.time()
     _login_attempts.setdefault(ip, []).append(now)
+    _save_login_attempts_to(_LOGIN_ATTEMPTS_FILE, _login_attempts)
     if username:
         _login_attempts_user.setdefault(username.lower(), []).append(now)
+        _save_login_attempts_to(_LOGIN_ATTEMPTS_USER_FILE, _login_attempts_user)
 
 
 def _signing_key():

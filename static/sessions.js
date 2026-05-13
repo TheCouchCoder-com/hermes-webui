@@ -330,6 +330,11 @@ async function newSession(flash){
 }
 
 async function loadSession(sid){
+  const currentSid = S.session ? S.session.session_id : null;
+  // Clicking the already-open session in the sidebar is a no-op. Reloading it
+  // tears down active pane state and can reset the long-session scroll window
+  // to the top even though the user did not navigate anywhere.
+  if(currentSid===sid) return;
   // Mark this session as the in-flight load. Subsequent loadSession() calls
   // will overwrite this; stale awaits use the mismatch to bail out (#1060).
   _loadingSessionId = sid;
@@ -339,7 +344,6 @@ async function loadSession(sid){
   if(typeof hideClarifyCard==='function') hideClarifyCard();
   // Show loading indicator immediately for responsiveness.
   // Cleared by renderMessages() once full session data arrives.
-  const currentSid = S.session ? S.session.session_id : null;
   // Persist the current composer draft before switching away so it can be
   // restored when the user switches back (#1060).
   if (currentSid && currentSid !== sid) {
@@ -1020,18 +1024,32 @@ async function _loadOlderMessages() {
     const container = $('messages');
     const prevScrollH = container ? container.scrollHeight : 0;
     S.messages = [...olderMsgs, ...S.messages];
+    // renderMessages() windows long transcripts from the end. If we do not
+    // expand that window before rendering, the newly prepended page stays
+    // hidden and the "hidden" counter rises while the viewport appears stuck.
+    // Count roughly by the same visible-message rules used by renderMessages().
+    const addedRenderable = olderMsgs.filter(m=>{
+      if(!m||!m.role||m.role==='tool') return false;
+      if(typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(m)) return false;
+      if(typeof _isPreservedCompressionTaskListMessage==='function'&&_isPreservedCompressionTaskListMessage(m)) return false;
+      const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
+      const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
+      return !!(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||(typeof _messageHasReasoningPayload==='function'&&_messageHasReasoningPayload(m)))));
+    }).length;
+    _messageRenderWindowSize=_currentMessageRenderWindowSize()+Math.max(addedRenderable, MESSAGE_RENDER_WINDOW_DEFAULT);
     _messagesTruncated = !!data.session._messages_truncated;
     _oldestIdx = data.session._messages_offset || 0;
-    renderMessages();
-    // Restore scroll position so the user stays at the same message.
-    // renderMessages() calls scrollToBottom() at the end, so we must
-    // counter-scroll to where the user was before loading older messages.
+    renderMessages({ preserveScroll: true });
     if (container) {
+      // Prepending older messages must not teleport the reader. Preserve the
+      // currently visible viewport by adding the inserted height to scrollTop.
+      const oldTop = container.scrollTop;
       const newScrollH = container.scrollHeight;
-      container.scrollTop = newScrollH - prevScrollH;
+      const addedHeight = Math.max(0, newScrollH - prevScrollH);
+      _programmaticScroll = true;
+      container.scrollTop = oldTop + addedHeight;
+      requestAnimationFrame(()=>{ _programmaticScroll = false; });
     }
-    // renderMessages() called scrollToBottom() which set _scrollPinned=true.
-    // We just restored the user's scroll position, so mark as not pinned.
     _scrollPinned = false;
   } catch(e) {
     console.warn('_loadOlderMessages failed:', e);
@@ -1819,12 +1837,17 @@ function _isChildSession(s){
 function _sessionLineageKey(s, sessionIdsInList){
   if(!s||!s.session_id) return null;
   if(_isChildSession(s)) return null;
+  const lineageKey=s._lineage_root_id||s.lineage_root_id||null;
+  if(lineageKey) return lineageKey;
   // If parent_session_id points to another session in the current list,
-  // this is a subagent child — don't collapse it into lineage (#494).
+  // this is a subagent/fork child without compression metadata — don't
+  // collapse it into lineage (#494). Compression continuations carry an
+  // explicit lineage root, even when stale optimistic rows leave parent
+  // segments in the browser cache during active compression.
   if(s.parent_session_id && sessionIdsInList && sessionIdsInList.has(s.parent_session_id)){
     return null;
   }
-  return s._lineage_root_id || s.lineage_root_id || s.parent_session_id || null;
+  return s.parent_session_id || null;
 }
 
 function _sessionLineageContainsSession(s, sid){
