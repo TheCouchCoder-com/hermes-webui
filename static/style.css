@@ -2694,7 +2694,12 @@ main.main.showing-logs > #mainLogs{display:flex;}
 
 /* ── Subagent session tree (#494) ── */
 .session-lineage-count{display:inline-flex;align-items:center;justify-content:center;height:16px;font-size:10px;font-weight:600;padding:0 6px;border-radius:999px;background:rgba(148,163,184,.14);color:var(--muted);margin-left:6px;flex-shrink:0;user-select:none;cursor:default;}
+.session-lineage-count.expandable{cursor:pointer;}
+.session-lineage-count.expandable:hover{background:rgba(148,163,184,.24);color:var(--text);}
 .session-item.active .session-lineage-count{color:var(--accent-text);background:rgba(255,255,255,.14);}
+.session-lineage-segments{display:flex;flex-direction:column;gap:3px;margin-top:6px;margin-left:12px;padding-left:8px;border-left:1px dashed rgba(148,163,184,.22);}
+.session-lineage-segment{appearance:none;border:0;background:transparent;color:var(--muted);font:inherit;font-size:11px;text-align:left;padding:3px 4px;border-radius:5px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.session-lineage-segment:hover,.session-lineage-segment.active{background:rgba(148,163,184,.12);color:var(--text);}
 .session-child-count{display:inline-flex;align-items:center;justify-content:center;height:16px;font-size:10px;font-weight:600;padding:0 6px;border-radius:999px;background:rgba(99,179,237,.16);color:#63b3ed;margin-left:6px;flex-shrink:0;user-select:none;cursor:pointer;}
 .session-child-count:hover{background:rgba(99,179,237,.26);color:#90cdf4;}
 .session-child-sessions{display:flex;flex-direction:column;gap:3px;margin-top:6px;margin-left:12px;padding-left:8px;border-left:1px solid var(--border,rgba(255,255,255,.1));}
@@ -3523,7 +3528,15 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 .kanban-modal-row-inline{display:flex;gap:10px;}
 .kanban-modal-row-inline > *{flex:1;min-width:0;}
 .kanban-modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:14px;}
-.kanban-modal-error{color:var(--danger);font-size:11px;margin-top:6px;min-height:14px;}
+.kanban-modal-error{
+  color:var(--danger,var(--error,#f87171));
+  font-size:12px;font-weight:500;margin-top:8px;min-height:14px;
+}
+.kanban-modal-error:not(:empty){
+  padding:8px 10px;border-radius:8px;
+  background:color-mix(in srgb,var(--danger,var(--error,#f87171)) 12%,transparent);
+  border:1px solid color-mix(in srgb,var(--danger,var(--error,#f87171)) 35%,transparent);
+}
 .kanban-empty{padding:12px;color:var(--muted);font-size:12px;text-align:center;border:1px dashed var(--border);border-radius:8px;}
 
 .kanban-new-task-row{display:flex;gap:6px;align-items:center;}

@@ -1237,6 +1237,7 @@ let _sessionActionMenu = null;
 let _sessionActionAnchor = null;
 let _sessionActionSessionId = null;
 const _expandedChildSessionKeys = new Set();
+const _expandedLineageKeys = new Set();
 let _sessionVisibleSidebarIds = [];
 const SESSION_VIRTUAL_ROW_HEIGHT = 52;
 const SESSION_VIRTUAL_BUFFER_ROWS = 12;
@@ -2083,6 +2084,9 @@ function _syncSidebarExpansionForActiveSession(rows, activeSid){
     if(Array.isArray(row._child_sessions)&&row._child_sessions.some(child=>child&&child.session_id===activeSid)){
       _expandedChildSessionKeys.add(key);
     }
+    if(Array.isArray(row._lineage_segments)&&row._lineage_segments.some(seg=>seg&&seg.session_id===activeSid&&seg.session_id!==row.session_id)){
+      _expandedLineageKeys.add(key);
+    }
   }
 }
 
@@ -2566,13 +2570,49 @@ function renderSessionListFromCache(){
     ts.className='session-time'+(hasAttentionState?' is-hidden':'');
     ts.textContent=hasAttentionState?'':_formatRelativeSessionTime(tsMs);
     titleRow.appendChild(title);
+    // Project color dot: placed BETWEEN title and timestamp, not inside the
+    // title span. Inside the title span it would be clipped by the ellipsis
+    // truncation, becoming invisible exactly when the title is long enough
+    // to need the project marker. As a flex-flow sibling it stays visible
+    // regardless of title length and sits next to the timestamp on the right.
+    if(s.project_id){
+      const proj=_allProjects.find(p=>p.project_id===s.project_id);
+      if(proj){
+        const dot=document.createElement('span');
+        dot.className='session-project-dot';
+        dot.style.background=proj.color||'var(--blue)';
+        dot.title=proj.name;
+        titleRow.appendChild(dot);
+      }
+    }
+    const lineageKey=_sidebarLineageKeyForRow(s);
     const segmentCount=_sessionSegmentCount(s);
+    const lineageSegments=Array.isArray(s._lineage_segments)?s._lineage_segments.filter(seg=>seg&&seg.session_id&&seg.session_id!==s.session_id):[];
+    const canExpandLineageSegments=Boolean(lineageKey&&segmentCount>1&&lineageSegments.length>0);
+    const lineageSegmentsExpanded=canExpandLineageSegments&&_expandedLineageKeys.has(lineageKey);
     if(segmentCount>0){
       const segmentCountEl=document.createElement('span');
-      segmentCountEl.className='session-lineage-count';
+      segmentCountEl.className='session-lineage-count'+(canExpandLineageSegments?' expandable':'');
       const segmentLabel=t('session_meta_segments', segmentCount);
       segmentCountEl.textContent=segmentLabel;
       segmentCountEl.title=segmentLabel;
+      if(canExpandLineageSegments){
+        segmentCountEl.setAttribute('role','button');
+        segmentCountEl.setAttribute('tabindex','0');
+        segmentCountEl.setAttribute('aria-expanded',lineageSegmentsExpanded?'true':'false');
+        ['pointerdown','pointerup','click'].forEach(ev=>segmentCountEl.addEventListener(ev,e=>e.stopPropagation()));
+        const toggleLineageSegments=(e)=>{
+          e.preventDefault();
+          e.stopPropagation();
+          if(_expandedLineageKeys.has(lineageKey)) _expandedLineageKeys.delete(lineageKey);
+          else _expandedLineageKeys.add(lineageKey);
+          renderSessionListFromCache();
+        };
+        segmentCountEl.onclick=toggleLineageSegments;
+        segmentCountEl.onkeydown=(e)=>{
+          if(e.key==='Enter'||e.key===' '){toggleLineageSegments(e);}
+        };
+      }
       titleRow.appendChild(segmentCountEl);
     }
     const childCount=typeof s._child_session_count==='number'?s._child_session_count:(Array.isArray(s._child_sessions)?s._child_sessions.length:0);
@@ -2591,21 +2631,6 @@ function renderSessionListFromCache(){
         renderSessionListFromCache();
       };
       titleRow.appendChild(childCountEl);
-    }
-    // Project color dot: placed BETWEEN title and timestamp, not inside the
-    // title span. Inside the title span it would be clipped by the ellipsis
-    // truncation, becoming invisible exactly when the title is long enough
-    // to need the project marker. As a flex-flow sibling it stays visible
-    // regardless of title length and sits next to the timestamp on the right.
-    if(s.project_id){
-      const proj=_allProjects.find(p=>p.project_id===s.project_id);
-      if(proj){
-        const dot=document.createElement('span');
-        dot.className='session-project-dot';
-        dot.style.background=proj.color||'var(--blue)';
-        dot.title=proj.name;
-        titleRow.appendChild(dot);
-      }
     }
     titleRow.appendChild(ts);
     sessionText.appendChild(titleRow);
@@ -2629,7 +2654,32 @@ function renderSessionListFromCache(){
       meta.textContent=metaBits.join(' · ');
       sessionText.appendChild(meta);
     }
-    const lineageKey=_sidebarLineageKeyForRow(s);
+    if(lineageSegmentsExpanded){
+      const lineageList=document.createElement('div');
+      lineageList.className='session-lineage-segments';
+      ['pointerdown','pointerup','click'].forEach(ev=>lineageList.addEventListener(ev,e=>e.stopPropagation()));
+      const sortedSegments=[...lineageSegments].sort((a,b)=>_sessionTimestampMs(b)-_sessionTimestampMs(a));
+      for(const seg of sortedSegments){
+        const row=document.createElement('button');
+        row.type='button';
+        row.className='session-lineage-segment'+(activeSidForSidebar&&seg.session_id===activeSidForSidebar?' active':'');
+        const segTitle=seg.title||t('session_lineage_segment_untitled');
+        const segTime=_formatRelativeSessionTime(_sessionTimestampMs(seg));
+        row.textContent=`-> ${segTitle} - ${segTime}`;
+        row.title=t('session_lineage_segment_open');
+        row.onclick=async(e)=>{
+          e.stopPropagation();
+          if(seg.is_cli_session){
+            try{await api('/api/session/import_cli',{method:'POST',body:JSON.stringify({session_id:seg.session_id})});}
+            catch(_e){ /* read-only fallback */ }
+          }
+          await loadSession(seg.session_id);
+          renderSessionListFromCache();
+        };
+        lineageList.appendChild(row);
+      }
+      sessionText.appendChild(lineageList);
+    }
     if(childCount>0&&Array.isArray(s._child_sessions)&&_expandedChildSessionKeys.has(lineageKey)){
       const childList=document.createElement('div');
       childList.className='session-child-sessions';
@@ -2826,7 +2876,7 @@ function renderSessionListFromCache(){
       _pointerActive=false;
       if(_renamingSid) return;
       if(actions&&actions.contains(e.target)) return;
-      if(e.target&&e.target.closest&&e.target.closest('.session-child-count,.session-child-sessions,.session-child-session')) return;
+      if(e.target&&e.target.closest&&e.target.closest('.session-child-count,.session-child-sessions,.session-child-session,.session-lineage-count,.session-lineage-segments,.session-lineage-segment')) return;
       if(_sessionSelectMode){e.stopPropagation();if(!readOnly)toggleSessionSelect(s.session_id);return;}
       // If the pointer moved enough to be a drag, cancel any pending tap
       if(_isDragging){clearTimeout(_tapTimer);_tapTimer=null;_lastTapTime=0;_clearDragTimer=setTimeout(()=>{el.classList.remove('dragging');_clearDragTimer=null;},50);return;}
