@@ -12,6 +12,35 @@
 
 ## [Unreleased]
 
+## [v0.51.41] — 2026-05-11 — Release Q (3-PR contributor batch — session recovery audit + run-lifecycle health + transcript dedup)
+
+### Fixed
+
+- **PR #2035** by @ai-ag2026 — Recover orphaned `<sid>.json.bak` snapshots on startup (extends #1558 P0 fix). The existing post-#1558 recovery path only scanned `*.json`, so a crash that left only the `.bak` snapshot meant data was on disk but invisible to `/api/sessions` and the sidebar. Now the startup self-heal looks up the orphan `sid` in `state.db.sessions`; if the row exists, the snapshot is restored, the session index rebuilt, and the live sidecar appears again. If `state.db` lacks the row (explicit tombstone), the orphan is left alone. Companion change in `api/routes.py` unlinks `<sid>.json.bak` on explicit delete so intentional deletes don't get resurrected later. Fail-open on `state.db` unreadable/locked/older-schema — recovery stays best-effort.
+
+- **PR #2036** by @ai-ag2026 — Read-only `audit_session_recovery()` report + module CLI (`python -m api.session_recovery --audit --session-dir <dir> [--state-db <db>]`). Classifies shrunken live sidecars, orphan backups, orphans without a `state.db` row, and stale `_index.json` entries. Pure read-only audit — no writes, no rebuilds, no restores. Outputs machine-readable JSON. Stacked on #2035 (and auto-closed it).
+
+- **PR #2038** by @franksong2702 — Closed the message-identity dedup gap in `/api/session` messaging transcript merges (closes #2027). The dedup key now prefers `id`/`message_id` when message identity is available; legacy role/content/timestamp/tool-metadata key remains as fallback for messages without IDs. Prevents silent loss of legitimate retries (rare but high-impact when it hits).
+
+### Added
+
+- **PR #2039** by @ai-ag2026 — Active-run lifecycle visibility in `/health`. SSE `active_streams` only describes channel state; a worker can outlive its SSE stream while unwinding, blocked in a provider call, handling cancellation, or waiting on delegated work. Adds `active_runs`, per-run metadata/age, `oldest_run_age_seconds`, `last_run_finished_at`, and idle grace timing. Restart/update guards now have visibility into worker lifecycle, not just SSE channel state. Worker lifecycle wired through `_register_run` / `_update_run` / `_unregister_run` in streaming.
+
+### Tests
+
+5100 → **5108 passing, 0 regressions** (+8 net new across new test files for session-recovery audit, run-lifecycle health, transcript dedup, and orphan-backup recovery). Full suite ~160s on Python 3.11 with `HERMES_HOME` isolation.
+
+### Notes
+
+- 3 PRs from 2 different authors (#2035 stacked under #2036 — auto-closed when #2036 merged).
+- `api/routes.py` was touched by all three PRs with disjoint hunks (#2039 at lines 2529/2609, #2038 at 3040, #2036 at 4147).
+- `CHANGELOG.md` was the only true conflict (`#2038` predates v0.51.40 release entry); resolved by preserving v0.51.40 history and re-adding the #2038 bullet under [Unreleased] before promoting.
+
+### Follow-ups
+
+- Test isolation: at least one test in `test_update_banner_fixes.py` or `test_updates.py` triggers a real `os.execv` that re-executes the entire pytest suite. Suite still passes (~5108 each loop) but full run takes 4× the time. Worth a targeted fix in the next maintenance batch.
+
+
 ## [v0.51.40] — 2026-05-11 — Release P (4-PR contributor batch — quota subprocess hardening + env-lock prewarm + cron one-shot warning + Xiaomi env key)
 
 ### Fixed
@@ -31,7 +60,6 @@
 ### Notes
 
 - 4 PRs from 3 different authors. `api/providers.py` was touched by #2030 (+110/-7 in quota probe path) and #2034 (+1 in `_PROVIDER_ENV_VAR` map) with disjoint hunks. `CHANGELOG.md` Unreleased section was the only true conflict (#2033 + #2034 both added bullets); resolved by keeping both entries. Stage merge otherwise clean.
-
 
 ## [v0.51.39] — 2026-05-10 — Release O (4-PR contributor batch — Railway docker fix + Stop-button race + provider resolver + live context tracking)
 

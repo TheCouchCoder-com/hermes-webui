@@ -26,6 +26,7 @@ from api.config import (
     STREAM_GOAL_RELATED, PENDING_GOAL_CONTINUATION,
     LOCK, SESSIONS, SESSION_DIR,
     _get_session_agent_lock, _set_thread_env, _clear_thread_env,
+    register_active_run, update_active_run, unregister_active_run,
     SESSION_AGENT_LOCKS, SESSION_AGENT_LOCKS_LOCK,
     resolve_model_provider,
     resolve_custom_provider_connection,
@@ -2030,6 +2031,16 @@ def _run_agent_streaming(
     q = STREAMS.get(stream_id)
     if q is None:
         return
+    register_active_run(
+        stream_id,
+        session_id=session_id,
+        started_at=time.time(),
+        phase="starting",
+        workspace=str(workspace),
+        model=model,
+        provider=model_provider,
+        ephemeral=bool(ephemeral),
+    )
     s = None
     _rt = {}
     old_cwd = None
@@ -2211,6 +2222,7 @@ def _run_agent_streaming(
     _agent_lock = None
     try:
         s = get_session(session_id)
+        update_active_run(stream_id, phase="running", session_id=session_id)
         s.workspace = str(Path(workspace).expanduser().resolve())
         s.model = model
         provider_context = (
@@ -3917,6 +3929,7 @@ def _run_agent_streaming(
         if (s is not None
                 and getattr(s, 'active_stream_id', None) == stream_id
                 and getattr(s, 'pending_user_message', None)):
+            update_active_run(stream_id, phase="finalizing")
             _last_resort_sync_from_core(s, stream_id, _agent_lock)
         _clear_thread_env()  # TD1: always clear thread-local context
         with STREAMS_LOCK:
@@ -3927,6 +3940,7 @@ def _run_agent_streaming(
             STREAM_REASONING_TEXT.pop(stream_id, None)  # Clean up reasoning trace (#1361 §A)
             STREAM_LIVE_TOOL_CALLS.pop(stream_id, None)  # Clean up tool calls (#1361 §B)
             STREAM_GOAL_RELATED.pop(stream_id, None)  # Clean up goal-related flag (#1932)
+            unregister_active_run(stream_id)
             # NOTE: do NOT discard PENDING_GOAL_CONTINUATION here. The marker
             # is set by goal_continue (line ~3328) inside the SAME function
             # call and consumed atomically by `_start_chat_stream_for_session`

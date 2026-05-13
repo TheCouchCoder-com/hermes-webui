@@ -3684,7 +3684,47 @@ STREAM_REASONING_TEXT: dict = {}  # stream_id -> reasoning trace accumulated dur
 STREAM_LIVE_TOOL_CALLS: dict = {}  # stream_id -> live tool calls accumulated during streaming (#1361 §B)
 STREAM_GOAL_RELATED: dict = {}  # stream_id -> bool: only evaluate goal for goal-related turns (#1932)
 PENDING_GOAL_CONTINUATION: set = set()  # session_ids awaiting a goal continuation turn (#1932)
+
+# Active agent-run registry. This intentionally tracks worker lifecycle rather
+# than SSE lifecycle: cancel/reconnect may remove STREAMS while the worker is
+# still unwinding, blocked in a provider call, or waiting for delegated work.
+ACTIVE_RUNS: dict = {}
+ACTIVE_RUNS_LOCK = threading.Lock()
+LAST_RUN_FINISHED_AT: float | None = None
 SERVER_START_TIME = time.time()
+
+
+def register_active_run(stream_id: str, **metadata) -> None:
+    """Mark a WebUI agent worker as alive until its outer finally exits."""
+    if not stream_id:
+        return
+    now = time.time()
+    entry = dict(metadata or {})
+    entry.setdefault("stream_id", stream_id)
+    entry.setdefault("started_at", now)
+    entry.setdefault("phase", "running")
+    with ACTIVE_RUNS_LOCK:
+        ACTIVE_RUNS[stream_id] = entry
+
+
+def update_active_run(stream_id: str, **metadata) -> None:
+    """Update active-run metadata without creating a new run implicitly."""
+    if not stream_id:
+        return
+    with ACTIVE_RUNS_LOCK:
+        entry = ACTIVE_RUNS.get(stream_id)
+        if entry is not None:
+            entry.update(metadata)
+
+
+def unregister_active_run(stream_id: str) -> None:
+    """Remove a worker from the active-run registry and record idle start."""
+    if not stream_id:
+        return
+    global LAST_RUN_FINISHED_AT
+    with ACTIVE_RUNS_LOCK:
+        ACTIVE_RUNS.pop(stream_id, None)
+        LAST_RUN_FINISHED_AT = time.time()
 
 # Agent cache: reuse AIAgent across messages in the same WebUI session so that
 # _user_turn_count survives between turns.  This mirrors the gateway's
