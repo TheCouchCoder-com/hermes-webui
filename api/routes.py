@@ -3636,7 +3636,34 @@ def handle_get(handler, parsed) -> bool:
         import datetime
         identity_map = _load_gateway_session_identity_map()
         sessions_path = _gateway_session_metadata_path()
-        running = bool(identity_map)
+
+        # Detect whether the gateway process is alive, independent of
+        # connected messaging platforms.  An empty identity_map just
+        # means zero platforms connected, not that the gateway is down.
+        #
+        # agent_health.build_agent_health_payload() is the authoritative
+        # signal: it reads gateway.status runtime metadata and returns a
+        # tri-state `alive` field (True/False/None).  This avoids the
+        # false-negative where the gateway is running but has zero active
+        # messaging sessions (empty identity_map).
+        #
+        # `alive` tri-state semantics:
+        #   True  → gateway process is alive
+        #   False → gateway metadata exists but process is down
+        #   None  → no gateway metadata/status available; this WebUI
+        #           setup is probably not configured with a gateway
+        health = build_agent_health_payload()
+        alive = health.get("alive")
+        if alive is True:
+            running = True
+            configured = True
+        elif alive is False:
+            running = False
+            configured = True
+        else:  # alive is None → gateway not configured / unavailable
+            running = bool(identity_map)
+            configured = False
+
         platforms_set: set[str] = set()
         for meta in identity_map.values():
             raw = meta.get("raw_source") or meta.get("platform") or ""
@@ -3663,6 +3690,7 @@ def handle_get(handler, parsed) -> bool:
                 pass
         return j(handler, {
             "running": running,
+            "configured": configured,
             "platforms": platforms,
             "last_active": last_active,
             "session_count": len(identity_map),

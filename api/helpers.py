@@ -2,6 +2,7 @@
 Hermes Web UI -- HTTP helper functions.
 """
 import json as _json
+import os
 import re as _re
 from pathlib import Path
 from api.config import IMAGE_EXTS, MD_EXTS
@@ -278,6 +279,11 @@ def _accept_unsigned_profile_cookie() -> bool:
     return os.environ.get('HERMES_WEBUI_ACCEPT_UNSIGNED_PROFILE_COOKIE', '').strip() == '1'
 
 
+def get_profile_cookie_name() -> str:
+    """Return the cookie name used to persist the active WebUI profile."""
+    return os.getenv('WEBUI_PROFILE_COOKIE_NAME', PROFILE_COOKIE_NAME)
+
+
 def get_profile_cookie(handler) -> str | None:
     """Extract and verify the hermes_profile cookie value from the request,
     or None if the cookie is missing, malformed, or fails signature check."""
@@ -291,7 +297,8 @@ def get_profile_cookie(handler) -> str | None:
         cookie.load(cookie_header)
     except _hc.CookieError:
         return None
-    morsel = cookie.get(PROFILE_COOKIE_NAME)
+    cookie_name = get_profile_cookie_name()
+    morsel = cookie.get(cookie_name)
     if not morsel or not morsel.value:
         return None
     raw = morsel.value
@@ -319,7 +326,7 @@ def get_profile_cookie(handler) -> str | None:
 
 
 def build_profile_cookie(name: str) -> str:
-    """Build a Set-Cookie header value for the hermes_profile cookie.
+    """Build a Set-Cookie header value for the active-profile cookie.
 
     The cookie value is HMAC-signed (see module docstring). Always persists
     the selected profile, including 'default', so the backend never falls
@@ -329,8 +336,9 @@ def build_profile_cookie(name: str) -> str:
     sig = _profile_cookie_signature(name)
     signed = f"{name}.{sig}"
     cookie = _hc.SimpleCookie()
-    cookie[PROFILE_COOKIE_NAME] = signed
-    cookie[PROFILE_COOKIE_NAME]['path'] = '/'
-    cookie[PROFILE_COOKIE_NAME]['httponly'] = True
-    cookie[PROFILE_COOKIE_NAME]['samesite'] = 'Lax'
-    return cookie[PROFILE_COOKIE_NAME].OutputString()
+    cookie_name = get_profile_cookie_name()
+    cookie[cookie_name] = signed
+    cookie[cookie_name]['path'] = '/'
+    cookie[cookie_name]['httponly'] = True
+    cookie[cookie_name]['samesite'] = 'Lax'
+    return cookie[cookie_name].OutputString()

@@ -1545,6 +1545,43 @@ def _sse(handler, event, data):
     handler.wfile.flush()
 
 
+def _materialize_pending_user_turn_before_error(session) -> bool:
+    """Persist the pending user prompt before clearing runtime stream state.
+
+    Error paths often clear ``pending_user_message`` before appending an assistant
+    error marker. In deferred session-save mode that pending field can be the
+    only durable copy of the user's current turn, so clearing it makes the user
+    bubble disappear on reload/reconcile. Return True when a recovered user turn
+    was appended.
+    """
+    pending_text = str(getattr(session, 'pending_user_message', None) or '')
+    if not pending_text:
+        return False
+    normalized_pending = " ".join(pending_text.split())
+    if normalized_pending:
+        for existing in reversed(list(getattr(session, 'messages', None) or [])[-8:]):
+            if not isinstance(existing, dict) or existing.get('role') != 'user':
+                continue
+            existing_text = " ".join(str(existing.get('content') or '').split())
+            if existing_text == normalized_pending:
+                return False
+    recovered_ts = int(time.time())
+    pending_started_at = getattr(session, 'pending_started_at', None)
+    if isinstance(pending_started_at, (int, float)) and pending_started_at > 0:
+        recovered_ts = int(pending_started_at)
+    recovered = {
+        'role': 'user',
+        'content': pending_text,
+        'timestamp': recovered_ts,
+        '_recovered': True,
+    }
+    pending_attachments = getattr(session, 'pending_attachments', None)
+    if pending_attachments:
+        recovered['attachments'] = list(pending_attachments)
+    session.messages.append(recovered)
+    return True
+
+
 def _last_resort_sync_from_core(session, stream_id, agent_lock):
     """Final-exit guard: if the stream exits with pending_user_message still set,
     sync messages from the core transcript or add an error marker.
@@ -2568,6 +2605,7 @@ def _run_agent_streaming(
                         # Persist the error so it survives page reload.
                         # _error=True ensures _sanitize_messages_for_api excludes it from
                         # subsequent API calls so the LLM never sees its own error as prior context.
+                        _materialize_pending_user_turn_before_error(s)
                         s.active_stream_id = None
                         s.pending_user_message = None
                         s.pending_attachments = []
@@ -3029,6 +3067,7 @@ def _run_agent_streaming(
             # API calls so the LLM never sees its own error as prior context on the next turn.
             _lock_ctx = _agent_lock if _agent_lock is not None else contextlib.nullcontext()
             with _lock_ctx:
+                _materialize_pending_user_turn_before_error(s)
                 s.active_stream_id = None
                 s.pending_user_message = None
                 s.pending_attachments = []
