@@ -2,7 +2,7 @@
 
 > Web companion to the Hermes Agent CLI. Same workflows, browser-native.
 >
-> Last updated: v0.51.22 (May 7, 2026) — 4815 tests collected — 3-PR batch (P0 markdown streaming hotfix, CSP source-map allowance, LaTeX delimiter rendering)
+> Last updated: v0.51.23 (May 8, 2026) — 4830 tests collected — 7-PR Release A batch (stale-cleanup pending-turn preservation, title refresh marker persistence, Japanese i18n, Kanban predicate hardening, cron edit snapshot, workspace heading polish)
 > Test source: `pytest tests/ --collect-only -q`
 > Per-version detail: see [CHANGELOG.md](./CHANGELOG.md)
 

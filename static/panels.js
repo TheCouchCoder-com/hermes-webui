@@ -835,7 +835,7 @@ async function saveCronForm(){
   const prompt=promptEl.value.trim();
   const deliver=delivEl?delivEl.value:'local';
   const profile=profileEl?profileEl.value:'';
-  const isNoAgent = !!(_currentCronDetail && _currentCronDetail.no_agent);
+  const isNoAgent = !!(_cronPreFormDetail && _cronPreFormDetail.no_agent);
   errEl.style.display='none';
   if(!schedule){errEl.textContent=t('cron_schedule_required_example');errEl.style.display='';return;}
   if(!isNoAgent && !prompt){errEl.textContent=t('cron_prompt_required');errEl.style.display='';return;}
@@ -1220,7 +1220,6 @@ async function hardRefreshWebUIClient(){
 function _kanbanLooksLikeStaleClientError(err){
   const msg = String((err && err.message) || err || '').toLowerCase();
   return !!(err && err.status === 404 && (
-    msg === 'not found' ||
     msg.includes('unknown kanban endpoint') ||
     msg.includes('stale cached bundle')
   ));

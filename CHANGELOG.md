@@ -4,6 +4,37 @@
 > Entries below this notice document upstream releases and were not written by the fork maintainers.
 > Fork-specific changes will be added above this notice as they ship.
 
+## [v0.51.23] — 2026-05-08 — 7-PR contributor batch (Release A: stale-cleanup pending-turn preservation, title refresh marker persistence, Japanese i18n refresh, Kanban predicate hardening, cron edit snapshot fix, workspace heading affordance polish)
+
+### Fixed (7 PRs)
+
+- **PR #1856** by @ai-ag2026 — Materialize a pending user turn before stale stream cleanup clears runtime fields. Prior to this fix, when `_clear_stale_streams()` ran while a session had a pending user turn (assistant hadn't started responding yet), the cleanup path cleared runtime fields including the pending turn's metadata — turn lost. Fix: materialize the pending turn into the saved transcript before the cleanup, preserving timestamp + attachments. Dedup via `_materialize_pending_user_turn_before_error()` scans the last 8 messages so retries can't produce duplicate-on-disk. New regression coverage in `tests/test_issue1361_cancel_data_loss.py` exercises the stale-cleanup pending-turn path, complementing the existing stream-error coverage.
+
+- **PR #1859** by @ai-ag2026 — Persist `llm_title_generated` marker through Session load/save cycles. `_maybe_schedule_title_refresh()` only refreshes sessions where `session.llm_title_generated == True`, but that flag wasn't being included in `to_dict`/`from_dict` round-trip — so a WebUI restart silently lost it and the adaptive title refresh logic short-circuited indefinitely. Fix adds the field to the serialization round-trip. **Migration note:** sessions whose title was LLM-generated pre-fix may incur a one-time title regeneration on their next eligible turn (bounded by `still_auto` — user-titled or already-good titles are preserved). Regression coverage in `tests/test_session_save_mode.py` pins both the constructor and disk round-trip behavior.
+
+- **PR #1863** by @koshikai — Refresh the Japanese (`ja`) locale bundle for keys that drifted out of date — onboarding connection probes, MCP-tools section, session_stop_response, and several other recently-added keys. Pure i18n string substitution in `static/i18n.js`; no logic change. 108 lines added / 108 lines removed (balanced English→Japanese substitution).
+
+- **PR #1869** by @franksong2702 — Parametrize the Kanban double-404 regression test across HTTP methods (GET/POST/PATCH/DELETE) where prior coverage exercised only GET. Tests-only PR, defense-in-depth follow-up to PR #1843's double-404 guard fix. Closes #1845.
+
+- **PR #1870** by @franksong2702 — Tighten the browser predicate that detects "stale Kanban client" via 404. Pre-fix, the predicate also accepted bare `not found` 404 messages, which would misclassify future genuine 404s as stale-client. Now requires the explicit Kanban-stale-client server message string. **Backward-compat note:** old browser tabs running against pre-#1828 servers no longer get the "Hard refresh now" hint for bare-404 cases — they'll see a normal-error path instead. Acceptable since WebUI server and client ship together. Closes #1839.
+
+- **PR #1871** by @franksong2702 — Fix `saveCronForm()` to read `no_agent` from `_cronPreFormDetail` (the explicit edit source-of-truth captured at form-open) rather than `_currentCronDetail`. Two-character source change with matching regression coverage. Closes #1840.
+
+- **PR #1872** by @franksong2702 — Disable workspace heading affordance when the session has no registered workspace. Pre-fix, the heading still rendered as a button (cursor-pointer + hover state) even though click and context-menu actions couldn't do useful work. Now: `_syncWorkspaceHeadingState()` toggles class + role/tabindex/title based on `S.session.workspace`; CSS scopes hover/focus to `.workspace-panel-heading--enabled`. Subtle a11y refinement: focus indicator now uses `:focus-visible` so clicks no longer paint an outline but keyboard tabs still do. Closes #1842.
+
+### Tests
+
+4817 → **4830 collected, 4819 passing, 0 regressions** (+13 new). Full suite ~150s on Python 3.13 with `HERMES_HOME` isolated. JS syntax check (`node -c`) passes on all 3 modified `.js` files. Browser API sanity harness (port 8789) all-green: 11 endpoints verified (health, static assets, settings, session lifecycle, chat stream).
+
+### Pre-release verification
+
+- Full pytest under HERMES_HOME isolation: **4819 passed, 8 skipped, 1 xfailed, 2 xpassed, 8 subtests passed** in 150.85s.
+- Browser API harness (`run-browser-tests.sh` against stage-318 on port 8789): all 11 checks PASS.
+- `node -c` on `static/i18n.js`, `static/panels.js`, `static/ui.js`: clean.
+- Stage diff: 14 files, +251/-124 (production code 251 LOC + tests).
+- Opus advisor pass on stage-318 brief: **SHIP** with two release-note items (incorporated above as "Migration note" on #1859 and "Backward-compat note" on #1870). No MUST-FIX. One non-blocking nit on #1869 (redundant GET/else branch in parametrized test) noted for follow-up.
+- Pre-stamp re-fetch of all 7 PR heads: no contributor force-pushes during the Opus window. Stage commits match contributor heads.
+
 ## [v0.51.22] — 2026-05-07 — 3-PR batch (P0 markdown streaming hotfix + CSP source-map allowance + LaTeX delimiter rendering)
 
 ### Fixed (3 PRs)

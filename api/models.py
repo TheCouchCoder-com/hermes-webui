@@ -332,6 +332,7 @@ class Session:
                  context_length=None, threshold_tokens=None,
                  last_prompt_tokens=None,
                  gateway_routing=None, gateway_routing_history=None,
+                 llm_title_generated: bool=False,
                 parent_session_id: str=None,
                 enabled_toolsets=None,
                 **kwargs):
@@ -364,6 +365,7 @@ class Session:
         self.last_prompt_tokens = last_prompt_tokens
         self.gateway_routing = gateway_routing if isinstance(gateway_routing, dict) else None
         self.gateway_routing_history = gateway_routing_history if isinstance(gateway_routing_history, list) else []
+        self.llm_title_generated = bool(llm_title_generated)
         self.parent_session_id = parent_session_id
         self.is_cli_session = bool(kwargs.get('is_cli_session', False))
         self.source_tag = kwargs.get('source_tag')
@@ -408,7 +410,7 @@ class Session:
             'pending_user_message', 'pending_attachments', 'pending_started_at',
             'compression_anchor_visible_idx', 'compression_anchor_message_key',
             'context_length', 'threshold_tokens', 'last_prompt_tokens',
-            'gateway_routing', 'gateway_routing_history',
+            'gateway_routing', 'gateway_routing_history', 'llm_title_generated',
             'parent_session_id',
             'is_cli_session', 'source_tag', 'raw_source', 'session_source', 'source_label',
             'enabled_toolsets',
