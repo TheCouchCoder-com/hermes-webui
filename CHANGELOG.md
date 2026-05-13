@@ -12,6 +12,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **PR #2117** by @ayushere — `ctl.sh start` no longer crashes on macOS (bash 3.2) with `preserved[@]: unbound variable`. The dotenv-preserve loop in `_load_repo_dotenv_preserving_env()` iterated `"${preserved[@]}"` under `set -euo pipefail`, which bash 4+ silently allows on empty arrays but bash 3.2 (still the default `/usr/bin/bash` on macOS) treats as an unbound-variable error. Guards the iteration with `if [[ ${#preserved[@]} -gt 0 ]]; then ... fi` — matches the canonical bash 3.2 strict-mode pattern. This is the third bash 3.2 compat fix to land in `ctl.sh` (prior: `025f137f` guarded `CTL_BOOTSTRAP_ARGS[@]` with the `${arr[@]+...}` pass-through pattern, `630981a0` replaced `[[ -v ${key} ]]` with `[[ -n "${!key+x}" ]]`). Defense-in-depth: added `tests/test_ctl_bash32_compat.py` (5 static-pattern regressions) pinning both empty-array guards plus a denylist for bash 4+ syntax (`declare -A`, `mapfile`, `[[ -v ]]`, `${var^^}`, `${var,,}`) so the next regression surfaces in CI instead of a macOS user's terminal. Stage-343 reviewer added the regression-test file alongside the contributor's 5-LOC fix to ctl.sh.
+
+## [v0.51.49] — 2026-05-12 — Release Y (stage-342 — 3-PR contributor batch — read-only worktree status endpoint + worktree-retained response preference + Codex quota credential-pool fallback)
+
 ### Added
 
 - **PR #2109** by @franksong2702 — Read-only worktree status endpoint for the #2057 lifecycle tracker. `GET /api/session/worktree/status?session_id=...` returns the session-owned worktree path, filesystem existence, dirty/untracked state, ahead/behind counts when an upstream is configured, and live stream/embedded-terminal lock flags. Uses `git worktree list --porcelain`, `git status --porcelain --untracked-files=normal`, and `rev-list --left-right --count HEAD...@{u}` only — no mutating git state, 2-second per-call timeouts (tightened from PR-submitted 5s during stage review). Session-id scoped (rejects non-worktree sessions with 400), does not accept arbitrary filesystem paths. This is the non-destructive status surface Nathan requested as the next slice before any future explicit remove-worktree action. 221-line regression suite covering clean/dirty/untracked/missing-path/live-stream-lock/embedded-terminal-lock/endpoint-success/non-worktree-rejection cases.
