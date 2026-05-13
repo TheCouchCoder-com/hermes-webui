@@ -4,6 +4,40 @@
 > Entries below this notice document upstream releases and were not written by the fork maintainers.
 > Fork-specific changes will be added above this notice as they ship.
 
+## [v0.51.25] — 2026-05-08 — 6-PR streaming/runtime contributor batch (Release C: profile-isolated quota probes, request wedge diagnostics, max_turns config honor, per-turn usage overwrite, interim_assistant SSE wiring, workspace-prefix transcript dedup)
+
+### Fixed (6 PRs)
+
+- **PR #1873** by @franksong2702 — Subprocess-based profile isolation for quota fetches. The original #1831 attempt added per-profile locks but CI exposed that approach as unsafe — `cron_profile_context_for_home()` mutates process-global `os.environ['HERMES_HOME']` and cron module globals. Per-profile locks would let different profile homes enter concurrently and one thread could observe another profile's home. This rework spawns subprocess workers (one per profile) that run quota probes in their own process with their own env vars, communicating results back via JSON over stdout. Eliminates the env-mutation race entirely. Closes #1831. **Operational follow-up filed:** worker-pool refactor + `prctl(PR_SET_PDEATHSIG)` + `BoundedSemaphore` concurrency cap before this hits busy multi-profile installs (current synchronous-spawn-per-probe is correct but inefficient under load).
+
+- **PR #1860** by @franksong2702 — Targeted slow-request diagnostics for the two #1855 paths (`POST /api/chat/start` + `GET /api/sessions`). Adds a lightweight `RequestDiagnostics` watchdog that only starts for those two paths. If a request is still running after the configured threshold, it logs a structured warning with request id, method, path, start time, elapsed time, current stage, accumulated stage timings, and Python thread stack snapshots. Completed requests that exceed the same threshold also log their stage timings (without thread stacks). **Does NOT alter locking or request semantics** — pure observability slice. `_diag_stage()` is a no-op shim when `diag=None` (the 99% path), so per-request overhead is near-zero. Refs #1855.
+
+- **PR #1877** by @Michaelyklam — Read `agent.max_turns` config when constructing WebUI streaming `AIAgent` instances. Pass the parsed positive value as `max_iterations` when the installed agent supports it (`'max_iterations' in _agent_params` gating, same pattern as `max_tokens`/`reasoning_config`). Include the parsed budget in the per-session agent cache signature so budget changes rebuild cached agents instead of reusing stale instances. Closes #1876.
+
+- **PR #1861** by @franksong2702 — Session usage counters (`input_tokens`, `output_tokens`, `estimated_cost`) were being **accumulated** on every completed turn. Because prompt tokens represent the full current context (which already contains all prior turns), accumulation double-counts and inflates long-session usage. Fix: store the most recent turn's values rather than the cumulative sum. **Defensive in-stage absorption (per Opus advisor on stage-320):** added `> 0` / `is not None` guards before overwriting `s.input_tokens` / `s.output_tokens` / `s.estimated_cost` so a rebuilt-from-cache-miss agent (post-restart, post-LRU-eviction) doesn't zero out persisted disk totals on its next turn. Closes #1857.
+
+- **PR #1865** by @franksong2702 — Wire runtime's `interim_assistant_callback` contract through the WebUI SSE stream. Pre-fix, the runtime emitted user-visible interim assistant commentary (e.g. "I'll inspect the workspace files now.") via the callback contract on AIAgent, but WebUI's SSE stream had no event path for it and the messages were swallowed. Fix: forward the callback through to `put('interim_assistant', {'text': visible, 'already_streamed': bool})` SSE events; frontend renders them as separate-but-non-tool live segments. The `already_streamed` flag tells the renderer not to duplicate text already emitted via `token` events (Codex-style backends). Single-purpose PR after the contributor split out earlier scope creep into separate PRs (#1869 / #1870 / #1871 / #1873).
+
+- **PR #1889** by @ai-ag2026 — WebUI sends model-facing `[Workspace: ...]` prefix to user prompts; transcript compaction was treating the prefixed and unprefixed forms as different turns and creating adjacent duplicate user bubbles. Fix: strip workspace prefix during current-user identity matching so context-compaction merges don't duplicate. The visible bubble's display content gets cleaned of the prefix during compaction merge — a desirable side effect. Refs #1217. **Follow-up filed:** consider distinguishing-sentinel format (`[Workspace::v1: ...]` or nonce) so user-typed `[Workspace: ...]` text isn't silently eaten; also handle workspace paths containing `]`. Pre-existing behavior in master (`api/streaming.py:1054` already used the same regex), this PR extends the same convention.
+
+### Tests
+
+4858 → **4872 collected, 4861 passing, 0 regressions** (+14 net new). Full suite ~145s on Python 3.11. JS syntax check (`node -c`) passes on `static/messages.js`. Browser API sanity harness (port 8789) all-green: 11 endpoints verified. Opus advisor pass: SHIP with three Medium-severity follow-ups (one absorbed in-release, two filed for follow-up PRs).
+
+### Pre-release verification
+
+- Full pytest under `HERMES_HOME` isolation: **4861 passed, 8 skipped, 1 xfailed, 2 xpassed, 8 subtests passed** in 145.96s.
+- Browser API harness against stage-320 on port 8789: all 11 checks PASS.
+- `node -c` on `static/messages.js`: clean.
+- Stage diff: 13 files, +1216/-196 (heavy in tests).
+- Opus advisor pass on stage-320 brief: **SHIP** with three Medium-severity concerns (one absorbed in-release: #1861 restart-zeros-totals defensive guard; two filed as follow-ups: #1873 worker-pool ops refactor, #1889 sentinel/nonce regex tightening).
+- Pre-stamp re-fetch of all 6 PR heads: no contributor force-pushes during the Opus window.
+
+### Opus-applied fixes (absorbed in-release)
+
+**From stage-320 absorption (this release):**
+- **#1861 restart-zeros-totals defensive guard.** Opus identified that the new per-turn overwrite at `api/streaming.py:2925-2927` would zero out `s.input_tokens` / `s.output_tokens` / `s.estimated_cost` on the first turn after a WebUI restart or LRU cache eviction (the rebuilt agent's `session_*` running totals start at zero and would overwrite the persisted disk values). Added `> 0` / `is not None` guards before each overwrite. Test still passes; the guard preserves PR #1861's intended fix while preventing the restart-induced regression. <10 LOC, clearly defensive.
+
 ## [v0.51.24] — 2026-05-08 — 5-PR contributor batch (Release B: local-server custom-provider model preservation, oversized upload preflight, ai-gateway phantom Custom group fix, Kanban lifecycle controls, cross-container gateway liveness)
 
 ### Fixed (5 PRs)
