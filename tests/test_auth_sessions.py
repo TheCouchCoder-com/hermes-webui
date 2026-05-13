@@ -200,12 +200,13 @@ class TestSessionTtlResolution(unittest.TestCase):
         os.environ["HERMES_WEBUI_SESSION_TTL"] = "3600"
         token_hex = auth.create_session().split(".")[0]
         from api.auth import _sessions
-        for t, exp in _sessions.items():
+        for t, entry in _sessions.items():
             if t == token_hex:
                 # The resolved env-var value (3600s) should be applied, not
-                # the SESSION_TTL fallback default.
+                # the SESSION_TTL fallback default. _session_expiry() handles
+                # both legacy float and new dict {user_id, expiry} record shapes.
                 expected = time.time() + 3600
-                self.assertAlmostEqual(exp, expected, delta=5)
+                self.assertAlmostEqual(auth._session_expiry(entry), expected, delta=5)
                 break
         else:
             self.fail("Session token not found in _sessions")
