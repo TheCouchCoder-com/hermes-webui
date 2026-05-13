@@ -1095,16 +1095,37 @@ function _normalizeAppearance(theme,skin){
   return {theme:nextTheme,skin:nextSkin};
 }
 
+// Sync <meta name="theme-color"> with the active theme's computed --bg.
+// This surfaces the WebUI's exact theme background to:
+//   1. Mobile Safari status bar (the prefers-color-scheme media variants in index.html
+//      cover the pre-load case; this updater handles user-toggled changes mid-session).
+//   2. iOS PWA / Add to Home Screen status bar.
+//   3. Native WKWebView wrappers (e.g. hermes-swift-mac) that read this attribute as
+//      the source of truth for AppKit chrome (tab bar, title bar, traffic-light area)
+//      instead of pixel-sampling — overlay-resistant and IPC-free.
+// Reading getComputedStyle(html).getPropertyValue('--bg') picks up the active skin
+// (Default, Sienna, Sisyphus, Charizard, etc.) so each skin's distinct paint reaches
+// the meta tag.
+function _syncThemeColorMeta(){
+  try{
+    const meta=document.getElementById('hermes-theme-color');
+    if(!meta) return;
+    const bg=getComputedStyle(document.documentElement).getPropertyValue('--bg').trim();
+    if(bg) meta.setAttribute('content',bg);
+  }catch(e){}
+}
+
 function _setResolvedTheme(isDark){
   document.documentElement.classList.toggle('dark',!!isDark);
   const link=document.getElementById('prism-theme');
-  if(!link) return;
+  if(!link){ _syncThemeColorMeta(); return; }
   const want=isDark
     ?'https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css'
     :'https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism.min.css';
   // No SRI integrity on theme CSS — jsdelivr edge nodes serve different
   // digests for the same pinned version, causing intermittent blocking (#1100).
   if(link.href!==want){ link.integrity=''; link.href=want; }
+  _syncThemeColorMeta();
 }
 
 function _applyTheme(name){
@@ -1129,6 +1150,7 @@ function _applySkin(name){
   const key=(name||'default').toLowerCase();
   if(key==='default') delete document.documentElement.dataset.skin;
   else document.documentElement.dataset.skin=key;
+  _syncThemeColorMeta();
 }
 
 function _pickTheme(name){
