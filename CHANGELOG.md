@@ -4,6 +4,26 @@
 > Entries below this notice document upstream releases and were not written by the fork maintainers.
 > Fork-specific changes will be added above this notice as they ship.
 
+## [v0.51.13] — 2026-05-06 — single-PR composer UX
+
+### Added
+
+- **PR #1758** — Click pasted/attached image thumbnails in the composer to lightbox-zoom them. When pasting/dropping screenshots into the composer, the 56×56 thumbnail in each chip now opens the existing image lightbox on click — same modal that's been wired for message-attached images since v0.50.x. Cursor changes to `zoom-in` (was `default`, actively misleading) and a subtle hover emphasis (4% scale + 5% brightness, 120ms ease, hover-capable devices only via `@media (hover: hover)`) gives instant visual feedback. Audio/video chips are unaffected — they keep their inline native controls and never render an `.attach-thumb` IMG. Refs #1733. Pairs with the companion Mac PR `hermes-webui/hermes-swift-mac#74` for sequential-paste filename uniqueness — paste, paste, paste, click any to verify, send.
+
+### Tests
+
+4637 → **4642 collected** (+5 regression tests across composer chip wiring + cursor affordance). 4630 passed, 9 skipped (test-isolation prong-2 noise), 3 xpassed, 0 failed in 145s.
+
+### Pre-release verification
+
+- @nesquena independently APPROVED with exhaustive headless-Chrome behavioural harness verifying all 4 click paths (thumb-image, ×-on-image, ×-on-audio, audio-element). Pre-fix verification confirmed 4/5 of the new tests catch regressions to the previous state.
+- Stage-307: clean rebase + clean merge (no conflicts).
+- All JS files syntax-clean (`node -c static/ui.js`).
+- pytest: 4630 passed, 0 failed (single clean run).
+- `scripts/run-browser-tests.sh`: all 11 endpoints PASS on isolated port 8789.
+- Pre-stamp re-fetch: PR head still matches local rebase — no late commits.
+- Opus advisor: SHIP, all 6 verification questions clean, 0 MUST-FIX. One non-blocking nit (wrap `:hover` in `@media (hover: hover)` for iPad sticky-hover hygiene) absorbed in-release as a defensive 3-LOC cleanup.
+
 ## [v0.51.12] — 2026-05-06 — 3-PR full-sweep batch
 
 ### Fixed
