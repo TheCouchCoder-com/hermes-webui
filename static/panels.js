@@ -12,6 +12,7 @@ let _kanbanLanesByProfile = false;
 let _kanbanCurrentBoard = null;
 let _kanbanBoardsList = null;
 let _kanbanBoardMenuOpen = false;
+let _kanbanIsDispatching = false;
 // SSE event stream — replaces the 30s polling cadence with a long-lived
 // /api/kanban/events/stream connection. Falls back to polling when the
 // EventSource fails to connect (proxy that strips text/event-stream, etc).
@@ -1425,11 +1426,14 @@ function _kanbanBoardQuery(extra){
 }
 
 async function nudgeKanbanDispatcher(){
+  if (_kanbanIsDispatching) return;
   // Dry-run dispatch: show what WOULD be spawned, without actually spawning
   // workers.  Uses ?dry_run=1 so the dispatcher reports its plan without
   // mutating the board.  The result shape includes spawned/skipped_unassigned/
   // skipped_nonspawnable/promoted/auto_blocked so users can diagnose why a
   // Ready task isn't being picked up before they commit to a real run.
+  _kanbanIsDispatching = true;
+  _setKanbanDispatcherButtonsDisabled(true);
   try {
     const dispatchEndpoint = '/api/kanban/dispatch';
     const result = await api(
@@ -1438,10 +1442,16 @@ async function nudgeKanbanDispatcher(){
     );
     showToast(_kanbanFormatDispatchResult(result, true), 'info', 6000);
     await loadKanban(true);
-  } catch(e) { showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error'); }
+  } catch(e) {
+    showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error');
+  } finally {
+    _kanbanIsDispatching = false;
+    _setKanbanDispatcherButtonsDisabled(false);
+  }
 }
 
 async function runKanbanDispatcher(){
+  if (_kanbanIsDispatching) return;
   // Real dispatch: claims Ready tasks and spawns worker subprocesses
   // (one `hermes -p <assignee>` per claimed row, up to max=8 per call).
   // Confirmation dialog first because this actually consumes API budget on
@@ -1451,14 +1461,17 @@ async function runKanbanDispatcher(){
     showToast(t('kanban_unavailable') || 'Kanban unavailable', 'error');
     return;
   }
-  const ok = await showConfirmDialog({
-    title: t('kanban_run_dispatcher') || 'Run dispatcher',
-    message: t('kanban_run_dispatcher_confirm')
-      || 'This will claim Ready tasks on this board and spawn worker subprocesses (one per task, up to 8 per click). Continue?',
-    confirmLabel: t('kanban_run_dispatcher') || 'Run dispatcher',
-  });
-  if (!ok) return;
+
+  _kanbanIsDispatching = true;
+  _setKanbanDispatcherButtonsDisabled(true);
   try {
+    const ok = await showConfirmDialog({
+      title: t('kanban_run_dispatcher') || 'Run dispatcher',
+      message: t('kanban_run_dispatcher_confirm')
+        || 'This will claim Ready tasks on this board and spawn worker subprocesses (one per task, up to 8 per click). Continue?',
+      confirmLabel: t('kanban_run_dispatcher') || 'Run dispatcher',
+    });
+    if (!ok) return;
     const dispatchEndpoint = '/api/kanban/dispatch';
     const result = await api(
       dispatchEndpoint + '?max=8' + (_kanbanCurrentBoard ? '&board=' + encodeURIComponent(_kanbanCurrentBoard) : ''),
@@ -1466,7 +1479,19 @@ async function runKanbanDispatcher(){
     );
     showToast(_kanbanFormatDispatchResult(result, false), 'info', 8000);
     await loadKanban(true);
-  } catch(e) { showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error'); }
+  } catch(e) {
+    showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error');
+  } finally {
+    _kanbanIsDispatching = false;
+    _setKanbanDispatcherButtonsDisabled(false);
+  }
+}
+
+function _setKanbanDispatcherButtonsDisabled(disabled){
+  document.querySelectorAll('.kanban-run-dispatch-btn, .kanban-nudge-dispatch-btn').forEach((btn) => {
+    btn.disabled = !!disabled;
+    btn.classList.toggle('disabled', !!disabled);
+  });
 }
 
 function _kanbanFormatDispatchResult(result, dryRun){
@@ -1680,6 +1705,13 @@ async function createKanbanTask(){
 let _kanbanTaskModalMode = 'create';   // 'create' | 'edit'
 let _kanbanTaskModalEditingId = null;  // task id when mode === 'edit'
 let _kanbanProfileNamesCache = null;   // populated lazily on first modal open
+let _kanbanProfileNamesCacheAt = 0;
+const _KANBAN_PROFILE_NAMES_CACHE_TTL_MS = 30000;
+function _invalidateKanbanProfileCache() {
+  _kanbanProfileNamesCache = null;
+  _kanbanProfileNamesCacheAt = 0;
+}
+let _kanbanTaskModalFocusCleanup = null;
 // Status the modal *displayed* on edit-mode open.  If the user doesn't touch
 // the dropdown, we must NOT send `status` in the PATCH payload — otherwise
 // editing a task whose real status is non-editable in this dropdown
@@ -1688,11 +1720,16 @@ let _kanbanProfileNamesCache = null;   // populated lazily on first modal open
 // review: editing a 'running' task without touching status was reclaiming
 // the worker and moving the task back to triage.
 let _kanbanTaskModalInitialDisplayedStatus = null;
+let _kanbanBoardModalFocusCleanup = null;
 
 async function _kanbanLoadProfileNames(){
-  // Hit /api/profiles once per session and cache; refresh is cheap if needed.
+  // Hit /api/profiles once per session and cache for a short TTL.
   // Returns an array of profile names (sorted, default first if present).
-  if (Array.isArray(_kanbanProfileNamesCache)) return _kanbanProfileNamesCache;
+  const hasFreshCache = (
+    Array.isArray(_kanbanProfileNamesCache) &&
+    (Date.now() - _kanbanProfileNamesCacheAt) < _KANBAN_PROFILE_NAMES_CACHE_TTL_MS
+  );
+  if (hasFreshCache) return _kanbanProfileNamesCache;
   try {
     const data = await api('/api/profiles');
     const profiles = Array.isArray(data && data.profiles) ? data.profiles : [];
@@ -1704,9 +1741,11 @@ async function _kanbanLoadProfileNames(){
       return a.localeCompare(b);
     });
     _kanbanProfileNamesCache = names;
+    _kanbanProfileNamesCacheAt = Date.now();
     return names;
   } catch(_) {
     _kanbanProfileNamesCache = [];
+    _kanbanProfileNamesCacheAt = Date.now();
     return [];
   }
 }
@@ -1772,6 +1811,7 @@ function openKanbanCreate(){
   // tasks that need human review before being marked actionable; users who
   // want it can still pick it from the status dropdown.
   _kanbanResetTaskModalFields({status: 'ready'});
+  _kanbanSetTaskModalStatusHint(null);
   _kanbanSetTaskModalLabels('create');
   _kanbanPopulateAssigneeSelect('').then(() => {
     // After the dropdown is populated, default-select the first profile (not
@@ -1785,6 +1825,11 @@ function openKanbanCreate(){
   });
   _kanbanPopulateTenantDatalist();
   modal.hidden = false;
+  if (_kanbanTaskModalFocusCleanup) {
+    _kanbanTaskModalFocusCleanup();
+    _kanbanTaskModalFocusCleanup = null;
+  }
+  _kanbanTaskModalFocusCleanup = _trapModalFocus(modal);
   setTimeout(() => {
     const titleEl = document.getElementById('kanbanTaskModalTitleInput');
     if (titleEl) titleEl.focus();
@@ -1818,6 +1863,7 @@ async function openKanbanEdit(taskId){
   // (the mapped 'triage' would land in the PATCH payload, and _patch_task
   // would call _set_status_direct → reclaim worker → move to triage).
   const initialDisplayedStatus = _kanbanEditableStatusFor(task.status);
+  const originalStatus = task.status || initialDisplayedStatus;
   _kanbanTaskModalInitialDisplayedStatus = initialDisplayedStatus;
   _kanbanResetTaskModalFields({
     title: task.title || '',
@@ -1829,9 +1875,15 @@ async function openKanbanEdit(taskId){
   // Populate the assignee select AFTER reset so the option exists when we
   // call sel.value = currentAssignee.
   await _kanbanPopulateAssigneeSelect(task.assignee || '');
+  _kanbanSetTaskModalStatusHint(originalStatus, initialDisplayedStatus);
   _kanbanSetTaskModalLabels('edit');
   _kanbanPopulateTenantDatalist();
   modal.hidden = false;
+  if (_kanbanTaskModalFocusCleanup) {
+    _kanbanTaskModalFocusCleanup();
+    _kanbanTaskModalFocusCleanup = null;
+  }
+  _kanbanTaskModalFocusCleanup = _trapModalFocus(modal);
   setTimeout(() => {
     const titleEl = document.getElementById('kanbanTaskModalTitleInput');
     if (titleEl) { titleEl.focus(); titleEl.select(); }
@@ -1880,10 +1932,61 @@ function _kanbanSetTaskModalLabels(mode){
   }
 }
 
+function _kanbanSetTaskModalStatusHint(realStatus, editableStatus){
+  const hintEl = document.getElementById('kanbanTaskModalStatusOriginalHint');
+  if (!hintEl) return;
+  if (!realStatus || realStatus === editableStatus) {
+    hintEl.hidden = true;
+    hintEl.textContent = '';
+    return;
+  }
+  const statusLabel = t(`kanban_status_${realStatus}`) || realStatus;
+  hintEl.textContent = String(t('kanban_status_original_hint')).replace('{0}', statusLabel);
+  hintEl.hidden = false;
+}
+
 function _kanbanPopulateTenantDatalist(){
   const tenants = (_kanbanBoard && Array.isArray(_kanbanBoard.tenants)) ? _kanbanBoard.tenants : [];
   const tList = document.getElementById('kanbanTaskModalTenantList');
   if (tList) tList.innerHTML = tenants.map(v => `<option value="${esc(v)}"></option>`).join('');
+}
+
+function _trapModalFocus(modalEl){
+  if (!modalEl) return () => {};
+  const selector = 'a[href], button, textarea, input, select, summary, [tabindex]:not([tabindex="-1"])';
+  const collect = () => {
+    const candidates = Array.from(modalEl.querySelectorAll(selector));
+    return candidates.filter((el) => {
+      if (el.disabled || el.hidden) return false;
+      const style = getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden') return false;
+      return el.tabIndex >= 0;
+    });
+  };
+  let focusableEls = collect();
+  const onKeyDown = (ev) => {
+    if (ev.key !== 'Tab') return;
+    if (!focusableEls.length) {
+      ev.preventDefault();
+      return;
+    }
+    const current = document.activeElement;
+    let idx = focusableEls.indexOf(current);
+    if (idx === -1) {
+      ev.preventDefault();
+      focusableEls[0].focus();
+      return;
+    }
+    if (ev.shiftKey) idx -= 1;
+    else idx += 1;
+    idx = (idx + focusableEls.length) % focusableEls.length;
+    ev.preventDefault();
+    focusableEls[idx].focus();
+  };
+  modalEl.addEventListener('keydown', onKeyDown);
+  return () => {
+    modalEl.removeEventListener('keydown', onKeyDown);
+  };
 }
 
 function closeKanbanTaskModal(){
@@ -1892,6 +1995,11 @@ function closeKanbanTaskModal(){
   _kanbanTaskModalMode = 'create';
   _kanbanTaskModalEditingId = null;
   _kanbanTaskModalInitialDisplayedStatus = null;
+  _kanbanSetTaskModalStatusHint(null, null);
+  if (_kanbanTaskModalFocusCleanup) {
+    _kanbanTaskModalFocusCleanup();
+    _kanbanTaskModalFocusCleanup = null;
+  }
   document.removeEventListener('keydown', _kanbanTaskModalKey);
 }
 
@@ -2330,6 +2438,11 @@ function openKanbanCreateBoard(){
   document.getElementById('kanbanBoardModalColor').value = '#7aa2ff';
   document.getElementById('kanbanBoardModalError').textContent = '';
   modal.hidden = false;
+  if (_kanbanBoardModalFocusCleanup) {
+    _kanbanBoardModalFocusCleanup();
+    _kanbanBoardModalFocusCleanup = null;
+  }
+  _kanbanBoardModalFocusCleanup = _trapModalFocus(modal);
   // Auto-focus name field
   setTimeout(() => document.getElementById('kanbanBoardModalName').focus(), 50);
   // Auto-suggest slug from name as user types
@@ -2369,6 +2482,11 @@ function openKanbanRenameBoard(){
   document.getElementById('kanbanBoardModalColor').value = meta.color || '#7aa2ff';
   document.getElementById('kanbanBoardModalError').textContent = '';
   modal.hidden = false;
+  if (_kanbanBoardModalFocusCleanup) {
+    _kanbanBoardModalFocusCleanup();
+    _kanbanBoardModalFocusCleanup = null;
+  }
+  _kanbanBoardModalFocusCleanup = _trapModalFocus(modal);
   setTimeout(() => document.getElementById('kanbanBoardModalName').focus(), 50);
   document.addEventListener('keydown', _kanbanBoardModalEsc);
 }
@@ -2380,6 +2498,10 @@ function _kanbanBoardModalEsc(ev){
 function closeKanbanBoardModal(){
   const modal = document.getElementById('kanbanBoardModal');
   if (modal) modal.hidden = true;
+  if (_kanbanBoardModalFocusCleanup) {
+    _kanbanBoardModalFocusCleanup();
+    _kanbanBoardModalFocusCleanup = null;
+  }
   document.removeEventListener('keydown', _kanbanBoardModalEsc);
 }
 
@@ -4194,6 +4316,7 @@ async function deleteCurrentProfile(){
   if(!_ok) return;
   try {
     await api('/api/profile/delete', { method: 'POST', body: JSON.stringify({ name }) });
+    _invalidateKanbanProfileCache();
     _clearProfileDetail();
     await loadProfilesPanel();
     showToast(t('profile_deleted', name));
@@ -4482,6 +4605,7 @@ async function saveProfileForm(){
     if (baseUrl) payload.base_url = baseUrl;
     if (apiKey) payload.api_key = apiKey;
     await api('/api/profile/create', { method: 'POST', body: JSON.stringify(payload) });
+    _invalidateKanbanProfileCache();
     _profilePreFormDetail = null;
     await loadProfilesPanel();
     showToast(t('profile_created', name));
@@ -4502,6 +4626,7 @@ async function deleteProfile(name) {
   if(!_delProf) return;
   try {
     await api('/api/profile/delete', { method: 'POST', body: JSON.stringify({ name }) });
+    _invalidateKanbanProfileCache();
     await loadProfilesPanel();
     showToast(t('profile_deleted', name));
   } catch (e) { showToast(t('delete_failed') + e.message); }

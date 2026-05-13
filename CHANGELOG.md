@@ -10,6 +10,37 @@
 
 ## [v0.51.29] — 2026-05-08 — 6-PR contributor batch (Release F: Docker hardening + login persistence + scroll/lineage fixes + i18n cleanup)
 
+## [v0.51.35] — 2026-05-10 — Release K (kanban polish + i18n DE pluralization)
+
+### Fixed
+
+- **PR #1990** by @franksong2702 — Kanban dispatcher race guard. Adds `_kanbanIsDispatching` flag around `runKanbanDispatcher()` and `nudgeKanbanDispatcher()` in `static/panels.js`; both Run/Preview buttons go disabled while the call is in-flight, so a fast double-click can't fire the dispatcher twice (which would post duplicate POSTs and surface duplicate toasts). Re-enables on success or error in `finally`. Closes #1984.
+
+- **PR #1991** by @franksong2702 — German `profile_skill_count` pluralization. The DE locale had `profile_skill_count: '{count} Fähigkeiten'` as a literal string with the placeholder token still in it (so 1, 2, 5 skills all rendered as `{count} Fähigkeiten`). Switched to the same `(count) => …` interpolation function form already used by the other locales. Regression test `tests/test_issue1989_profile_skill_count.py` pins DE to function form and asserts the literal token never reaches the rendered string. Closes #1989.
+
+- **PR #1993** by @franksong2702 — Kanban assignee-dropdown profile cache invalidation. `_kanbanProfileNamesCache` was populated lazily on first modal open and never expired; creating or deleting a profile elsewhere in the UI didn't refresh it, so the assignee dropdown could show a freshly-deleted profile or miss a freshly-created one. Added a 30-second TTL (`_kanbanProfileNamesCacheAt` + `_KANBAN_PROFILE_NAMES_CACHE_TTL_MS`) and an explicit `_invalidateKanbanProfileCache()` helper called from `saveProfileForm()`, `deleteCurrentProfile()`, and `deleteProfile()`. Closes #1985.
+
+- **PR #1995** by @franksong2702 — Kanban modal focus trap + edit-mode status hint. Two related fixes bundled (#1995 was rebased on top of #1994 in the contributor's branch):
+  - **Focus trap (#1974).** Tab/Shift-Tab in the Kanban task and board modals could move keyboard focus to controls behind the modal. Added a shared `_trapModalFocus(modalEl)` helper in `static/panels.js`; wired into `openKanbanCreate()`, `openKanbanEdit()`, `openKanbanCreateBoard()`, and `openKanbanRenameBoard()`. Cleanup tracker `_kanbanTaskModalFocusCleanup` removes the trap on close so a sequence of open→close→open doesn't leak listeners.
+  - **Status hint (#1986).** When opening Edit on a task whose real status is `running`/`blocked`/`done`/`archived` (which the dropdown displays as `triage` because the dispatcher only writes to `triage`/`todo`/`ready`), the modal now shows an inline hint explaining the displayed-vs-real mismatch. The dropdown behaviour is unchanged — only an additional UX cue. New CSS for `.kanban-status-hint`, new i18n key `kanban_status_hint_real` across all 8 locales.
+
+  Closes #1974, #1986.
+
+- **PR #1996** by @franksong2702 — Kanban modal locale parity regression test. Adds `tests/test_kanban_ui_static.py::test_kanban_modal_locales_have_full_modal_vocabulary` that anchors on the existing `kanban_no_comments` key and asserts every locale supporting Kanban has the modal vocabulary. Hardens locale-block parsing to handle quoted locales. Pure test addition.
+
+### Tests
+
+5049 → **5054 collected, 5054 passing, 0 regressions** (+5 net new). Full suite 154s on Python 3.11 with `HERMES_HOME` isolation.
+
+### Stage augmentation
+
+- **`9242305a`** — Opus advisor flagged that `kanban_status_original_hint` (added by #1995) was missing in the `zh-Hant` block, so Traditional Chinese users would get the English fallback. Added the Traditional Chinese translation (`實際狀態：{0}。此對話框僅支援編輯 Triage/Todo/Ready。`) at line 6537 and extended `tests/test_kanban_ui_static.py::test_kanban_modal_locales_have_full_modal_vocabulary`'s `modal_keys` list to assert the key — so any future kanban modal key added without zh-Hant translation will fail CI.
+
+### Notes
+
+- `static/panels.js` was the high-collision file in this batch (5 PRs touched it). Stage merge cleanly; one syntactic conflict at the `_kanbanProfileNamesCache` declaration block when #1995 landed on top of #1993 — both PRs added new module-level `let` declarations adjacent to `_kanbanProfileNamesCache`. Resolved by preserving both declaration blocks (the variables are independent).
+- Six PRs in batch, all from @franksong2702. Disjoint concerns, disjoint i18n keys, disjoint tests. The 5-files panels.js overlap was the only nontrivial integration risk and resolved cleanly.
+
 ## [v0.51.34] — 2026-05-09 — Release J (kanban edit/dispatch + zh-Hant kanban i18n)
 
 ### Added
