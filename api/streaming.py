@@ -1753,6 +1753,18 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
             # in result_messages, keep the durable checkpoint and append only
             # the assistant/tool delta.
             continue
+        if (
+            key is not None
+            and isinstance(msg, dict)
+            and msg.get('role') == 'assistant'
+            and merged
+            and _message_identity(merged[-1]) == key
+        ):
+            # Some provider/result replay paths can include the same assistant
+            # message twice in the current delta. Treat only adjacent identity
+            # matches as replay duplicates so identical answers in separate
+            # user turns remain visible.
+            continue
         if _is_context_compression_marker(msg) and key is not None and key in seen:
             continue
         display_msg = msg

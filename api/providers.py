@@ -978,6 +978,18 @@ def get_providers() -> dict[str, Any]:
                     models_total = len(live_ids)
             except Exception:
                 logger.debug("Failed to load Nous Portal models from hermes_cli")
+        # LM Studio: fetch live locally-loaded models so the providers card
+        # matches what's actually available on the user's server (#WebUI).
+        if pid == "lmstudio":
+            try:
+                from hermes_cli.models import provider_model_ids as _pmi
+
+                lm_live = _pmi("lmstudio") or []
+                if lm_live:
+                    models = [{"id": mid, "label": mid} for mid in lm_live]
+                    models_total = len(models)
+            except Exception:
+                logger.debug("Failed to load LM Studio models from hermes_cli")
         # Also include models from config.yaml providers section
         if isinstance(providers_cfg, dict):
             provider_cfg = providers_cfg.get(pid, {})

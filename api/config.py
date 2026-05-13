@@ -1479,6 +1479,33 @@ def _custom_slug_rest_looks_like_host_port(rest: str) -> bool:
     return False
 
 
+def _get_provider_base_url(provider_id):
+    """Look up the configured base_url for a provider (e.g. lmstudio).
+
+    Checks two locations, in order:
+      1. ``cfg["providers"][<provider_id>]["base_url"]`` — the explicit
+         per-provider override.
+      2. ``cfg["model"]["base_url"]`` — falls back here when
+         ``cfg["model"]["provider"] == provider_id``. This is the historical
+         shape (the model block carries both the active provider AND the
+         base URL for that provider in a single record).
+
+    Returns the URL stripped of trailing ``/`` if configured, otherwise None.
+    """
+    prov_cfg = cfg.get("providers", {}).get(provider_id, {}) or {}
+    explicit = (prov_cfg.get("base_url") or "").strip().rstrip("/")
+    if explicit:
+        return explicit
+    model_cfg = cfg.get("model", {}) or {}
+    if isinstance(model_cfg, dict):
+        model_provider = str(model_cfg.get("provider") or "").strip().lower()
+        if model_provider == str(provider_id).strip().lower():
+            model_base = (model_cfg.get("base_url") or "").strip().rstrip("/")
+            if model_base:
+                return model_base
+    return None
+
+
 def resolve_model_provider(model_id: str) -> tuple:
     """Resolve model name, provider, and base_url for AIAgent.
 
@@ -1601,7 +1628,7 @@ def resolve_model_provider(model_id: str) -> tuple:
                 and provider_hint not in _PROVIDER_DISPLAY
                 and not provider_hint.startswith("custom:")):
             provider_hint, bare_model = inner.split(":", 1)
-        return bare_model, provider_hint, None
+        return bare_model, provider_hint, _get_provider_base_url(provider_hint)
 
     if "/" in model_id:
         prefix, bare = model_id.split("/", 1)
@@ -2806,6 +2833,9 @@ def get_available_models() -> dict:
                 detected_providers.add("opencode-zen")
             if all_env.get("OPENCODE_GO_API_KEY"):
                 detected_providers.add("opencode-go")
+            # LM Studio: detect via LM_API_KEY + LM_BASE_URL in ~/.hermes/.env
+            if all_env.get("LM_API_KEY") and all_env.get("LM_BASE_URL"):
+                detected_providers.add("lmstudio")
 
         # Also detect providers explicitly listed in config.yaml providers section.
         # A user may configure a provider key via config.yaml providers.<name>.api_key
@@ -3392,6 +3422,62 @@ def get_available_models() -> dict:
                         if extras:
                             group_entry["extra_models"] = extras
                         groups.append(group_entry)
+                elif pid == "lmstudio":
+                    # LM Studio is a local server — fetch live loaded models via
+                    # the OpenAI-compatible /v1/models endpoint (#WebUI).
+                    #
+                    # Two-tier lookup, each in its own try so a failure in one
+                    # does not abort the other (the bug pattern that broke
+                    # tests/test_issue1527_lmstudio_base_url_classification on
+                    # CI environments where hermes_cli isn't importable —
+                    # ImportError in the cli tier was hijacking the whole
+                    # branch and silently skipping the urlopen fallback).
+                    raw_models = []
+                    lm_ids: list[str] = []
+                    try:
+                        from hermes_cli.models import provider_model_ids as _provider_model_ids
+                        lm_ids = _provider_model_ids("lmstudio") or []
+                    except Exception:
+                        logger.debug("hermes_cli LM Studio lookup unavailable; using urlopen fallback")
+
+                    if lm_ids:
+                        raw_models = [{"id": mid, "label": mid} for mid in lm_ids]
+                    else:
+                        # Fallback: fetch /models directly from the configured
+                        # base URL. Looks for the URL in either
+                        # `cfg["providers"]["lmstudio"]["base_url"]` or
+                        # `cfg["model"]["base_url"]` (via _get_provider_base_url),
+                        # so the historical model-block config shape still works.
+                        lm_cfg = cfg.get("providers", {}).get("lmstudio", {}) or {}
+                        lm_base_url = _get_provider_base_url("lmstudio") or ""
+                        lm_api_key = str(lm_cfg.get("api_key") or "").strip() if isinstance(lm_cfg, dict) else ""
+                        if lm_base_url:
+                            headers = {"User-Agent": "OpenAI/Python 1.0"}
+                            if lm_api_key:
+                                headers["Authorization"] = f"Bearer {lm_api_key}"
+                            endpoint = (lm_base_url + "/models").rstrip("/")
+                            try:
+                                import urllib.request as _urlreq
+                                req = _urlreq.Request(endpoint, method="GET", headers=headers)
+                                with _urlreq.urlopen(req, timeout=5) as resp:
+                                    lm_data = json.loads(resp.read().decode())
+                                for m in (lm_data.get("data") or []):
+                                    if isinstance(m, dict):
+                                        mid = str(m.get("id") or "").strip()
+                                        if mid and {"id": mid, "label": mid} not in raw_models:
+                                            raw_models.append({"id": mid, "label": mid})
+                            except Exception:
+                                logger.debug("LM Studio /models fetch failed at %s", endpoint)
+
+                    if raw_models:
+                        models = _apply_provider_prefix(raw_models, pid, active_provider)
+                        groups.append(
+                            {
+                                "provider": provider_name,
+                                "provider_id": pid,
+                                "models": models,
+                            }
+                        )
                 elif pid in _PROVIDER_MODELS or pid in cfg.get("providers", {}):
                     provider_cfg = cfg.get("providers", {}).get(pid, {})
                     raw_models = []

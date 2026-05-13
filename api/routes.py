@@ -4192,8 +4192,26 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/session/new":
         try:
             workspace = str(resolve_trusted_workspace(body.get("workspace"))) if body.get("workspace") else None
-        except ValueError as e:
+        except (TypeError, ValueError) as e:
             return bad(handler, str(e))
+        worktree_info = None
+        worktree_requested = (
+            body.get("worktree") is True
+            or str(body.get("worktree")).strip().lower() in {"1", "true", "yes", "on"}
+        )
+        if worktree_requested:
+            try:
+                from api.worktrees import create_worktree_for_workspace
+                base_workspace = workspace
+                if not base_workspace:
+                    base_workspace = str(resolve_trusted_workspace(get_last_workspace()))
+                worktree_info = create_worktree_for_workspace(base_workspace)
+                workspace = worktree_info["path"]
+            except (TypeError, ValueError) as e:
+                return bad(handler, str(e), status=400)
+            except Exception as e:
+                logger.exception("failed to create worktree-backed session")
+                return bad(handler, f"Failed to create worktree: {e}", status=500)
         model, model_provider = _session_model_state_from_request(
             body.get("model"),
             body.get("model_provider"),
@@ -4206,6 +4224,7 @@ def handle_post(handler, parsed) -> bool:
             model_provider=model_provider,
             profile=body.get("profile") or None,
             project_id=body.get("project_id") or None,
+            worktree_info=worktree_info,
         )
         return j(handler, {"session": s.compact() | {"messages": s.messages}})
 
@@ -9276,7 +9295,10 @@ def _handle_session_import(handler, body):
     if not isinstance(messages, list):
         return bad(handler, 'JSON must contain a "messages" array')
     title = body.get("title", "Imported session")
-    workspace = body.get("workspace", str(DEFAULT_WORKSPACE))
+    try:
+        workspace = str(resolve_trusted_workspace(body.get("workspace", str(DEFAULT_WORKSPACE))))
+    except (TypeError, ValueError) as e:
+        return bad(handler, str(e))
     model = body.get("model", DEFAULT_MODEL)
     s = Session(
         title=title,

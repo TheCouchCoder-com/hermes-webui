@@ -193,11 +193,18 @@ def _read_state_db_missing_sidecar_rows(session_dir: Path, state_db_path: Path |
             started_expr = _sql_optional_col('started_at', session_cols, '0')
             parent_expr = _sql_optional_col('parent_session_id', session_cols)
             msg_count_expr = _sql_optional_col('message_count', session_cols, '0')
+            workspace_expr = _sql_optional_col('workspace', session_cols)
+            worktree_path_expr = _sql_optional_col('worktree_path', session_cols)
+            worktree_branch_expr = _sql_optional_col('worktree_branch', session_cols)
+            worktree_repo_root_expr = _sql_optional_col('worktree_repo_root', session_cols)
+            worktree_created_at_expr = _sql_optional_col('worktree_created_at', session_cols)
             rows = []
             for row in conn.execute(
                 f"""
                 SELECT id, source, {title_expr}, {model_expr}, {started_expr},
-                       {parent_expr}, {msg_count_expr}
+                       {parent_expr}, {msg_count_expr}, {workspace_expr},
+                       {worktree_path_expr}, {worktree_branch_expr},
+                       {worktree_repo_root_expr}, {worktree_created_at_expr}
                 FROM sessions
                 WHERE source = 'webui'
                 ORDER BY COALESCE(started_at, 0) DESC
@@ -250,10 +257,16 @@ def _state_db_row_to_sidecar(row: dict) -> dict:
     started_at = row.get('started_at') or 0
     messages = row.get('messages') if isinstance(row.get('messages'), list) else []
     last_ts = messages[-1].get('timestamp') if messages and isinstance(messages[-1], dict) else started_at
+    workspace_value = row.get('workspace') or ''
     return {
         'session_id': row.get('id'),
         'title': row.get('title') or 'Recovered WebUI Session',
-        'workspace': '',
+        'workspace': workspace_value if isinstance(workspace_value, str) else '',
+        'message_count': row.get('message_count') if isinstance(row.get('message_count'), int) else len(messages),
+        'worktree_path': row.get('worktree_path') or None,
+        'worktree_branch': row.get('worktree_branch') or None,
+        'worktree_repo_root': row.get('worktree_repo_root') or None,
+        'worktree_created_at': row.get('worktree_created_at') or None,
         'model': row.get('model') or 'unknown',
         'model_provider': None,
         'created_at': started_at,
