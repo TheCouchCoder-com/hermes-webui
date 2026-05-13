@@ -4,6 +4,30 @@
 > Entries below this notice document upstream releases and were not written by the fork maintainers.
 > Fork-specific changes will be added above this notice as they ship.
 
+## [v0.51.16] — 2026-05-07 — 3-PR contributor batch (anthropic env race close, CLI tool metadata, model picker reset)
+
+### Fixed
+
+- **PR #1768** by @franksong2702 — Serialize Anthropic env fallback reads (closes #1736, the architectural follow-up filed in v0.51.8 sweep). Wraps `_clear_anthropic_env_values()` and the runtime-provider resolver behind `_ENV_LOCK` (the same `threading.Lock` already serializing env save/restore in `streaming.py`). New helper `resolve_runtime_provider_with_anthropic_env_lock()` in `api/oauth.py` is called from 3 sites in `api/routes.py` and 2 in `api/streaming.py`. Opus stage-310 verified: same-lock not a new lock (no ordering risk), nested acquires are sequential not nested (no deadlock), the lock is released before the agent runs (chat throughput unaffected). `api/oauth.py +36`, `api/routes.py +18`, `api/streaming.py +16`, +52 LOC test coverage in `tests/test_issue1362_codex_oauth_onboarding.py`. Race window in `_clear_anthropic_env_values` now closed for the chat hot path; remaining detector-style polls in `api/config.py` are UI-only and never bypass real credentials.
+- **PR #1778** by @Michaelyklam — Preserve CLI session tool metadata (closes #1772). The server's CLI session loader was reading only `role`, `content`, `timestamp` from `state.db.messages`, missing tool_calls/tool_results columns. `api/models.py +54` extends the loader to read those columns plus `reasoning_details`, `codex_reasoning_items`, `codex_message_items`, `reasoning_content`, `reasoning` and rehydrate them onto the message dicts. `PRAGMA table_info(messages)` check ensures legacy state.db schemas without the columns don't error. `_is_cli_tool_metadata_enrichment()` correctly rebuilds sidecars when message count is identical but new metadata is present, and uses `save(touch_updated_at=False)` to avoid bumping updated_at on passive enrichment. `api/routes.py +66`, 152 LOC test coverage in `tests/test_cli_session_tool_metadata.py` plus captured API evidence at `docs/pr-media/1772/cli-tool-metadata-api-evidence.json`.
+- **PR #1779** by @Michaelyklam — Reset model picker on session switch (closes #1771). Bug: switching sessions silently kept the previous chat's model selected in the composer (could route an inexpensive chat to an expensive model unnoticed — high-impact for users on premium-credit OAuth providers). Fix in `static/ui.js +88/-29`: when session model metadata is missing, `unknown`, or stale, fall back to configured default model/provider, with first-available dropdown option only as last resort. **Auto-fix applied at stage**: Opus stage-310 caught a regression in the new `!hasSessionModel` branch — it dropped the `deferModelCorrection` guard that the parallel else-branch keeps. Without the guard, every fast-path session view of an empty/unknown-model session fired a spurious `/api/session/update` POST that raced `_resolveSessionModelForDisplaySoon` and silently wrote to imported/read-only CLI sessions whose model field reads `"unknown"` (#1778 introduces exactly that surface in this same release). Wrapped the new branch's `_persistSessionModelCorrection` call + state mutation in `if(!deferModelCorrection)` mirroring the else-branch. Added `test_sync_topbar_does_not_persist_correction_while_model_resolution_deferred` regression test that exercises the fast-path interaction with `_modelResolutionDeferred=true` for both empty and `"unknown"` model values; asserts the visible `sel.value` still updates for UX but no POST is issued and no state mutation occurs. 192 LOC of original regression coverage in `tests/test_issue1771_session_model_switch_sync.py` (now 215 LOC with the new test), 7 LOC tweak to `test_provider_mismatch.py` and 1 LOC to `test_session_metadata_fast_path.py` to align existing tests with the new fallback helper.
+
+### Tests
+
+4694 → **4702 collected** (+8 across 2 new test files plus 1 stage auto-fix regression test). 4695 passed, 4 skipped (2 dev-only spawn from v0.51.15 + 2 prong-2 noise), 3 xpassed, 0 failed in 141.29s.
+
+### Pre-release verification
+
+- All 3 PRs CI-green individually.
+- File overlap on `api/routes.py` (#1768 + #1778) auto-merged cleanly (different functions: oauth env-lock helpers vs CLI session loader extension).
+- `node -c` clean on `static/ui.js`; Python compile clean on all 6 changed .py files.
+- pytest: 4695 passed, 0 failed.
+- `scripts/run-browser-tests.sh`: all 11 endpoints PASS on isolated port 8789.
+- Pre-stamp re-fetch: all 3 PR heads still match local rebases.
+- Opus advisor: SHIP #1768 + #1778, #1779 SHOULD-FIX before merge — auto-fix applied at stage with regression test, re-verified clean.
+
+Closes #1736, #1771, #1772.
+
 ## [v0.51.15] — 2026-05-07 — 4-PR contributor batch + 1 self-built (cron spawn migration, context menu, codex quota, model prefix)
 
 ### Fixed
