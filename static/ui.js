@@ -1,4 +1,4 @@
-const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[],toolCalls:[],activeStreamId:null,currentDir:'.',activeProfile:'default'};
+const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[],toolCalls:[],activeStreamId:null,currentDir:'.',activeProfile:'default',showHiddenWorkspaceFiles:false};
 const INFLIGHT={};  // keyed by session_id while request in-flight
 const SESSION_QUEUES={};  // keyed by session_id for queued follow-up turns
 // Tracks which session's queue to drain in setBusy(false).
@@ -6110,6 +6110,127 @@ function renderBreadcrumb(){
   }
 }
 
+const WORKSPACE_HIDDEN_FILE_NAMES=new Set([
+  '.DS_Store','._.DS_Store','.AppleDouble','.Spotlight-V100','.Trashes','.fseventsd',
+  'Thumbs.db','Desktop.ini','ehthumbs.db','$RECYCLE.BIN',
+  '.directory','.git','.svn','.hg','node_modules','__pycache__',
+  '.pytest_cache','.mypy_cache','.ruff_cache','.tox','.venv','venv'
+]);
+const WORKSPACE_HIDDEN_FILE_PREFIXES=['._','.Trash-'];
+function _workspaceShouldHideEntry(item){
+  if(!item||S.showHiddenWorkspaceFiles)return false;
+  const name=String(item.name||'');
+  if(!name)return false;
+  if(WORKSPACE_HIDDEN_FILE_NAMES.has(name))return true;
+  return WORKSPACE_HIDDEN_FILE_PREFIXES.some(prefix=>name.startsWith(prefix));
+}
+function _visibleWorkspaceEntries(entries){
+  const list=Array.isArray(entries)?entries:[];
+  return S.showHiddenWorkspaceFiles?list:list.filter(item=>!_workspaceShouldHideEntry(item));
+}
+function _syncWorkspaceHiddenToggle(){
+  const el=$('workspaceShowHiddenFiles');
+  if(el)el.checked=!!S.showHiddenWorkspaceFiles;
+}
+function toggleWorkspaceHiddenFiles(value){
+  S.showHiddenWorkspaceFiles=!!value;
+  try{localStorage.setItem('hermes-workspace-show-hidden-files',S.showHiddenWorkspaceFiles?'1':'0');}catch(_){}
+  _syncWorkspaceHiddenToggle();
+  renderFileTree();
+}
+try{S.showHiddenWorkspaceFiles=localStorage.getItem('hermes-workspace-show-hidden-files')==='1';}catch(_){}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',_syncWorkspaceHiddenToggle);
+else _syncWorkspaceHiddenToggle();
+
+function bindWorkspaceHeadingActions(){
+  const heading=$('workspacePanelHeading');
+  if(!heading||heading.dataset.bound==='1')return;
+  heading.dataset.bound='1';
+  const goRoot=()=>{
+    if(S.session&&S.session.workspace) loadDir('.');
+  };
+  heading.onclick=goRoot;
+  heading.onkeydown=(e)=>{
+    if(e.key==='Enter'||e.key===' '){
+      e.preventDefault();
+      goRoot();
+    }
+  };
+  heading.oncontextmenu=(e)=>{
+    e.preventDefault();
+    e.stopPropagation();
+    if(S.session&&S.session.workspace) _showWorkspaceRootContextMenu(e);
+  };
+}
+if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',bindWorkspaceHeadingActions);
+else bindWorkspaceHeadingActions();
+
+function _workspaceContextMenuItem(label, onClick, opts={}){
+  const item=document.createElement('div');
+  item.textContent=label;
+  item.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:'+(opts.danger?'var(--error,#e94560)':'var(--text)')+';';
+  item.onmouseenter=()=>item.style.background='var(--hover-bg)';
+  item.onmouseleave=()=>item.style.background='';
+  item.onclick=onClick;
+  return item;
+}
+
+function _copyTextWithFallback(text, successMsg, failurePrefix){
+  const done=()=>showToast(successMsg);
+  const fail=(err)=>showToast(failurePrefix+(err&&err.message?err.message:String(err||'')));
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    return navigator.clipboard.writeText(text).then(done).catch(err=>{
+      const ta=document.createElement('textarea');
+      ta.value=text;
+      ta.style.cssText='position:fixed;left:-9999px;top:-9999px;';
+      document.body.appendChild(ta);
+      ta.select();
+      let copied=false;
+      try{copied=document.execCommand('copy');}catch(_){}
+      ta.remove();
+      if(copied) done(); else fail(err);
+    });
+  }
+  const ta=document.createElement('textarea');
+  ta.value=text;
+  ta.style.cssText='position:fixed;left:-9999px;top:-9999px;';
+  document.body.appendChild(ta);
+  ta.select();
+  let copied=false;
+  try{copied=document.execCommand('copy');}catch(err){ta.remove();fail(err);return Promise.resolve();}
+  ta.remove();
+  if(copied) done(); else fail('clipboard unavailable');
+  return Promise.resolve();
+}
+
+function _showWorkspaceRootContextMenu(e){
+  document.querySelectorAll('.file-ctx-menu').forEach(el=>el.remove());
+  const menu=document.createElement('div');
+  menu.className='file-ctx-menu workspace-root-ctx-menu';
+  menu.style.cssText='position:fixed;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px 0;z-index:9999;min-width:160px;box-shadow:0 4px 16px rgba(0,0,0,.35);';
+  const vw=window.innerWidth,vh=window.innerHeight;
+  menu.style.left=(e.clientX+160>vw?e.clientX-170:e.clientX)+'px';
+  menu.style.top=(e.clientY+80>vh?e.clientY-80:e.clientY)+'px';
+
+  menu.appendChild(_workspaceContextMenuItem(t('reveal_in_finder'),async()=>{
+    menu.remove();
+    try{await api('/api/file/reveal',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:'.'})});}
+    catch(err){showToast(t('reveal_failed')+(err.message||err));}
+  }));
+
+  menu.appendChild(_workspaceContextMenuItem(t('copy_file_path'),async()=>{
+    menu.remove();
+    try{
+      const r=await api('/api/file/path',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:'.'})});
+      await _copyTextWithFallback((r&&r.path)||'.',t('path_copied'),t('path_copy_failed'));
+    }catch(err){showToast(t('path_copy_failed')+(err.message||err));}
+  }));
+
+  document.body.appendChild(menu);
+  const dismiss=()=>{menu.remove();document.removeEventListener('click',dismiss);};
+  setTimeout(()=>document.addEventListener('click',dismiss),0);
+}
+
 // Track expanded directories for tree view
 if(!S._expandedDirs) S._expandedDirs=new Set();
 // Cache of fetched directory contents: path -> entries[]
@@ -6129,11 +6250,12 @@ function renderFileTree(){
   }
   if(emptyEl) emptyEl.style.display='none';
   box.style.display='';
-  if(!S.entries||!S.entries.length){
+  const visibleEntries=_visibleWorkspaceEntries(S.entries);
+  if(!visibleEntries.length){
     if(emptyEl){emptyEl.textContent=t('workspace_empty_dir');emptyEl.style.display='flex';}
     return;
   }
-  _renderTreeItems(box, S.entries, 0);
+  _renderTreeItems(box, visibleEntries, 0);
 }
 
 function _renderTreeItems(container, entries, depth){
@@ -6278,7 +6400,7 @@ function _renderTreeItems(container, entries, depth){
 
     // Render children if directory is expanded
     if(item.type==='dir'&&S._expandedDirs.has(item.path)){
-      const children=S._dirCache[item.path]||[];
+      const children=_visibleWorkspaceEntries(S._dirCache[item.path]||[]);
       if(children.length){
         _renderTreeItems(container, children, depth+1);
       }else{

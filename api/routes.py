@@ -590,6 +590,19 @@ from api.agent_health import build_agent_health_payload
 from api.system_health import build_system_health_payload
 
 
+def _kanban_unknown_endpoint(handler, parsed, method: str) -> bool:
+    """Return a Kanban-specific 404 for stale clients/obsolete endpoint shapes."""
+    return bad(
+        handler,
+        (
+            f"unknown Kanban endpoint: {method} {parsed.path}. "
+            "If this appeared after a WebUI update, your browser may be running "
+            "a stale cached bundle; use Hard refresh now, then reopen Kanban."
+        ),
+        status=404,
+    ) or True
+
+
 def _clear_stale_stream_state(session) -> bool:
     """Clear persisted streaming flags when the in-memory stream no longer exists.
 
@@ -2933,7 +2946,9 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_get
 
-        return handle_kanban_get(handler, parsed)
+        if handle_kanban_get(handler, parsed):
+            return True
+        return _kanban_unknown_endpoint(handler, parsed, "GET")
     if parsed.path == "/api/wiki/status":
         return _handle_llm_wiki_status(handler, parsed)
     if parsed.path == "/api/logs":
@@ -3759,7 +3774,9 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_post
 
-        return handle_kanban_post(handler, parsed, body)
+        if handle_kanban_post(handler, parsed, body):
+            return True
+        return _kanban_unknown_endpoint(handler, parsed, "POST")
     if parsed.path == "/api/dashboard/config":
         from api import dashboard_probe
 
@@ -5002,7 +5019,9 @@ def handle_patch(handler, parsed) -> bool:
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_patch
 
-        return handle_kanban_patch(handler, parsed, body)
+        if handle_kanban_patch(handler, parsed, body):
+            return True
+        return _kanban_unknown_endpoint(handler, parsed, "PATCH")
     _admin_id, _admin_act = _admin_user_id_from_path(parsed.path)
     if _admin_id is not None and _admin_act == '':
         return _handle_admin_user_patch(handler, body, _admin_id)
@@ -5017,7 +5036,9 @@ def handle_delete(handler, parsed) -> bool:
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_delete
 
-        return handle_kanban_delete(handler, parsed, body)
+        if handle_kanban_delete(handler, parsed, body):
+            return True
+        return _kanban_unknown_endpoint(handler, parsed, "DELETE")
     _admin_id, _admin_act = _admin_user_id_from_path(parsed.path)
     if _admin_id is not None and _admin_act == '':
         return _handle_admin_user_delete(handler, _admin_id)

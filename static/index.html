@@ -1174,7 +1174,7 @@
   <aside class="rightpanel">
     <div class="resize-handle" id="rightpanelResize"></div>
     <div class="panel-header">
-      <span>Workspace</span>
+      <span id="workspacePanelHeading" class="workspace-panel-heading" role="button" tabindex="0" title="Workspace root">Workspace</span>
       <span class="git-badge" id="gitBadge" style="display:none"></span>
       <div class="panel-actions">
         <button class="panel-icon-btn has-tooltip has-tooltip--bottom" id="btnCollapseWorkspacePanel" data-tooltip="Hide workspace panel" onclick="toggleWorkspacePanel(false)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg></button>
@@ -1187,6 +1187,10 @@
       </div>
     </div>
     <div class="breadcrumb-bar" id="breadcrumbBar" style="display:none"></div>
+    <label class="workspace-hidden-toggle" title="Show hidden and system files">
+      <input type="checkbox" id="workspaceShowHiddenFiles" onchange="toggleWorkspaceHiddenFiles(this.checked)">
+      <span data-i18n="workspace_show_hidden_files">Show hidden files</span>
+    </label>
     <div class="file-tree" id="fileTree"></div>
     <div id="wsEmptyState" style="display:none;flex:1;align-items:center;justify-content:center;padding:24px 16px;text-align:center;color:var(--muted);font-size:12px;line-height:1.6"></div>
     <div class="preview-area" id="previewArea">

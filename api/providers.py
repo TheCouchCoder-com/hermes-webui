@@ -20,6 +20,9 @@ from api.config import (
     _PROVIDER_DISPLAY,
     _PROVIDER_MODELS,
     _get_label_for_model,
+    _models_from_live_provider_ids,
+    _read_live_provider_model_ids,
+    _read_visible_codex_cache_model_ids,
     _save_yaml_config_file,
     get_config,
     invalidate_models_cache,
@@ -692,23 +695,24 @@ def get_providers() -> dict[str, Any]:
 
         models = list(_PROVIDER_MODELS.get(pid, []))
         models_total = len(models)
-        # Codex account catalogs are account-specific and can drift faster than
-        # WebUI's static fallback table (#1807). Prefer the live agent resolver
-        # for the providers card too so stale static-only model IDs are not
-        # presented as available when discovery succeeds.
+        # OpenAI Codex account catalogs drift independently from WebUI releases.
+        # The model picker already prefers hermes_cli + Codex local cache for
+        # this provider (the agent's `provider_model_ids("openai-codex")` filters
+        # IDs with `supported_in_api: false`, but Codex CLI still surfaces some
+        # of those — notably `gpt-5.3-codex-spark` from #1680 — in its picker).
+        # Merge both sources here so the providers card matches the picker
+        # exactly. Static entries remain the offline fallback when live
+        # discovery and the local Codex cache are both unavailable. (#1807
+        # follow-up to v0.51.19 #1812.)
         if pid == "openai-codex":
-            try:
-                from hermes_cli.models import provider_model_ids as _provider_model_ids
-
-                live_ids = [mid for mid in (_provider_model_ids("openai-codex") or []) if mid]
-                if live_ids:
-                    models = [
-                        {"id": mid, "label": _get_label_for_model(mid, [])}
-                        for mid in live_ids
-                    ]
-                    models_total = len(models)
-            except Exception:
-                logger.debug("Failed to load OpenAI Codex models from hermes_cli")
+            live_ids = _read_live_provider_model_ids("openai-codex")
+            for mid in _read_visible_codex_cache_model_ids():
+                if mid not in live_ids:
+                    live_ids.append(mid)
+            live_models = _models_from_live_provider_ids(pid, live_ids)
+            if live_models:
+                models = live_models
+                models_total = len(models)
         # Nous Portal: prefer the live catalog so the providers card matches
         # the dropdown picker (#1538). Same fallback shape as the static-only
         # case below — when hermes_cli is unavailable or its lookup raises,

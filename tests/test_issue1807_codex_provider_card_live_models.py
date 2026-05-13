@@ -35,6 +35,14 @@ def _configure_codex(monkeypatch, tmp_path):
         "fallback_providers": [],
     })
     monkeypatch.setattr(config, "_cfg_mtime", 0.0)
+    # Isolate the Codex local model cache so the dev machine's real
+    # ~/.codex/models_cache.json (which may include account-specific entries
+    # like gpt-5.3-codex-spark) doesn't leak into these tests. Stage-314
+    # added _read_visible_codex_cache_model_ids() merging via PR #1827, so
+    # CODEX_HOME isolation is now load-bearing for these v0.51.19 tests.
+    codex_home = tmp_path / "no-codex"
+    codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
 
 
 def _codex_provider():

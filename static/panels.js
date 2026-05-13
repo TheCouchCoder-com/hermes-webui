@@ -423,6 +423,9 @@ function _renderCronDetail(job){
   const schedule = job.schedule_display || (job.schedule && job.schedule.expression) || '';
   const skills = Array.isArray(job.skills) && job.skills.length ? job.skills.join(', ') : '—';
   const deliver = job.deliver || 'local';
+  const isNoAgent = !!job.no_agent;
+  const cronJobMode = isNoAgent ? 'no-agent' : 'agent';
+  const script = job.script || '';
   const profileLabel = _cronProfileLabel(job.profile);
   const profileTitle = _cronProfileTitle(job.profile);
   const lastError = job.last_error ? `<div class="detail-row"><div class="detail-row-label">${esc(t('error_prefix').replace(/:\s*$/,''))}</div><div class="detail-row-value" style="color:var(--accent-text)">${esc(job.last_error)}</div></div>` : '';
@@ -451,6 +454,8 @@ function _renderCronDetail(job){
         <div class="detail-row"><div class="detail-row-label">${esc(t('cron_next'))}</div><div class="detail-row-value">${esc(nextRun)}</div></div>
         <div class="detail-row"><div class="detail-row-label">${esc(t('cron_last'))}</div><div class="detail-row-value">${esc(lastRun)}</div></div>
         <div class="detail-row"><div class="detail-row-label">Deliver</div><div class="detail-row-value">${esc(deliver)}</div></div>
+        <div class="detail-row"><div class="detail-row-label">Mode</div><div class="detail-row-value"><span class="detail-badge" id="cronJobMode">${esc(cronJobMode)}</span></div></div>
+        ${isNoAgent ? `<div class="detail-row"><div class="detail-row-label">No-agent script</div><div class="detail-row-value"><code>${esc(script || '—')}</code></div></div>` : ''}
         <div class="detail-row"><div class="detail-row-label">${esc(t('cron_profile_label') || 'Profile')}</div><div class="detail-row-value"><span class="detail-badge active" title="${esc(profileTitle)}">${esc(profileLabel)}</span></div></div>
         <div class="detail-row"><div class="detail-row-label">Skills</div><div class="detail-row-value">${esc(skills)}</div></div>
         ${lastError}
@@ -686,6 +691,8 @@ function openCronEdit(job){
     prompt: job.prompt || '',
     deliver: job.deliver || 'local',
     profile: job.profile || '',
+    no_agent: !!job.no_agent,
+    script: job.script || '',
     isEdit: true,
   });
   if (!_cronSkillsCache) {
@@ -696,11 +703,12 @@ function openCronEdit(job){
   loadCronProfiles().then(()=>_refreshCronProfileSelect(job.profile || '')).catch(()=>{});
 }
 
-function _renderCronForm({ name, schedule, prompt, deliver, profile, isEdit }){
+function _renderCronForm({ name, schedule, prompt, deliver, profile, no_agent=false, script='', isEdit }){
   const title = $('taskDetailTitle');
   const body = $('taskDetailBody');
   const empty = $('taskDetailEmpty');
   if (!body || !title) return;
+  const isNoAgent = !!no_agent;
   title.textContent = isEdit ? (t('edit') + ' · ' + (name || schedule || t('scheduled_jobs'))) : t('new_job');
   const deliverOpt = (v,l) => `<option value="${v}"${deliver===v?' selected':''}>${esc(l)}</option>`;
   body.innerHTML = `
@@ -715,9 +723,10 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, isEdit }){
           <input type="text" id="cronFormSchedule" value="${esc(schedule || '')}" placeholder="0 9 * * *  —  every 1h  —  @daily" autocomplete="off" required>
           <div class="detail-form-hint">${esc(t('cron_schedule_hint') || "Cron expression or shorthand like 'every 1h'.")}</div>
         </div>
-        <div class="detail-form-row">
+        <div class="detail-form-row ${isNoAgent ? 'cron-no-agent-prompt-row' : ''}">
           <label for="cronFormPrompt">${esc(t('cron_prompt_label') || 'Prompt')}</label>
-          <textarea id="cronFormPrompt" rows="6" placeholder="${esc(t('cron_prompt_placeholder') || 'Must be self-contained')}" required>${esc(prompt || '')}</textarea>
+          <textarea id="cronFormPrompt" rows="6" placeholder="${esc(t('cron_prompt_placeholder') || 'Must be self-contained')}"${isNoAgent ? ' disabled' : ' required'}>${esc(prompt || '')}</textarea>
+          ${isNoAgent ? `<div class="detail-form-hint cron-no-agent-hint">No-agent mode runs the configured script directly; Prompt is unused. No-agent script: <code>${esc(script || '—')}</code></div>` : ''}
         </div>
         <div class="detail-form-row">
           <label for="cronFormDeliver">${esc(t('cron_deliver_label') || 'Deliver output to')}</label>
@@ -826,12 +835,14 @@ async function saveCronForm(){
   const prompt=promptEl.value.trim();
   const deliver=delivEl?delivEl.value:'local';
   const profile=profileEl?profileEl.value:'';
+  const isNoAgent = !!(_currentCronDetail && _currentCronDetail.no_agent);
   errEl.style.display='none';
   if(!schedule){errEl.textContent=t('cron_schedule_required_example');errEl.style.display='';return;}
-  if(!prompt){errEl.textContent=t('cron_prompt_required');errEl.style.display='';return;}
+  if(!isNoAgent && !prompt){errEl.textContent=t('cron_prompt_required');errEl.style.display='';return;}
   try{
     if (_editingCronId) {
-      const updates = {job_id: _editingCronId, schedule, prompt, profile: profile};
+      const updates = {job_id: _editingCronId, schedule, profile: profile};
+      if (!isNoAgent) updates.prompt = prompt;
       if (name) updates.name = name;
       await api('/api/crons/update', {method:'POST', body: JSON.stringify(updates)});
       const editedId = _editingCronId;
@@ -1190,11 +1201,49 @@ function _kanbanCard(task, status){
   </article>`;
 }
 
+async function hardRefreshWebUIClient(){
+  try {
+    if (navigator.serviceWorker) {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map(r => r.unregister()));
+    }
+  } catch(_) {}
+  try {
+    if (window.caches) {
+      const keys = await caches.keys();
+      await Promise.all(keys.map(k => caches.delete(k)));
+    }
+  } catch(_) {}
+  window.location.reload();
+}
+
+function _kanbanLooksLikeStaleClientError(err){
+  const msg = String((err && err.message) || err || '').toLowerCase();
+  return !!(err && err.status === 404 && (
+    msg === 'not found' ||
+    msg.includes('unknown kanban endpoint') ||
+    msg.includes('stale cached bundle')
+  ));
+}
+
+function _kanbanUnavailableHtml(err){
+  const raw = String((err && err.message) || err || '');
+  if (_kanbanLooksLikeStaleClientError(err)) {
+    return `<div class="main-view-empty"><div class="main-view-empty-title">Kanban needs a hard refresh</div><div class="main-view-empty-subtitle">The server rejected an obsolete Kanban endpoint. This usually means the browser or Mac app is still running a stale cached WebUI bundle after an update.</div><button class="btn primary" type="button" onclick="hardRefreshWebUIClient()">Hard refresh now</button><div class="main-view-empty-subtitle">Original error: ${esc(raw || 'not found')}</div></div>`;
+  }
+  const msg = `${esc(t('kanban_unavailable'))}: ${esc(raw)}`;
+  return `<div class="main-view-empty"><div class="main-view-empty-title">${msg}</div></div>`;
+}
+
 async function loadKanban(animate){
   const board = $('kanbanBoard');
   const list = $('kanbanList');
   try {
     if (animate && board) board.innerHTML = `<div style="padding:16px;color:var(--muted);font-size:13px">${esc(t('loading'))}</div>`;
+    // Resolve the active board before board-scoped requests. If another CLI or
+    // tab archived the previous board, /boards can fall back to default instead
+    // of leaving config/board pinned to a ghost slug.
+    await loadKanbanBoards();
     const config = await api('/api/kanban/config' + _kanbanBoardQuery());
     let assignees = null;
     try { assignees = await api('/api/kanban/assignees' + _kanbanBoardQuery()); } catch(e) { assignees = null; }
@@ -1224,16 +1273,19 @@ async function loadKanban(animate){
     _kanbanSetSelectOptions($('kanbanAssigneeFilter'), _kanbanBoard.assignees || (assignees && assignees.assignees) || (config && config.assignees), 'kanban_all_assignees');
     _kanbanSetSelectOptions($('kanbanTenantFilter'), _kanbanBoard.tenants, 'kanban_all_tenants');
     await loadKanbanStats();
-    // Refresh the multi-board switcher (and resolve which board to show
-    // from localStorage / server state). Best-effort — failures hide the
-    // switcher rather than blocking the panel from rendering.
-    await loadKanbanBoards();
+    // Note: PR #1828 (v0.51.20) moved the boards refresh to the start of
+    // loadKanban() so the active board is resolved BEFORE board-scoped
+    // requests fire. The previous tail-of-function refresh has been removed
+    // to avoid doubling /api/kanban/boards traffic during SSE-driven
+    // refreshes (debounced at 250ms via _scheduleKanbanRefresh). The
+    // 30-second poll started by _kanbanStartPolling() picks up any board
+    // state changes that arrive after this render.
     _kanbanStartPolling();
     _kanbanRenderBoard();
   } catch(e) {
-    const msg = `${esc(t('kanban_unavailable'))}: ${esc(e.message || e)}`;
-    if (board) board.innerHTML = `<div class="main-view-empty"><div class="main-view-empty-title">${msg}</div></div>`;
-    if (list) list.innerHTML = `<div class="kanban-empty">${msg}</div>`;
+    const html = _kanbanUnavailableHtml(e);
+    if (board) board.innerHTML = html;
+    if (list) list.innerHTML = html;
   }
 }
 
@@ -1688,6 +1740,8 @@ async function loadKanbanBoards(){
   let active = serverCurrent;
   if (saved && boards.some(b => b.slug === saved)) {
     active = saved;
+  } else if (saved) {
+    _kanbanSetSavedBoard('default');
   }
   _kanbanCurrentBoard = (active === 'default') ? null : active;
   // The switcher is visible whenever ≥1 non-default board exists OR the

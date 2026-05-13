@@ -4,6 +4,54 @@
 > Entries below this notice document upstream releases and were not written by the fork maintainers.
 > Fork-specific changes will be added above this notice as they ship.
 
+## [v0.51.20] — 2026-05-07 — 5-PR contributor follow-on batch (with parallel-discovery resolution)
+
+### Fixed (5 contributor PRs)
+
+- **PR #1828** by @Michaelyklam — Surface stale Kanban client recovery (closes #1823). Three coupled fixes for the `Kanban unavailable: not found` failure mode:
+  - Server-side: explicit Kanban-namespace 404 handler for unknown `/api/kanban/*` GET/POST/PATCH/DELETE endpoints (instead of falling through to bare "not found"), with a hint pointing at stale-cached-bundle as the likely cause.
+  - Client-side: new `_kanbanLooksLikeStaleClientError` predicate + `_kanbanUnavailableHtml` that swaps the diagnostic for stale-client errors and surfaces a `Hard refresh now` button. The button calls new `hardRefreshWebUIClient()` which `unregister()`s service workers, deletes every Cache-API entry, then `window.location.reload()`s — gives Mac WKWebView users an in-app escape hatch that doesn't depend on Cmd+Shift+R or DevTools.
+  - Board-pointer drift recovery: `loadKanban` now `await`s `loadKanbanBoards()` BEFORE board-scoped `/api/kanban/config` requests; `loadKanbanBoards` clears the saved slug to `default` when the saved slug doesn't match any current board; `/api/kanban/boards` server-side falls back to default if the on-disk current-board pointer references an archived/deleted board.
+  - `api/kanban_bridge.py +12`, `api/routes.py +29`, `static/panels.js +47/-3`. 92 LOC test coverage across 2 files (`test_issue1823_kanban_not_found.py`, `test_kanban_bridge.py`). 1 PR-media diagnostic screenshot.
+
+- **PR #1827** by @Michaelyklam — Sync Codex provider card models with picker (follow-up to v0.51.19 #1812). Replaces #1812's pure-live-fetch hook in `api/providers.py` with a richer live-plus-Codex-cache merge. The agent's `provider_model_ids("openai-codex")` filters IDs with `supported_in_api: false`, but Codex CLI still surfaces some of those models in its picker — notably `gpt-5.3-codex-spark` (#1680). Merging the visible Codex local cache (via existing `_read_visible_codex_cache_model_ids` helper in `api/config.py`) keeps the providers card in sync with what the picker actually shows. Uses the existing private helpers `_read_live_provider_model_ids`, `_read_visible_codex_cache_model_ids`, `_models_from_live_provider_ids` from `api/config.py` (already used by the picker path). 19 net LOC + 50 LOC test (`test_provider_management.py::test_openai_codex_provider_card_prefers_live_catalog`).
+
+- **PR #1826** by @Michaelyklam — Allow no-agent cron edits without prompt (closes #1820). Cron editor now distinguishes agent jobs from no-agent CLI `--no-agent --script` jobs (which run scripts directly with no prompt). Plumbs `no_agent` and `script` from cron detail/edit data into `_renderCronForm()`. Detail view shows new Mode badge (`no-agent` / `agent`) + a "No-agent script" row. Edit form: prompt textarea is `disabled`, removes `required` attribute, shows `cron_no_agent_prompt_hint` styled hint listing the script path. `saveCronForm()` skips client-side prompt validation for no-agent edits and omits `prompt` from `/api/crons/update` payload. `static/panels.js +84/-3`, 71 LOC test (`test_cron_no_agent_edit.py`), 1 PR-media screenshot.
+
+- **PR #1825** by @ai-ag2026 — Hide workspace file tree cruft by default (closes #1793). `WORKSPACE_HIDDEN_FILE_NAMES` set + `WORKSPACE_HIDDEN_FILE_PREFIXES` array filter common cruft (`.DS_Store`, `._*`, `Thumbs.db`, `Desktop.ini`, `$RECYCLE.BIN`, `.git`, `.svn`, `.hg`, `node_modules`, `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.tox`, `.venv`, `venv`, `.Trash-*`, `.AppleDouble`, `.Spotlight-V100`, `.Trashes`, `.fseventsd`, `.directory`). New `_visibleWorkspaceEntries()` filter applied in `renderFileTree` and `_renderTreeItems` recursive rendering. "Show hidden files" checkbox toggle in workspace panel header, persisted via `localStorage['hermes-workspace-show-hidden-files']`. Filter is purely client-side display — server-returned tree entries unchanged, toggling re-renders without re-fetching. `static/i18n.js +9`, `static/index.html +4`, `static/style.css +3`, `static/ui.js +33`, 31 LOC test.
+
+- **PR #1822** by @ai-ag2026 — Workspace heading root actions (closes #1786). The "Workspace" panel heading was a static label — the breadcrumb's `~` already navigated to root, but the more prominent label didn't. PR makes the heading a `role="button"` with `tabindex="0"`: click/Enter/Space → `loadDir('.')`, right-click → context menu with "Reveal in Finder" and "Copy file path" actions. Adds module-level helpers: `bindWorkspaceHeadingActions`, `_workspaceContextMenuItem`, `_copyTextWithFallback` (clipboard API with execCommand fallback), `_showWorkspaceRootContextMenu`. `static/index.html +1/-1`, `static/style.css +2`, `static/ui.js +89`, 23 LOC test. Sibling-rebased against #1825 in stage; ui.js conflict resolved by concatenating both additive blocks (verified with `node -c`).
+
+### Opus-applied fixes (absorbed in-release)
+
+**From stage-314 absorption pre-release Opus pass:**
+
+- `static/panels.js` — Removed duplicate `await loadKanbanBoards()` tail call in `loadKanban()`. PR #1828 added a pre-fetch at the start of `loadKanban` to resolve the active board BEFORE board-scoped requests, but the existing tail-of-function refresh at line 1278 was kept too. Under SSE-driven refreshes (debounced at 250ms via `_scheduleKanbanRefresh`), this doubled `/api/kanban/boards` traffic with no behavioral benefit — the 30-second polling interval started by `_kanbanStartPolling()` already picks up board-state changes that arrive after the render. Per Opus pre-release verdict.
+
+**From stage-314 pre-Opus pytest absorb:**
+
+- `tests/test_issue1807_codex_provider_card_live_models.py` — Added `CODEX_HOME` isolation in `_configure_codex` helper. v0.51.19's tests didn't isolate the Codex local model cache, but PR #1827's new `_read_visible_codex_cache_model_ids()` merging makes this load-bearing — without isolation, the dev machine's real `~/.codex/models_cache.json` (containing `gpt-5.3-codex-spark` from #1680) leaks into test output. Test-only fix; production code unchanged. Caught by pre-release pytest gate.
+
+### Maintainer triage
+
+- **PR #1821** by @ai-ag2026 — Closed as **parallel-discovery superseded by #1826**. Both PRs filed within hours of each other (Michaelyklam predates by ~3 hours), both correctly diagnosed the bug. Same fix shape (form `required` removal + validation skip + payload omission), but #1826 covers more surface (Mode badge in detail view, `disabled` prompt instead of just optional, i18n hint key, screenshot). Closed with structured "superseded" comment crediting the convergent diagnosis — Co-authored-by trailer optional since the fixes are independent, but the convergence is acknowledged in the close comment.
+
+### Tests
+
+4790 → **4805 collected** (+15). 4794 passed, 8 skipped (sprint3 prong-2 + QA gating + 2 dev-only spawn from v0.51.15), 1 xfailed, 2 xpassed, 0 failed in 156.7s. JS syntax check 3/3 modified files green (`node -c` on i18n.js, panels.js, ui.js). Browser API harness 11/11 endpoints green.
+
+### Pre-release verification
+
+- All 5 PRs CI-green individually
+- File overlaps resolved via stage-HEAD rebasing for sibling PRs (#1822 + #1825 both touched `static/ui.js` after `renderBreadcrumb()` and adjacent `index.html`/`style.css` blocks; conflict in `ui.js` resolved by concatenation)
+- Pre-stamp re-fetch: all 5 PR heads still match local rebases (no mid-sweep force-pushes)
+- Opus advisor: SHIP verdict, 1 absorbed in-release (loadKanbanBoards perf cleanup), 4 deferred to follow-up issues (lowercase 404 false-positive, `_currentCronDetail` vs `_cronPreFormDetail` robustness, #1825 i18n debt for 7 locales, #1822 heading no-op when no workspace)
+- No file deletions, no merge-conflict markers, no Python/JS syntax errors
+
+Closes #1786, #1793, #1820 (via #1826, with #1821 closed as parallel-discovery superseded), #1823.
+
+Note: #1827 is a follow-up enhancement to v0.51.19 #1812 (the original `Closes #1807` reference is from when #1807 was still open; #1807 was closed by #1812 in v0.51.19, so this PR's release attribution is "follow-up enhancement to #1812" rather than "closes #1807").
+
 ## [v0.51.19] — 2026-05-07 — 15-PR contributor sweep + 1 in-stage absorb
 
 ### Fixed (15 contributor PRs)

@@ -2,7 +2,7 @@
 
 > Web companion to the Hermes Agent CLI. Same workflows, browser-native.
 >
-> Last updated: v0.51.19 (May 7, 2026) — 4790 tests collected — 15-PR contributor sweep (workspace-prefix triple, file-picker + IPv6 + bootstrap pair, named custom provider routing, quota cards, session ownership, sidebar continuation)
+> Last updated: v0.51.20 (May 7, 2026) — 4805 tests collected — 5-PR contributor follow-on (Kanban stale-client recovery, Codex provider card live+cache merge, no-agent cron edits, workspace cruft filter + heading actions)
 > Test source: `pytest tests/ --collect-only -q`
 > Per-version detail: see [CHANGELOG.md](./CHANGELOG.md)
 
