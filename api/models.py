@@ -329,6 +329,7 @@ class Session:
                  context_messages=None,
                  compression_anchor_visible_idx=None,
                  compression_anchor_message_key=None,
+                 compression_anchor_summary=None,
                  context_length=None, threshold_tokens=None,
                  last_prompt_tokens=None,
                  gateway_routing=None, gateway_routing_history=None,
@@ -361,6 +362,7 @@ class Session:
         self.context_messages = context_messages if isinstance(context_messages, list) else []
         self.compression_anchor_visible_idx = compression_anchor_visible_idx
         self.compression_anchor_message_key = compression_anchor_message_key
+        self.compression_anchor_summary = compression_anchor_summary
         self.context_length = context_length
         self.threshold_tokens = threshold_tokens
         self.last_prompt_tokens = last_prompt_tokens
@@ -411,6 +413,7 @@ class Session:
             'personality', 'active_stream_id',
             'pending_user_message', 'pending_attachments', 'pending_started_at',
             'compression_anchor_visible_idx', 'compression_anchor_message_key',
+            'compression_anchor_summary',
             'context_length', 'threshold_tokens', 'last_prompt_tokens',
             'gateway_routing', 'gateway_routing_history', 'llm_title_generated',
             'parent_session_id',
@@ -572,6 +575,7 @@ class Session:
             'personality': self.personality,
             'compression_anchor_visible_idx': self.compression_anchor_visible_idx,
             'compression_anchor_message_key': self.compression_anchor_message_key,
+            'compression_anchor_summary': self.compression_anchor_summary,
             'context_length': self.context_length,
             'threshold_tokens': self.threshold_tokens,
             'last_prompt_tokens': self.last_prompt_tokens,
@@ -1662,7 +1666,9 @@ def get_cli_session_messages(sid) -> list:
 
     Preserve tool-call/result and reasoning metadata from the agent state.db so
     CLI-origin transcripts render with the same tool cards as WebUI-native
-    sessions. Returns empty list on any error.
+    sessions. When the requested session is the tip of a compression/CLI-close
+    continuation chain, return the stitched full transcript across all segments
+    in chronological order. Returns empty list on any error.
     """
     import os
     if str(sid or '').startswith(f'{CLAUDE_CODE_SOURCE}_'):
@@ -1701,12 +1707,56 @@ def get_cli_session_messages(sid) -> list:
                 'codex_message_items',
             ]
             selected = ['role', 'content', 'timestamp'] + [c for c in optional if c in available]
+
+            cur.execute("PRAGMA table_info(sessions)")
+            session_cols = {str(row['name']) for row in cur.fetchall()}
+            session_chain = [str(sid)]
+            if {'parent_session_id', 'end_reason', 'started_at', 'source'}.issubset(session_cols):
+                cur.execute(
+                    """
+                    SELECT id, source, started_at, parent_session_id, ended_at, end_reason
+                    FROM sessions
+                    WHERE id = ?
+                    """,
+                    (sid,),
+                )
+                rows_by_id = {}
+                row = cur.fetchone()
+                if row:
+                    rows_by_id[str(row['id'])] = dict(row)
+                    current_id = str(row['id'])
+                    seen = {current_id}
+                    for _ in range(20):
+                        current = rows_by_id.get(current_id)
+                        parent_id = current.get('parent_session_id') if current else None
+                        if not parent_id or parent_id in seen:
+                            break
+                        cur.execute(
+                            """
+                            SELECT id, source, started_at, parent_session_id, ended_at, end_reason
+                            FROM sessions
+                            WHERE id = ?
+                            """,
+                            (parent_id,),
+                        )
+                        parent_row = cur.fetchone()
+                        if not parent_row:
+                            break
+                        parent_dict = dict(parent_row)
+                        rows_by_id[str(parent_row['id'])] = parent_dict
+                        if not _is_continuation_session(parent_dict, current):
+                            break
+                        session_chain.insert(0, str(parent_row['id']))
+                        current_id = str(parent_row['id'])
+                        seen.add(current_id)
+
+            placeholders = ', '.join('?' for _ in session_chain)
             cur.execute(f"""
-                SELECT {', '.join(selected)}
+                SELECT {', '.join(selected)}, session_id
                 FROM messages
-                WHERE session_id = ?
-                ORDER BY timestamp ASC
-            """, (sid,))
+                WHERE session_id IN ({placeholders})
+                ORDER BY timestamp ASC, id ASC
+            """, session_chain)
             msgs = []
             for row in cur.fetchall():
                 msg = {

@@ -170,6 +170,47 @@ console.log(JSON.stringify(collapsed));
     assert [seg["session_id"] for seg in collapsed[0]["_lineage_segments"]] == ["seg10", "seg9", "seg8", "seg7"]
 
 
+def test_sidebar_lineage_collapse_prefers_highest_compression_segment_over_touched_parent():
+    """A touched parent segment must not hide the newer compressed tip.
+
+    Opening or polling an older segment can refresh its updated_at without adding
+    messages. The collapsed sidebar row must still pick the highest compression
+    segment, otherwise the visible chat jumps back to a parent that lacks the
+    completed assistant answer.
+    """
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_sessionLineageKey'));
+eval(extractFunc('_collapseSessionLineageForSidebar'));
+const sessions = [
+  {{session_id:'seg13', title:'Schaue dir die Release (fork)', message_count:2490, updated_at:200, last_message_at:200, _lineage_root_id:'root', _compression_segment_count:13}},
+  {{session_id:'seg14', title:'Schaue dir die Release (fork)', message_count:2532, updated_at:150, last_message_at:150, _lineage_root_id:'root', _compression_segment_count:14}},
+];
+const collapsed = _collapseSessionLineageForSidebar(sessions);
+console.log(JSON.stringify(collapsed));
+"""
+    collapsed = json.loads(_run_node(source))
+    assert [row["session_id"] for row in collapsed] == ["seg14"]
+    assert collapsed[0]["_lineage_collapsed_count"] == 2
+    assert [seg["session_id"] for seg in collapsed[0]["_lineage_segments"]] == ["seg14", "seg13"]
+
+
 
 def test_sidebar_attaches_child_sessions_to_collapsed_hidden_parent_lineage():
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")

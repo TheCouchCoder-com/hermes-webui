@@ -10,6 +10,33 @@
 
 ## [v0.51.29] — 2026-05-08 — 6-PR contributor batch (Release F: Docker hardening + login persistence + scroll/lineage fixes + i18n cleanup)
 
+## [v0.51.37] — 2026-05-10 — Release M (compression / lineage backend)
+
+### Fixed
+
+- **PR #2004** by @franksong2702 — Persisted compression boundary summary for reload UI. Both manual `/session/compress` and auto-compression paths now persist `compression_anchor_summary`, `compression_anchor_visible_idx`, and `compression_anchor_message_key` so the compression card renders correctly after a page reload. Closes #1833.
+
+- **PR #2006** by @qxxaa — Stamp profile on continuation session after context compression. In multi-profile deployments, memory writes after auto-compression silently targeted the **default profile's** `MEMORY.md`, regardless of which profile the browser session was using. Root cause: the compression migration block in `_periodic_checkpoint` did not carry `s.profile` across to the continuation session, so subsequent requests fell back to the default profile's `HERMES_HOME`. Fix resolves the profile name from `s.profile` (or `get_active_profile_name()` while TLS still holds) at streaming-thread start, then stamps `s.profile = _resolved_profile_name` on the continuation session. Verified evidence: session `0dfefb` had read the wrong profile's `MEMORY.md` (16% / 4 entries) instead of the troubleshooting profile's bank (72-77% / 5000+ chars).
+
+- **PR #2011** by @ai-ag2026 — Sidebar lineage collapse: prefer the latest compressed segment when a parent row is touched. Previously the sidebar collapse helper picked representatives by timestamp only, which could surface a touched-parent row instead of the newer compressed tip. Now keys on `_compression_segment_count` so the highest-count segment wins. Regression test added.
+
+- **PR #2014** by @ai-ag2026 — Keep explicit `/api/session/branch` forks out of compression-lineage collapse. Forked sessions now mark `session_source="fork"` on creation, and the sidebar lineage helper guards against folding fork rows into the compression-collapse path even when the parent isn't currently in the rendered window. Backend marker test + sidebar guard test added.
+
+- **PR #2015** by @Jellypowered — Stitch continuation-lineage transcripts in WebUI. Sessions split by continuation events (compression boundary, CLI-close) could show only the latest segment in the WebUI message history. `get_cli_session_messages()` now walks the valid continuation lineage and stitches messages across sessions so the full conversation is visible.
+
+### Added
+
+- **PR #2012** by @dso2ng — New read-only `/api/session/lineage-report/<sid>` endpoint exposing a bounded JSON diagnostic of a session's compression/branching lineage. Pure backend probe — no client UI changes. The sidebar lineage UI (#1906/#1943) already covers user-facing affordances; this fills the bounded backend probe gap for CLI/scripting use.
+
+### Tests
+
+5049 → **5058 collected, 5058 passing, 0 regressions** (+9 net new across `test_session_lineage_collapse.py`, `test_session_lineage_full_transcript.py`, `test_session_lineage_report.py`, `test_465_session_branching.py`, `test_auto_compression_card.py`, `test_sprint46.py`). Full suite 157s on Python 3.11 with `HERMES_HOME` isolation.
+
+### Notes
+
+- `api/routes.py` (4 PRs touched it) and `api/streaming.py` (2 PRs) were the multi-PR files. All hunks at distinct anchors; stage merge clean with no conflicts.
+- Theme coherence: every PR in this batch addresses session compression, lineage, or continuation-stitching — the same conceptual surface from different angles.
+
 ## [v0.51.36] — 2026-05-10 — Release L (locale + provider + cross-cutting)
 
 ### Fixed

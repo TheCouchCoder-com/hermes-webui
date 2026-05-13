@@ -1550,6 +1550,87 @@ def _is_context_compression_marker(msg):
     )
 
 
+def _compact_summary_text(raw_text: str | None, limit: int = 320) -> str | None:
+    """Normalize a text blob used in compression summary cards."""
+    if not isinstance(raw_text, str):
+        return None
+    txt = raw_text.strip()
+    if not txt:
+        return None
+    txt = re.sub(r"\s+", " ", txt).strip()
+    if len(txt) > limit:
+        txt = f"{txt[: limit - 6]}…"
+    return txt
+
+
+def _compression_anchor_message_key(message):
+    if not isinstance(message, dict):
+        return None
+    role = str(message.get('role') or '')
+    if not role or role == 'tool':
+        return None
+    content = message.get('content', '')
+    text = _message_text(content)
+    if len(text) > 160:
+        text = text[:160]
+    ts = message.get('_ts') or message.get('timestamp')
+    attachments = message.get('attachments')
+    attach_count = len(attachments) if isinstance(attachments, list) else 0
+    if not text and not attach_count and not ts:
+        return None
+    return {'role': role, 'ts': ts, 'text': text, 'attachments': attach_count}
+
+
+def _visible_messages_for_compression_anchor(messages):
+    out = []
+    for m in messages or []:
+        if not isinstance(m, dict):
+            continue
+        role = m.get('role')
+        if not role or role == 'tool':
+            continue
+        content = m.get('content', '')
+        has_attachments = bool(m.get('attachments'))
+        has_tool_calls = bool(isinstance(m.get('tool_calls'), list) and m.get('tool_calls'))
+        has_tool_use = False
+        has_reasoning = bool(m.get('reasoning'))
+        if isinstance(content, list):
+            text = '\n'.join(
+                str(p.get('text') or p.get('content') or '')
+                for p in content
+                if isinstance(p, dict)
+                and p.get('type') in {'text', 'input_text', 'output_text'}
+            ).strip()
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                if part.get('type') == 'tool_use':
+                    has_tool_use = True
+            if not text:
+                has_reasoning = has_reasoning or any(
+                    isinstance(part, dict)
+                    and part.get('type') in {'thinking', 'reasoning'}
+                    for part in content
+                )
+        else:
+            text = str(content or '').strip()
+        if text or has_attachments or has_tool_calls or has_tool_use or has_reasoning:
+            out.append(m)
+    return out
+
+
+def _compression_summary_from_messages(messages):
+    for m in reversed(messages or []):
+        if not isinstance(m, dict):
+            continue
+        if not _is_context_compression_marker(m):
+            continue
+        text = _message_text(m.get('content'))
+        if text:
+            return text
+    return None
+
+
 def _find_current_user_turn(messages, msg_text):
     needle = " ".join(str(msg_text or '').split())
     fallback = None
@@ -2036,7 +2117,24 @@ def _run_agent_streaming(
         except ImportError:
             _profile_home = os.environ.get('HERMES_HOME', '')
             _profile_runtime_env = {}
-
+        
+        # Capture the resolved profile name now, while profile context is
+        # reliable. Used in the compression migration block to stamp s.profile
+        # on the continuation session. We resolve it here rather than calling
+        # get_active_profile_name() at compression time because that function
+        # reads thread-local storage (_tls.profile) set by set_request_profile()
+        # on the HTTP handler thread. The streaming thread is a separate
+        # threading.Thread and does not inherit TLS. At compression time,
+        # get_active_profile_name() would fall back to the process-global
+        # _active_profile, which may belong to a different concurrent tab.
+        _resolved_profile_name = getattr(s, 'profile', None)
+        if not _resolved_profile_name:
+            try:
+                from api.profiles import get_active_profile_name
+                _resolved_profile_name = get_active_profile_name()
+            except Exception:
+                _resolved_profile_name = None
+        
         _thread_env = _build_agent_thread_env(
             _profile_runtime_env,
             str(s.workspace),
@@ -3004,6 +3102,22 @@ def _run_agent_streaming(
                     old_path = SESSION_DIR / f'{old_sid}.json'
                     new_path = SESSION_DIR / f'{new_sid}.json'
                     s.session_id = new_sid
+                    # Carry profile identity across the compression boundary.
+                    # Without this, s.profile stays None on the continuation
+                    # session. On the next request, _run_agent_streaming calls
+                    # get_hermes_home_for_profile(getattr(s, 'profile', None))
+                    # which falls back to the default profile's HERMES_HOME.
+                    # Memory writes then land in the wrong profile's MEMORY.md.
+                    # Stamping here also ensures s.save() persists a non-null
+                    # profile field to the continuation session's JSON file,
+                    # covering the case where the session is later evicted from
+                    # SESSIONS and reconstructed from disk via Session.load().
+                    if not s.profile and _resolved_profile_name:
+                        s.profile = _resolved_profile_name
+                        logger.info(
+                            "Stamped profile=%r on continuation session %s after compression",
+                            _resolved_profile_name, new_sid,
+                        )
                     with LOCK:
                         if old_sid in SESSIONS:
                             SESSIONS[new_sid] = SESSIONS.pop(old_sid)
@@ -3033,6 +3147,17 @@ def _run_agent_streaming(
                         _compressed = True
                 # Notify the frontend that compression happened
                 if _compressed:
+                    visible_after = _visible_messages_for_compression_anchor(s.messages)
+                    s.compression_anchor_visible_idx = (
+                        max(0, len(visible_after) - 1) if visible_after else None
+                    )
+                    s.compression_anchor_message_key = (
+                        _compression_anchor_message_key(visible_after[-1]) if visible_after else None
+                    )
+                    s.compression_anchor_summary = _compact_summary_text(
+                        _compression_summary_from_messages(s.messages)
+                        or _compression_summary_from_messages(s.context_messages)
+                    )
                     put('compressed', {
                         'message': 'Context auto-compressed to continue the conversation',
                     })
