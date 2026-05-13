@@ -397,13 +397,26 @@ def _post(base, path, body=None):
         base + path, data=data, headers={"Content-Type": "application/json"}
     )
     try:
+        # urlopen(timeout=) covers connect; socket.settimeout on the underlying
+        # socket makes read() respect a deadline too, so a half-dead server
+        # (connection accepted, body never delivered) doesn't hang the cleanup
+        # fixture forever — observed locally after large-suite runs leave the
+        # test server in a bad state.
         with urllib.request.urlopen(req, timeout=10) as r:
+            try:
+                r.fp.raw._sock.settimeout(10)
+            except Exception:
+                pass
             return json.loads(r.read())
     except urllib.error.HTTPError as e:
         try:
             return json.loads(e.read())
         except Exception:
             return {}
+    except (urllib.error.URLError, TimeoutError, OSError):
+        # Server unreachable / read timed out — treat as best-effort no-op so
+        # autouse cleanup fixtures don't deadlock the entire run.
+        return {}
 
 
 def _wait_for_server(base, timeout=20):
