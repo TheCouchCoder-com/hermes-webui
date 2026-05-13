@@ -161,6 +161,25 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "requires_agent_modules: skip when hermes-agent Python modules are not importable")
 
 
+# ── Disable AWS IMDS probing for the pytest session ────────────────────────
+# Background: when hermes-agent's bedrock_adapter / botocore credential chain
+# runs during test execution (e.g. provider catalog enumeration triggered by
+# api/config.py imports), botocore probes the EC2 Instance Metadata Service at
+# 169.254.169.254 looking for an instance role. On VPS hosts where IMDS is
+# reachable but rate-limited (HTTP 429) or non-responsive, this dominates wall
+# time and turns a 161s test run into 600+s.
+#
+# Tests have no legitimate reason to call IMDS — the bedrock-related tests use
+# explicit mocks or env-var creds. Setting AWS_EC2_METADATA_DISABLED before
+# anything imports botocore is the supported way to silence the probe (matches
+# the guard the hermes_cli/doctor.py command already uses in its parallel-probe
+# block).
+#
+# Setting this here instead of in a fixture so it lands BEFORE any test-file
+# imports trigger botocore initialisation.
+os.environ.setdefault("AWS_EC2_METADATA_DISABLED", "true")
+
+
 # ── Environment isolation for tests ────────────────────────────────────────
 # HERMES_WEBUI_SKIP_ONBOARDING is set by hosting providers (e.g. Agent37) and
 # by some isolated test harnesses to short-circuit the onboarding wizard.
@@ -312,14 +331,48 @@ def test_server():
     # os.environ already set at module level above; no-op here.
 
     env = os.environ.copy()
-    # Strip real provider keys so test subprocess never inherits production credentials.
-    # The test server uses a mock/isolated config — no real API calls are made.
+    # Strip ANY real credential env var so the test subprocess never inherits
+    # production creds. The test server uses a mock/isolated config — no real
+    # API calls are made, no real OAuth flow runs, no real cloud SDK should
+    # ever be initialised with usable credentials.
+    #
+    # Without this strip, a stray credential left in the runner's env was
+    # observed making outbound TLS to a real provider during test runs.
+    # See investigation notes in pytest-pitfalls SKILL §B.3.
+    _CRED_ENV_PREFIXES = (
+        # LLM providers
+        'OPENROUTER_API_KEY', 'OPENAI_API_KEY', 'OPENAI_BASE_URL',
+        'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN',
+        'GOOGLE_API_KEY', 'GOOGLE_APPLICATION_CREDENTIALS',
+        'DEEPSEEK_API_KEY', 'XIAOMI_API_KEY',
+        'XAI_API_KEY', 'MISTRAL_API_KEY', 'OLLAMA_API_KEY',
+        'GROQ_API_KEY', 'TOGETHER_API_KEY', 'PERPLEXITY_API_KEY',
+        'CEREBRAS_API_KEY', 'COHERE_API_KEY', 'FIREWORKS_API_KEY',
+        'NOUS_API_KEY', 'NOVITA_API_KEY', 'TENCENT_API_KEY',
+        'BIGMODEL_API_KEY', 'GLM_API_KEY', 'STEPFUN_API_KEY',
+        'MINIMAX_API_KEY', 'LM_API_KEY', 'LMSTUDIO_API_KEY',
+        'AZURE_OPENAI_API_KEY', 'AZURE_OPENAI_ENDPOINT',
+        # AWS — must be stripped or botocore probes IMDS / picks up real creds
+        'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN',
+        'AWS_PROFILE', 'AWS_BEARER_TOKEN_BEDROCK',
+        # Memory providers, telemetry, dashboards
+        'MEM0_API_KEY', 'HONCHO_API_KEY', 'SUPERMEMORY_API_KEY',
+        # Messaging / gateway
+        'TELEGRAM_BOT_TOKEN', 'DISCORD_BOT_TOKEN', 'SLACK_BOT_TOKEN',
+        'SIGNAL_API_TOKEN', 'WHATSAPP_API_TOKEN',
+        # Browser / image-gen / search
+        'FIRECRAWL_API_KEY', 'FAL_KEY', 'TAVILY_API_KEY',
+        'SERPER_API_KEY', 'BRAVE_API_KEY',
+        # Github tokens (PR/issue tools shouldn't be exercised in tests)
+        'GH_TOKEN', 'GITHUB_TOKEN',
+    )
     for _k in list(env):
-        if any(_k.startswith(p) for p in (
-            'OPENROUTER_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY',
-            'GOOGLE_API_KEY', 'DEEPSEEK_API_KEY', 'XIAOMI_API_KEY',
-        )):
+        if any(_k.startswith(p) for p in _CRED_ENV_PREFIXES):
             del env[_k]
+    # Belt-and-suspenders: keep IMDS disabled in the spawn env too (we set it
+    # at module level above for the pytest process, but make it explicit here
+    # so it's never accidentally cleared by an env.update later).
+    env["AWS_EC2_METADATA_DISABLED"] = "true"
     env.update({
         "HERMES_WEBUI_PORT":              str(TEST_PORT),
         "HERMES_WEBUI_HOST":              "127.0.0.1",

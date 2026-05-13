@@ -23,7 +23,13 @@ def _locale_blocks_with_body(i18n_text: str):
 def test_kanban_has_native_sidebar_rail_and_mobile_tab():
     assert 'data-panel="kanban"' in INDEX
     assert 'data-i18n-title="tab_kanban"' in INDEX
-    assert 'onclick="switchPanel(\'kanban\')"' in INDEX
+    # Allow either the legacy `switchPanel('kanban')` form or the rail-click-aware
+    # `switchPanel('kanban',{fromRailClick:true})` form. The sidebar-collapse PR
+    # added the second-arg opts to all rail buttons so the same-active-icon click
+    # can toggle the sidebar; legacy callsites elsewhere may still use the bare form.
+    assert ('onclick="switchPanel(\'kanban\')"' in INDEX
+            or "onclick=\"switchPanel('kanban',{fromRailClick:true})\"" in INDEX), \
+        "kanban rail/mobile button must call switchPanel('kanban') (with or without fromRailClick opts)"
     assert 'data-label="Kanban"' in INDEX
     kanban_section = INDEX[INDEX.find('id="mainKanban"'):INDEX.find('id="mainWorkspaces"')]
     assert "<iframe" not in kanban_section.lower()

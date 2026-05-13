@@ -12,6 +12,30 @@
 
 ## [Unreleased]
 
+## [v0.51.43] — 2026-05-11 — Release S (fused community PR — desktop sidebar collapse)
+
+### Added
+
+- **PR #2054** by @jasonjcwu and @spektro33 (fused, co-authored) — Desktop users can now collapse the session-list sidebar by clicking the already-active rail icon, or with Cmd/Ctrl+B. State persists across reloads via localStorage and survives bfcache restores. Two discoverability paths, **no new visible UI affordance** — default appearance is identical to master, only users who actively try to toggle ever see a difference. Cross-panel rail clicks behave exactly as before (no collapse, just panel switch). Mobile (<641px) is unaffected. The behaviour is gated behind one new `opts.fromRailClick` flag on `switchPanel()` so every programmatic call-site (commands, deeplinks, internal state changes) preserves master semantics exactly. Inline `<script>` flash-prevention in `<head>` sets `data-sidebar-collapsed='1'` on `<html>` BEFORE the stylesheet loads, so cold loads with persisted-collapsed state paint correctly from frame 0 with no flicker. `aria-expanded` mirrors open/collapsed state on the active rail button for screen-reader announcements. Smooth `.24s cubic-bezier(.22,1,.36,1)` slide animation matches the workspace-panel collapse on the right. Drag-resize cursor stays instant via `body.resizing .sidebar { transition:none }`. Closes #1884 (jasonjcwu) and #1924 (spektro33).
+
+### Fixed (maintainer review on PR #2054)
+
+- **CSS breakpoint asymmetry** — pre-fix, the JS `_isDesktopWidth()` guard matched `min-width:641px` (where the rail itself becomes visible) but the `.sidebar-collapsed` CSS rules were inside `@media(min-width:901px)` (copied from the workspace-panel block without thinking). In the 641-900px band (tablet portrait, small laptop windows), clicking the active rail icon would write `.sidebar-collapsed` to the DOM, set `aria-expanded='false'`, and persist `localStorage='1'` — but the sidebar would visually stay open at 300px because CSS didn't match. User sees no visual change, screen reader announces "collapsed" for a still-visible sidebar, then resizing ≥901px later collapses by surprise. Fix hoists the three `.sidebar-collapsed` rules into their own `@media(min-width:641px)` block. Caught by @nesquena reviewing PR #2054; new regression test `test_css_breakpoint_matches_js_isdesktopwidth` parses both files at every CI run and asserts the JS / CSS thresholds match.
+
+### Test infrastructure
+
+- **`AWS_EC2_METADATA_DISABLED=true` set at conftest module load** — botocore's credential chain probes EC2 IMDS (169.254.169.254) by default during agent imports. On VPS hosts where IMDS is reachable but rate-limited (HTTP 429), this dragged a 161s test run to 600+s. Matches the guard `hermes_cli/doctor.py` already uses in its parallel-probe block.
+
+- **Credential-strip allowlist expanded from 6 prefixes to 40+** — the test_server fixture now strips MEM0, XAI, MISTRAL, OLLAMA, GROQ, AWS, Azure OpenAI, messaging bot tokens, search-engine API keys, image-gen keys, GitHub tokens, etc. before spawning the test server. Defence-in-depth against accidental outbound API calls from tests; a real outbound TLS connection to a provider's IPv6 endpoint was observed during test runs before the expansion. The test server uses a mock config and should never make real provider calls.
+
+### Tests
+
+5,120 → **5,166 collected** (+46 net new across the 35-test structural suite for sidebar collapse, the CSS-breakpoint regression guard nesquena added, and small per-locale i18n additions in dependent suites). All passing on Python 3.11/3.12/3.13.
+
+### Notes
+
+- This is the first PR in the repo where the maintainer review caught a real defect (CSS breakpoint asymmetry) before merge AND the fix was pushed directly onto the contributor's branch with a regression test. The merged commit includes both the original fusion and the fix as separate authored commits, preserving the audit trail.
+
 ## [v0.51.42] — 2026-05-11 — Release R (5-PR contributor batch — session recovery state.db reconciliation + RFC convention + MEDIA_ALLOWED_ROOTS + Slack cron delivery)
 
 ### Added
