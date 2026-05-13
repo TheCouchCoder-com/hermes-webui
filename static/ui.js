@@ -67,6 +67,9 @@ function _isBacktickFenceClose(line,minLen){
  * All non-fenced text stays escaped (no bold/italic/link interpretation).
  */
 
+function _stripWorkspaceDisplayPrefix(text){
+  return String(text||'').replace(/^\s*\[Workspace:[^\]]+\]\s*/,'').trim();
+}
 function _renderUserFencedBlocks(text){
   const stash=[];
   let s=String(text||'');
@@ -380,6 +383,10 @@ function _renderAttachmentHtml(fname, url){
   const kind=_mediaKindForName(fname);
   if(kind==='image') return `<img class="msg-media-img" src="${esc(url)}" alt="${esc(fname)}" loading="lazy">`;
   if(kind==='audio'||kind==='video') return _mediaPlayerHtml(kind,url,fname);
+  if(_HTML_EXTS.test(fname)){
+    const inlineUrl=url+(String(url).includes('?')?'&':'?')+'inline=1';
+    return `<a class="msg-file-badge msg-file-badge--html" href="${esc(inlineUrl)}" target="_blank" rel="noopener">${li('file-code',12)} ${esc(fname)}</a>`;
+  }
   return `<div class="msg-file-badge">${li('paperclip',12)} ${esc(fname)}</div>`;
 }
 document.addEventListener('click', e => {
@@ -2914,7 +2921,31 @@ function updateQueueBadge(sessionId){
     }
   }
 }
-function showToast(msg,ms,type){const el=$('toast');if(!el)return;const s=String(msg==null?'':msg);let t=type;if(!t){const low=s.toLowerCase();if(/fail|error|denied|invalid|unavailable|no active|no workspace match|no model match|no personalities/.test(low))t='error';else if(/warn|queued|takes effect|skipped|fallback/.test(low))t='warning';else if(/saved|created|imported|restored|switched|set to|updated|duplicated|moved to|renamed|deleted|complete|pinned|archived|cleared|stopped/.test(low))t='success';else t='info';}el.textContent=s;el.className='toast show '+t;clearTimeout(el._t);el._t=setTimeout(()=>{el.classList.remove('show');},ms||2800);}
+const TOAST_DEFAULT_MS=2800;
+const TOAST_ERROR_DEFAULT_MS=20000;
+function clearToastDismissTimer(el){if(!el)return;clearTimeout(el._t);el._t=null;}
+function setToastDismissTimer(el,duration){if(!el)return;clearToastDismissTimer(el);el._t=setTimeout(()=>{el.classList.remove('show');},duration);}
+function copyToastText(btn){
+  const el=btn&&btn.closest?btn.closest('#toast'):null;
+  const text=el?(el.dataset.toastMessage||el.textContent||''):'';
+  const done=()=>{const old=btn.textContent;btn.textContent='Copied';setTimeout(()=>{btn.textContent=old;},1200);};
+  _copyText(text).then(done).catch(()=>{});
+}
+function showToast(msg,ms,type){
+  const el=$('toast');if(!el)return;
+  const s=String(msg==null?'':msg);let t=type;
+  if(!t){const low=s.toLowerCase();if(/fail|error|denied|invalid|unavailable|no active|no workspace match|no model match|no personalities/.test(low))t='error';else if(/warn|queued|takes effect|skipped|fallback/.test(low))t='warning';else if(/saved|created|imported|restored|switched|set to|updated|duplicated|moved to|renamed|deleted|complete|pinned|archived|cleared|stopped/.test(low))t='success';else t='info';}
+  const duration=(ms==null)?(t==='error'?TOAST_ERROR_DEFAULT_MS:TOAST_DEFAULT_MS):ms;
+  el.className='toast show '+t;
+  el.dataset.toastMessage=s;
+  if(t==='error') el.innerHTML=`<span class="toast-message">${esc(s)}</span><button class="toast-copy" type="button" data-toast-copy="1" onclick="copyToastText(this);event.stopPropagation()">Copy</button>`;
+  else el.textContent=s;
+  el.onmouseenter=()=>clearToastDismissTimer(el);
+  el.onmouseleave=()=>setToastDismissTimer(el,duration);
+  el.onfocusin=()=>clearToastDismissTimer(el);
+  el.onfocusout=()=>setToastDismissTimer(el,duration);
+  setToastDismissTimer(el,duration);
+}
 
 // ── Shared app dialogs ───────────────────────────────────────────────────────
 // showConfirmDialog(opts) and showPromptDialog(opts) replace browser-native dialog calls
@@ -4612,6 +4643,7 @@ function renderMessages(options){
       }
     }
     const isUser=m.role==='user';
+    const displayContent=isUser?_stripWorkspaceDisplayPrefix(content):content;
     const isLastAssistant=!isUser&&vi===renderVisWithIdx.length-1;
     let filesHtml='';
     if(m.attachments&&m.attachments.length){
@@ -4625,7 +4657,7 @@ function renderMessages(options){
         return _renderAttachmentHtml(fname,fileUrl);
       }).join('')}</div>`;
     }
-    let bodyHtml = isUser ? _renderUserFencedBlocks(content) : renderMd(_stripXmlToolCallsDisplay(String(content)));
+    let bodyHtml = isUser ? _renderUserFencedBlocks(displayContent) : renderMd(_stripXmlToolCallsDisplay(String(displayContent)));
     if(!isUser&&m.provider_details){
       bodyHtml += `<details class="provider-error-details"><summary>Provider details</summary><pre><code>${esc(String(m.provider_details))}</code></pre></details>`;
     }
@@ -4666,7 +4698,7 @@ function renderMessages(options){
       row.className='msg-row';
       row.dataset.msgIdx=rawIdx;
       row.dataset.role='user';
-      row.dataset.rawText=String(content).trim();
+      row.dataset.rawText=String(displayContent).trim();
       row.innerHTML=`${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`;
       inner.appendChild(row);
       userRows.set(rawIdx, row);
@@ -5774,13 +5806,13 @@ function loadHtmlInline(){
       .then(r=>{if(!r.ok) throw new Error(r.status); return r.text();})
       .then(html=>{
         if(html.length>HTML_MAX_SIZE){
-          const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
-          el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('html_too_large')}</span></div>`;
+          const openUrl='api/media?path='+encodeURIComponent(path)+'&inline=1';
+          el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${openUrl}" target="_blank" rel="noopener">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('html_too_large')}</span></div>`;
           return;
         }
-        const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+        const openUrl='api/media?path='+encodeURIComponent(path)+'&inline=1';
         const safeHtml=html.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-        el.outerHTML=`<div class="html-preview-wrap"><div class="html-preview-header"><span>${t('html_sandbox_label')}</span><a href="${dlUrl}" download="${esc(fname)}" class="html-open-link">${t('html_open_full')} ↗</a></div><iframe srcdoc="${safeHtml}" sandbox="allow-scripts" class="html-preview-iframe" loading="lazy"></iframe></div>`;
+        el.outerHTML=`<div class="html-preview-wrap"><div class="html-preview-header"><span>${t('html_sandbox_label')}</span><a href="${openUrl}" target="_blank" rel="noopener" class="html-open-link">${t('html_open_full')} ↗</a></div><iframe srcdoc="${safeHtml}" sandbox="allow-scripts" class="html-preview-iframe" loading="lazy"></iframe></div>`;
       })
       .catch(()=>{
         const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';

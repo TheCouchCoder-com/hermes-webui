@@ -558,6 +558,7 @@ async function loadSession(sid){
       threshold_tokens:  _pick(u.threshold_tokens,  _s.threshold_tokens),
     });
   }
+  if(typeof _renderPendingPromptsForActiveSession==='function') _renderPendingPromptsForActiveSession();
   _resolveSessionModelForDisplaySoon(sid);
   // Clear the in-flight session marker now that this load has completed (#1060).
   if (_loadingSessionId === sid) _loadingSessionId = null;
@@ -1450,6 +1451,53 @@ window.addEventListener('resize',()=>{
 // with stale data, causing sessions to vanish from the sidebar.
 let _renderSessionListGen = 0;
 
+function _isOptimisticFirstTurnSessionRow(s){
+  if(!s||!s.session_id||s.archived) return false;
+  const messageCount=Number(s.message_count||0);
+  if(messageCount<=0&&!s.pending_user_message) return false;
+  return Boolean(
+    s.is_streaming||
+    s.active_stream_id||
+    s.pending_user_message||
+    s.pending_started_at||
+    _isSessionLocallyStreaming(s)||
+    _sessionStreamingById.get(s.session_id)===true
+  );
+}
+
+function _mergeOptimisticFirstTurnSessions(fetchedSessions){
+  const merged=Array.isArray(fetchedSessions)?[...fetchedSessions]:[];
+  const bySid=new Map();
+  merged.forEach((s,idx)=>{if(s&&s.session_id) bySid.set(s.session_id,idx);});
+  for(const local of Array.isArray(_allSessions)?_allSessions:[]){
+    if(!_isOptimisticFirstTurnSessionRow(local)) continue;
+    const sid=local.session_id;
+    const idx=bySid.has(sid)?bySid.get(sid):-1;
+    if(idx>=0){
+      const fetched=merged[idx]||{};
+      const localCount=Number(local.message_count||0);
+      const fetchedCount=Number(fetched.message_count||0);
+      const localTs=Number(local.last_message_at||local.updated_at||0);
+      const fetchedTs=Number(fetched.last_message_at||fetched.updated_at||0);
+      merged[idx]={
+        ...local,
+        ...fetched,
+        message_count:Math.max(localCount,fetchedCount),
+        last_message_at:Math.max(localTs,fetchedTs),
+        updated_at:Math.max(Number(local.updated_at||0),Number(fetched.updated_at||0),localTs,fetchedTs),
+        active_stream_id:fetched.active_stream_id||local.active_stream_id||null,
+        pending_user_message:fetched.pending_user_message||local.pending_user_message||null,
+        pending_started_at:fetched.pending_started_at||local.pending_started_at||null,
+        is_streaming:Boolean(fetched.is_streaming||local.is_streaming||_isSessionLocallyStreaming(local)),
+      };
+    }else{
+      merged.push({...local,is_streaming:true});
+      bySid.set(sid,merged.length-1);
+    }
+  }
+  return merged;
+}
+
 async function renderSessionList(){
   const _gen = ++_renderSessionListGen;
   try{
@@ -1465,7 +1513,7 @@ async function renderSessionList(){
     // active profile so the "Show N from other profiles" toggle can render
     // without a second round-trip. Stashed on the module for renderSessionListFromCache.
     _otherProfileCount = sessData.other_profile_count || 0;
-    _allSessions = sessData.sessions||[];
+    _allSessions = _mergeOptimisticFirstTurnSessions(sessData.sessions||[]);
     _allProjects = projData.projects||[];
     // Capture server clock for clock-skew compensation (issue #1144).
     // server_time is epoch seconds from the server's time.time().
@@ -1823,6 +1871,10 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions){
   const orphans=[];
   for(const child of rawSessions||[]){
     if(!_isChildSession(child)) continue;
+    if(child._cross_surface_child_session){
+      orphans.push({...child,_orphan_child_session:true});
+      continue;
+    }
     const parentSid=child.parent_session_id;
     let parentRow=visibleBySid.get(parentSid);
     let parentSegment=null;

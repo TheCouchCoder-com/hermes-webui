@@ -4,6 +4,72 @@
 > Entries below this notice document upstream releases and were not written by the fork maintainers.
 > Fork-specific changes will be added above this notice as they ship.
 
+## [v0.51.19] — 2026-05-07 — 15-PR contributor sweep + 1 in-stage absorb
+
+### Fixed (15 contributor PRs)
+
+- **PR #1798** by @Michaelyklam — Workspace path inaccessibility (closes #1795 P0/M1). `_clean_workspace_list()` was destructive on macOS TCC denial — `Path(...).resolve().is_dir()` returned `False` for permission-denied directories, then `load_workspaces()` re-persisted the cleaned list, silently deleting registered workspaces. Replaced predicate with non-destructive `_safe_resolve()` and added `_workspace_access_error()` branching on `FileNotFoundError`/`PermissionError`/`OSError`/`S_ISDIR` so error messages distinguish missing vs. inaccessible paths. `api/workspace.py +49`, 82 LOC test coverage including TCC simulation via `Path.stat` monkeypatch.
+
+- **PR #1816** by @MacLeodMike — IPv6 bind address support. `ThreadingHTTPServer` defaulted `address_family = socket.AF_INET`, so binding to `::` or `::1` raised `EAFNOSUPPORT`. New `QuietHTTPServer.__init__` detects `':'` in host string and flips `address_family = socket.AF_INET6` before `super().__init__()`. Loopback warning gate adds `::1` to existing `127.0.0.1` check. `server.py +7`, 6 LOC.
+
+- **PR #1815** by @Saik0s — `bootstrap.py` venv creation uses `symlinks=True`. CPython's `venv.EnvBuilder` defaults `symlinks=False` for shared-library Python builds (notably mise/asdf-installed CPython on macOS); the copied `python3.X` binary still references `@executable_path/../lib/libpython3.X.dylib` but the dylib never gets copied into `.venv/lib/`, so the first import aborts with SIGABRT. Symlinking the interpreter keeps `@executable_path` resolving back to the original install. Falls back to copy mode automatically on Windows without `SeCreateSymbolicLinkPrivilege`. `bootstrap.py +9/-1`, 1 LOC + 34 LOC test.
+
+- **PR #1817** by @Saik0s — `bootstrap.py` discovers agent dir via `hermes` CLI shebang. Last-resort fallback after the hard-coded candidate list misses: reads `which("hermes")`'s shebang, walks up the parents of the interpreter until it finds a directory containing `run_agent.py`. Catches non-standard installs like `~/Projects/GitHub/hermes-agent` that were previously rejected with the misleading "Python environment cannot import both WebUI dependencies and Hermes Agent" error. `bootstrap.py +44`, 106 LOC test.
+
+- **PR #1818** by @franksong2702 — Named custom provider routing (closes #1806). `model.provider: ollama-local` (or any `<custom_providers[].name>`) now normalizes to the same `custom:<name>` slug the model picker emits, BEFORE picker rendering or model resolution. Eliminates the duplicate-group bug where WebUI was building a stale `custom:local-(127.0.0.1:11434)` group from agent-side base-url-derived data while a named `custom_providers[]` entry existed for the same endpoint. The stale slug routes to an unsettable env var name (`CUSTOM:LOCAL-(127.0.0.1:11434)_API_KEY`) — fixed by base-url-to-named-slug mapping that drops base-url-derived `custom:*` slugs when a named slug owns the same endpoint. `api/config.py +151`, 116 LOC test (`test_issue1806_named_custom_provider_resolution.py`). Three new helpers: `_custom_provider_slug_from_name`, `_named_custom_provider_slug_for_provider`, `_resolve_configured_provider_id`. `_normalize_base_url_for_match` hoisted from inner function to module scope for reuse by `_named_custom_provider_slug_for_base_url`.
+
+- **PR #1805** by @franksong2702 — Provider account quota cards. Extends `/api/provider/quota` beyond OpenRouter to OAuth-backed providers (`openai-codex`, `anthropic`). `_fetch_account_usage_with_profile_context` enters `cron_profile_context_for_home(home)` so `agent.account_usage.fetch_account_usage()` reads the active WebUI profile's `HERMES_HOME` (auth.json + .env) instead of the process-default `~/.hermes`. Serializes `AccountUsageSnapshot` to JSON with `available`/`windows`/`details`/`plan`/`unavailable_reason`. `static/panels.js` adds `_formatProviderQuotaWindowLabel` mapping for codex window labels (`Session` → `5-hour limit`, `Weekly` → `Weekly limit`). `api/providers.py +95`, `static/panels.js +55`, 152 LOC test.
+
+- **PR #1812** by @franksong2702 — Live Codex models in provider card (closes #1807). The Codex card was building from `_PROVIDER_MODELS["openai-codex"]` (curated 7-entry static snapshot) which drifted behind whatever ChatGPT was serving for a given account. Now calls `hermes_cli.models.provider_model_ids("openai-codex")` which does live OAuth → ChatGPT model catalog fetch, falls back to agent's hardcoded catalog → WebUI's `_PROVIDER_MODELS` only on exception. Mirrors the existing Nous Portal pattern. `api/providers.py +101/-0`, 81 LOC test.
+
+- **PR #1797** by @Michaelyklam — Preserve first-turn sidebar row during refresh (closes #1792). `renderSessionList()` was unconditionally clobbering `_allSessions = sessData.sessions || []`, so a server response that lagged behind a just-started first-turn session would overwrite the optimistic row inserted by `upsertActiveSessionForLocalTurn()`. Replaced with `_mergeOptimisticFirstTurnSessions()` gated on a focused `_isOptimisticFirstTurnSessionRow()` predicate (checks `is_streaming`/`active_stream_id`/`pending_user_message`/`pending_started_at`/`_isSessionLocallyStreaming`/`_sessionStreamingById`). `static/sessions.js +65/-1`, 17 LOC test.
+
+- **PR #1802** by @ai-ag2026 — Cross-surface session continuations stay visible. Backend marks `_cross_surface_child_session` when a parent/child session pair comes from different surfaces (e.g. messaging parent → webui child after compaction). Frontend keeps marked rows as top-level sidebar entries instead of nesting them under the parent surface's row (where they'd be invisible). Same-surface child sessions still nest as before. `api/agent_sessions.py +4`, `static/sessions.js +4`, 92 LOC test across 2 files.
+
+- **PR #1819** by @dso2ng — Approval/clarify prompts session-owned (closes #1694). `static/messages.js` introduces `_approvalPendingBySession`/`_clarifyPendingBySession` Maps keyed by `session_id`. New gate inside `showApprovalCard`/`showClarifyCard` — caches but does NOT paint when `_approvalPromptBelongsToActiveSession(sid)` is false. `loadSession` calls `_renderPendingPromptsForActiveSession()` to render cached prompts when user switches back to the owner session. Polling-empty/SSE-empty branches route through `_hideApprovalCardIfOwner(sid)` so Sprint 30's 30-second visibility guard for the active pane is preserved while still clearing background-owner caches. `static/messages.js +199/-30`, 106 LOC test.
+
+- **PR #1813** by @ai-ag2026 — Hide workspace metadata in user bubbles. New `_stripWorkspaceDisplayPrefix()` strips `^\s*\[Workspace:[^\]]+\]\s*` from user-bubble display ONLY (start-anchored, mid-text occurrences preserved). `m.content` itself unchanged — search/export/history keep metadata. `row.dataset.rawText` updated to use `displayContent` so edit/copy round-trips from visible text. `static/ui.js +45/-2`, 39 LOC test. (Replaces #1810, which was based on a stale fork branch.)
+
+- **PR #1801** by @Michaelyklam — Error toasts copy-friendly (closes #1796). `showToast()` switched from `ms || 2800` to `ms == null` so explicit `0` is honored. New `TOAST_ERROR_DEFAULT_MS=20000` for type-aware default. Error toasts get inline Copy button (`<button class="toast-copy">`) — captured via `dataset.toastMessage` to avoid serializing the button label. Hover/focus pause via `onmouseenter`/`onmouseleave`/`onfocusin`/`onfocusout` toggling the dismiss timer. `static/ui.js +47/-2`, `static/style.css +20`, 38 LOC test + 3 PNG screenshots.
+
+- **PR #1803** by @franksong2702 — File picker + HTML preview interactions (closes #1800). Three coupled fixes:
+  - `static/index.html` + `static/style.css` make file input visually-hidden via positioned `position:absolute;left:-9999px;width:1px;height:1px;opacity:0` instead of `display:none` (some browser shells suppress click on `display:none` inputs).
+  - `static/boot.js` `btnAttach` switched to non-submit handler with `e.preventDefault()` + value reset.
+  - `api/routes.py` HTML media path adds `Content-Security-Policy: sandbox allow-scripts` header only when `?inline=1`, otherwise serves with `Content-Disposition: attachment` + `X-Frame-Options: DENY`. `static/ui.js` builds inline open URL with `?inline=1` for HTML attachment badges.
+  - `api/routes.py +21`, `static/{boot,index,ui}.{js,html}` + `style.css` ~25 LOC, 116 LOC test (test_issue1800 + test_media_inline extension).
+
+- **PR #1809** by @ai-ag2026 — Dedupe workspace-prefixed user turns after compaction. Adds `_strip_workspace_prefix()` in `api/streaming.py` and uses it for identity/key comparison in `_merge_display_messages_after_agent_result`. Compaction returning a `[Workspace: …]\n…` user turn no longer creates a duplicate visible user bubble alongside the prior optimistic visible turn. Stores the visible user prompt in the display transcript when a model result returns the current user turn with workspace metadata. `api/streaming.py +29/-2`, 47 LOC test.
+
+- **PR #1811** by @ai-ag2026 — Workspace user turn repair script. New standalone `scripts/repair_workspace_user_turns.py` for historical transcript hygiene. Cleans `[Workspace: …]` prefixes from sidecar JSON + optionally SQLite `state.db`. Strips prefixes, removes adjacent duplicate user turns after normalization, backs up mutated files, refreshes message/tool counts. NOT auto-run on startup — manual operator-invoked migration utility. `scripts/repair_workspace_user_turns.py +187` (new file), 91 LOC test.
+
+### Opus-applied fixes (absorbed in-release)
+
+**From stage-313 absorption pre-release Opus pass:** none. Opus verdict was clean SHIP after the two pre-Opus pytest-driven absorbs below.
+
+**From stage-313 pre-Opus pytest absorb:**
+
+- `api/config.py` — Added `resolve_alias=False` flag to `_resolve_configured_provider_id()`. PR #1818's swap from `_resolve_provider_alias()` to `_resolve_configured_provider_id()` was correct for active-provider/badge surfaces but broke #1625's local-server-provider literal-preservation contract. Specifically, `'ollama' → 'custom'` aliasing caused `_LOCAL_SERVER_PROVIDERS` membership check to miss in `resolve_model_provider()`, breaking the full-model-id-preservation branch for LM Studio/Ollama (which require the unstripped `qwen/qwen3.6-27b` form). The new flag preserves the raw provider value when called from `resolve_model_provider`, while named-custom-slug + base-url fallback both still run unchanged. All other callers (badge surfaces, auth-store fallback, configured-provider hint resolution) keep `resolve_alias=True`. Caught by pre-release pytest gate.
+
+- `tests/test_bootstrap_discover_agent.py` — `_isolate_discover_agent_dir()` helper now pins `Path.home()` via `monkeypatch.setattr(bootstrap.Path, "home", classmethod(lambda cls: tmp_path / "isolated-home"))`. Original PR #1817 helper cleared `HERMES_HOME` + `HERMES_WEBUI_AGENT_DIR` and pinned `REPO_ROOT`, but didn't isolate the hard-coded `Path.home() / ".hermes" / "hermes-agent"` and `Path.home() / "hermes-agent"` candidates in `discover_agent_dir()` — so the dev's real install at `~/.hermes/hermes-agent` matched first and tests failed. Test-only fix; production code unchanged. Caught by pre-release pytest gate.
+
+### Maintainer triage
+
+- **PR #1814** by @hualong1009 — Marked `maintainer-review`. Targets the same #1806 root cause as #1818 but operates at the runtime layer (call-site fallbacks in `api/routes.py`/`api/streaming.py`) rather than the config layer. Complementary in principle; held because the PR ships 96 LOC of branchy resolution logic with zero unit tests and includes a slug-normalization helper that duplicates #1818's `_custom_provider_slug_from_name`. Posted structured comment with three actionable asks (add tests, dedup with #1818's helpers post-merge, extract the 4× duplicated call-site fallback block into a helper). Author can revise on top of v0.51.19 once #1818 has shipped.
+
+### Tests
+
+4747 → **4790 collected** (+43). 4776 passed, 11 skipped (test-isolation prong-2 + QA gating + dev-only spawn), 1 xfailed, 2 xpassed, 0 failed in 145.9s. JS syntax check 5/5 modified files green (`node -c`). Browser API harness 11/11 endpoints green.
+
+### Pre-release verification
+
+- All 15 PRs CI-green individually
+- File overlaps resolved via stage-HEAD rebasing for sibling PRs (sessions.js: 1797/1802/1819; ui.js: 1801/1803/1813; api/providers.py: 1805/1812; bootstrap.py: 1815/1817; CHANGELOG.md stripped from contributor branches before merge)
+- Pre-stamp re-fetch: all 15 PR heads still match local rebases (no mid-sweep force-pushes)
+- Opus advisor: SHIP verdict, 0 MUST-FIX, 0 SHOULD-FIX in-release. Two narrow follow-ups filed as new issues (named-custom-collides-with-local-provider edge case, `_cron_env_lock` process-wide serialization).
+- No file deletions, no merge-conflict markers, no Python/JS syntax errors
+
+Closes #1792, #1795, #1796, #1800, #1806, #1807, #1694.
+
 ## [v0.51.18] — 2026-05-07 — 5-PR batch (4 contributor + 1 self-built UX polish)
 
 ### Fixed
