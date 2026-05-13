@@ -2286,7 +2286,7 @@ def _run_agent_streaming(
         # process-level active-profile global.  Falls back gracefully.
         try:
             from api.profiles import (
-                _patch_skill_home_modules,
+                patch_skill_home_modules,
                 get_hermes_home_for_profile,
                 get_profile_runtime_env,
             )
@@ -2296,7 +2296,7 @@ def _run_agent_streaming(
         except ImportError:
             _profile_home = os.environ.get('HERMES_HOME', '')
             _profile_runtime_env = {}
-            _patch_skill_home_modules = None
+            patch_skill_home_modules = None
         
         # Capture the resolved profile name now, while profile context is
         # reliable. Used in the compression migration block to stamp s.profile
@@ -2349,8 +2349,8 @@ def _run_agent_streaming(
                 # above, so we only do lightweight sys.modules lookups and
                 # attribute assignments here — no first-time import under
                 # the lock (#2024).
-                if _patch_skill_home_modules is not None:
-                    _patch_skill_home_modules(Path(_profile_home))
+                if patch_skill_home_modules is not None:
+                    patch_skill_home_modules(Path(_profile_home))
         # Lock released — agent runs without holding it
         # ── MCP Server Discovery (lazy import, idempotent) ──
         # MUST run AFTER the HERMES_HOME mutation above — `discover_mcp_tools()`
@@ -2770,6 +2770,8 @@ def _run_agent_streaming(
                         'model': _fb_entry.get('model', ''),
                         'provider': _fb_entry.get('provider', ''),
                         'base_url': _fb_entry.get('base_url'),
+                        'api_key': _fb_entry.get('api_key'),
+                        'key_env': _fb_entry.get('key_env'),
                     }
 
             # Build kwargs defensively — guard newer params so the WebUI

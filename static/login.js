@@ -170,7 +170,10 @@ document.addEventListener('DOMContentLoaded', function () {
   pwInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); onSubmit(e); } });
   pwConfirmInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); onSubmit(e); } });
 
-  // Probe the server: /health for connectivity, /api/auth/status for mode.
+  // On page load, probe the server so we can distinguish "can't reach server"
+  // (Tailscale off, wrong network) from "session expired / need to log in".
+  // Uses /health for connectivity, /api/auth/status for mode.
+  // If unreachable, retries every 3 s and auto-reloads once the server is back.
   (function checkConnectivity() {
     var retryTimer = null;
     function setFormDisabled(disabled) {
@@ -180,7 +183,7 @@ document.addEventListener('DOMContentLoaded', function () {
       if (btn) btn.disabled = disabled;
     }
     function probe() {
-      fetch('health', { method: 'GET', credentials: 'omit' })
+      fetch('health', { method: 'GET', credentials: 'same-origin' })
         .then(function (r) {
           if (r.ok) {
             if (retryTimer !== null) {
