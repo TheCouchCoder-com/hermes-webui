@@ -56,8 +56,12 @@ jobs:
             TAG="${{ inputs.target_tag }}"
             echo "Using user-specified tag: $TAG"
           else
-            TAG=$(git tag --no-merged master --list 'v*' --sort=v:refname | head -n1 || true)
-            echo "Next un-merged tag: ${TAG:-<none>}"
+            # Tags that are on upstream/master's history but not yet in our master.
+            # `--no-merged master` alone would include ancient side-branch tags that
+            # upstream itself never merged (e.g. v0.12); intersecting with
+            # `--merged upstream/master` filters those out.
+            TAG=$(git tag --merged upstream/master --no-merged master --list 'v*' --sort=v:refname | head -n1 || true)
+            echo "Next un-merged upstream tag: ${TAG:-<none>}"
           fi
           if [ -z "$TAG" ]; then
             echo "No upstream tags to merge. Exiting cleanly."

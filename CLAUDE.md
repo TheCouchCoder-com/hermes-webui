@@ -111,12 +111,17 @@ both churn. When resolving:
   `api/helpers.py`).
 - **`static/ui.js`, `static/index.html`, `static/boot.js`,
   `server.py`, `api/helpers.py`** — usually small, take case-by-case.
+- **`CHANGELOG.md`** — conflicts here are expected on almost every sync
+  (both sides add entries). Resolution: keep both sets of entries with
+  upstream's `## [vX.Y.Z]` block above any of our fork-only entries that
+  follow it chronologically. Don't drop upstream's release notes.
 
 Files Claude may auto-resolve on a sync PR (with the playbook above):
 `api/auth.py`, `api/routes.py`, `api/helpers.py`, `static/login.js`,
 `static/panels.js`, `static/ui.js`, `static/index.html`,
-`static/boot.js`, `server.py`. Anything else (tests, workflows,
-`Dockerfile`, dependency files, docs) requires human review.
+`static/boot.js`, `server.py`, `CHANGELOG.md`, `ROADMAP.md`,
+`TESTING.md`. Anything else (tests, workflows, `Dockerfile`, dependency
+files, other docs) requires human review.
 
 ### Validation after a sync merge
 
