@@ -10,6 +10,22 @@
 
 ## [v0.51.29] — 2026-05-08 — 6-PR contributor batch (Release F: Docker hardening + login persistence + scroll/lineage fixes + i18n cleanup)
 
+## [v0.51.38] — 2026-05-10 — Release N (UI polish — toast + mobile + diff renderer + sidebar)
+
+### Fixed
+
+- **PR #1988** by @Michaelyklam — Auto-compression toast lifetime increased so the user sees the boundary summary long enough to register what happened. Auto-compression rewrites session context, so its completion toast carries more trust weight than a generic "settings saved" notification. Per #1834 Option A — the smallest safe slice. Adds regression coverage.
+
+- **PR #2007** by @insecurejezza — Wrap markdown code blocks on mobile instead of forcing horizontal scrolling. Desktop behavior unchanged. Includes Prism token spans, preview markdown, and diff line spans in the mobile wrapping rules. Regression coverage in `test_mobile_markdown_wrapping.py`.
+
+- **PR #2008** by @franksong2702 — CLI session patch diff rendering. Historical CLI sessions that predate session-level `tool_calls` reconstruct tool cards from per-message metadata in `static/ui.js`; that fallback truncated tool results to 200 chars and only showed the first 120 chars of tool arguments, so `apply_patch`/edit diffs recorded with `verbosity=all` could disappear behind a generic `Success` result. The renderer now preserves diff-like tool outputs, promotes `apply_patch`/edit payloads into the tool-card snippet when the result is non-diff, and labels long diff expanders as `Show diff`. 245-line regression test (`test_issue1824_cli_patch_diff_rendering.py`) covers both the API payload preservation and the renderer fallback. Closes #1824.
+
+- **PR #2013** by @ai-ag2026 — Avoid sidebar jumps when the active session is already visible. Previously the virtualized session sidebar always re-anchored on the active row, which produced a jump even when the row was inside the current window. Now only re-anchors when the active row is outside the rendered window. Regression coverage in `test_issue500_session_list_virtualization.py`.
+
+### Tests
+
+5049 → **5057 collected, 5057 passing, 0 regressions** (+8 net new). Full suite 154s on Python 3.11 with `HERMES_HOME` isolation.
+
 ## [v0.51.37] — 2026-05-10 — Release M (compression / lineage backend)
 
 ### Fixed
@@ -145,10 +161,6 @@ Three nice-to-have polish items called out by Opus that don't block this release
 - **`_kanbanIsDispatching` flag** to disable the Run/Preview buttons during in-flight POST (current double-click path is benign — atomic `claim_task` server-side prevents destructive double-spawn — but produces a "0 spawned" second toast).
 - **Profile-cache invalidation hook** for `_kanbanProfileNamesCache` so profile create/delete from elsewhere in the WebUI propagates without a reload. Current behavior is graceful degradation (orphaned-profile assignee → dispatcher logs `skipped_nonspawnable`, user can re-edit).
 - **Status-display hint** near the modal status `<select>` for non-editable original states (running/blocked/done/archived → mapped to `triage` in the dropdown). The tracker fix makes untouched-submit harmless, but a small visual hint like "(real status: running)" would reduce user confusion.
-
-## [Unreleased]
-
-### Fixed
 
 - **bug(profile/mcp): non-default profile MCP servers never load** ([#1968](https://github.com/nesquena/hermes-webui/issues/1968)). `_run_agent_streaming` called `discover_mcp_tools()` ~100 lines BEFORE the per-session `os.environ['HERMES_HOME'] = _profile_home` mutation, so MCP discovery always read the default profile's `~/.hermes/config.yaml` regardless of which profile the session was stamped with. Result: switching profiles in the WebUI dropdown was effectively cosmetic for MCP — non-default profiles never registered their stdio (npx/node) MCP servers. Fix relocates the `discover_mcp_tools()` call past the `_ENV_LOCK` env-mutation block so `get_hermes_home()` resolves to the session's actual profile home. Adds 4 static regression tests (`tests/test_issue1968_mcp_profile_discovery.py`) pinning the call ordering, lock-release placement, single call site, and try/except wrapping. **Caveat (out of scope, agent-side):** `_servers` in `tools/mcp_tool.py` is a process-global dict keyed only by server name, so concurrent use of multiple non-default profiles in the same WebUI process still has a "first profile wins per name" issue. Fully fixing that requires keying `_servers` by `(profile_home, name)` upstream in hermes-agent. This PR ships layer 1 only.
 

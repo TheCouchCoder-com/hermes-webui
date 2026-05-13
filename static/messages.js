@@ -1167,7 +1167,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       if(typeof _setCompressionSessionLock==='function') _setCompressionSessionLock(null);
       if(!S.busy&&typeof renderMessages==='function') renderMessages();
-      showToast(message||'Context compressed');
+      showToast(message||'Context compressed', 8000);
     });
 
     source.addEventListener('metering',e=>{

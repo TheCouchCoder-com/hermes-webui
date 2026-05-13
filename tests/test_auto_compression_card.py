@@ -103,6 +103,21 @@ def test_auto_compression_card_reuses_compression_card_renderer():
     assert "auto_compress_label" in helper
 
 
+def test_auto_compression_compressed_sse_showtoast_has_explicit_longer_duration():
+    block = _compressed_listener_block()
+
+    assert 'showToast' in block
+    # Must call showToast with an explicit duration that is meaningfully longer
+    # than the default (3000 ms) so the compressed event toast is harder to miss.
+    import re
+    m = re.search(r'showToast\(.*?,\s*(\d+)\s*\)', block)
+    assert m is not None, 'showToast call in compressed SSE handler has no explicit duration'
+    duration = int(m.group(1))
+    assert duration >= 8000, (
+        f'compressed SSE showToast duration ({duration} ms) must be >= 8000 ms'
+    )
+
+
 def test_auto_compression_card_survives_compression_session_rotation():
     src = _read("static/messages.js")
 
