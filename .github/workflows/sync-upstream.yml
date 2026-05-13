@@ -1,0 +1,188 @@
+name: Sync Upstream
+
+# Walk forward through nesquena/hermes-webui tags one stage at a time.
+# - Mondays 06:00 UTC, plus manual dispatch.
+# - Picks the next un-merged upstream `v*` tag and merges it into a
+#   sync branch.
+# - If the merge applies cleanly AND tests pass, opens a ready-for-review
+#   PR. Otherwise opens a draft PR with the conflict / failure state so a
+#   human (or Claude) can resolve it.
+#
+# This workflow only runs on the fork (TheCouchCoder-com/hermes-webui),
+# matching the guard pattern used in release.yml.
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      target_tag:
+        description: 'Specific upstream tag to merge (e.g. v0.51.15). Leave blank to pick the next un-merged tag.'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    if: github.repository == 'TheCouchCoder-com/hermes-webui'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout master
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git identity
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+      - name: Add upstream remote and fetch
+        run: |
+          git remote add upstream https://github.com/nesquena/hermes-webui.git
+          git fetch upstream master --tags --prune
+
+      - name: Pick next un-merged upstream tag
+        id: pick
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.target_tag }}" ]; then
+            TAG="${{ inputs.target_tag }}"
+            echo "Using user-specified tag: $TAG"
+          else
+            TAG=$(git tag --no-merged master --list 'v*' --sort=v:refname | head -n1 || true)
+            echo "Next un-merged tag: ${TAG:-<none>}"
+          fi
+          if [ -z "$TAG" ]; then
+            echo "No upstream tags to merge. Exiting cleanly."
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! git rev-parse "$TAG^{commit}" >/dev/null 2>&1; then
+            echo "::error ::Tag $TAG not found after fetch"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "branch=sync/upstream-$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Bail if no tag to sync
+        if: steps.pick.outputs.tag == ''
+        run: echo "Nothing to sync — fork is already up to date."
+
+      - name: Check for existing sync branch on origin
+        if: steps.pick.outputs.tag != ''
+        id: branch_check
+        run: |
+          set -euo pipefail
+          BRANCH="${{ steps.pick.outputs.branch }}"
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            echo "::notice ::Sync branch $BRANCH already exists on origin — skipping. Resolve or delete that branch first."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create sync branch and merge
+        if: steps.pick.outputs.tag != '' && steps.branch_check.outputs.skip != 'true'
+        id: merge
+        run: |
+          set +e
+          BRANCH="${{ steps.pick.outputs.branch }}"
+          TAG="${{ steps.pick.outputs.tag }}"
+          git checkout -b "$BRANCH"
+          git merge --no-ff --no-edit "$TAG"
+          STATUS=$?
+          if [ $STATUS -ne 0 ]; then
+            echo "Merge produced conflicts."
+            CONFLICTS=$(git diff --name-only --diff-filter=U | tr '\n' ',' | sed 's/,$//')
+            echo "conflicts=$CONFLICTS" >> "$GITHUB_OUTPUT"
+            git add -A
+            git commit -m "merge upstream $TAG (conflicts unresolved)"
+            echo "merge_status=conflict" >> "$GITHUB_OUTPUT"
+          else
+            echo "merge_status=clean" >> "$GITHUB_OUTPUT"
+          fi
+          exit 0
+
+      - name: Set up Python (only if merge applied cleanly)
+        if: steps.merge.outputs.merge_status == 'clean'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Run tests
+        if: steps.merge.outputs.merge_status == 'clean'
+        id: tests
+        run: |
+          set +e
+          python -m pip install --upgrade pip
+          pip install pyyaml>=6.0 pytest pytest-timeout
+          pytest tests/ -q --timeout=60
+          echo "tests_status=$?" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Push sync branch
+        if: steps.pick.outputs.tag != '' && steps.branch_check.outputs.skip != 'true'
+        run: |
+          git push -u origin "${{ steps.pick.outputs.branch }}"
+
+      - name: Open PR
+        if: steps.pick.outputs.tag != '' && steps.branch_check.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_TAG: ${{ steps.pick.outputs.tag }}
+          PR_BRANCH: ${{ steps.pick.outputs.branch }}
+          PR_MERGE_STATUS: ${{ steps.merge.outputs.merge_status }}
+          PR_TESTS_STATUS: ${{ steps.tests.outputs.tests_status || 'skipped' }}
+          PR_CONFLICTS: ${{ steps.merge.outputs.conflicts }}
+        run: |
+          set -euo pipefail
+          if [ "$PR_MERGE_STATUS" = "clean" ] && [ "$PR_TESTS_STATUS" = "0" ]; then
+            DRAFT_FLAG=""
+            TITLE="sync: upstream $PR_TAG"
+            STATE_HEADER="**Clean merge, tests green.** Ready for review."
+            REASON=""
+          else
+            DRAFT_FLAG="--draft"
+            TITLE="sync: upstream $PR_TAG (needs review)"
+            STATE_HEADER="**Needs human review.**"
+            REASON=""
+            if [ "$PR_MERGE_STATUS" = "conflict" ]; then
+              REASON="${REASON}\n- Conflicts in: ${PR_CONFLICTS}"
+            fi
+            if [ "$PR_TESTS_STATUS" != "0" ] && [ "$PR_TESTS_STATUS" != "skipped" ]; then
+              REASON="${REASON}\n- pytest exited with status ${PR_TESTS_STATUS}"
+            fi
+          fi
+
+          gh label create sync-upstream \
+            --description 'PRs from .github/workflows/sync-upstream.yml' \
+            --color 5319E7 2>/dev/null || true
+
+          {
+            printf 'Auto-generated by `.github/workflows/sync-upstream.yml`.\n\n'
+            printf 'Merging upstream tag **%s** from `nesquena/hermes-webui` into `master`.\n\n' "$PR_TAG"
+            printf '%s' "$STATE_HEADER"
+            printf '%b\n\n' "$REASON"
+            printf 'See `CLAUDE.md` → *Syncing with upstream* for the conflict playbook.\n\n'
+            printf '### Validation\n'
+            printf -- '- Merge: `%s`\n' "$PR_MERGE_STATUS"
+            printf -- '- Tests: `%s` (0 = pass; `skipped` = not run because merge had conflicts)\n\n' "$PR_TESTS_STATUS"
+            printf '### Next step\n'
+            printf -- '- Squash-merge is **forbidden** — keep the merge commit so future syncs see the correct merge-base.\n'
+            printf -- '- After merge, the next workflow run will pick up the tag after `%s`.\n' "$PR_TAG"
+          } > /tmp/pr-body.md
+
+          gh pr create \
+            --base master \
+            --head "$PR_BRANCH" \
+            --title "$TITLE" \
+            --body-file /tmp/pr-body.md \
+            --label sync-upstream \
+            $DRAFT_FLAG
