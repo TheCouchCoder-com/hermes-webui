@@ -67,6 +67,31 @@ def test_kanban_stale_client_error_renders_hard_refresh_escape_hatch():
     assert "window.location.reload()" in PANELS
 
 
+def test_inner_handler_bad_response_does_not_emit_double_404(monkeypatch):
+    """Regression: when the kanban bridge already sent a response via bad()
+    (returns None), the unknown-endpoint wrapper must not concatenate a second
+    404 body on the wire. Only an explicit `False` from the bridge means the
+    path was unmatched.
+    """
+    from api import kanban_bridge
+
+    # Force the task-log payload helper to report "not found" so the bridge
+    # calls bad() and returns None.
+    monkeypatch.setattr(kanban_bridge, "_task_log_payload", lambda *a, **kw: None)
+
+    handler = _FakeHandler()
+    handled = routes.handle_get(handler, urlparse("/api/kanban/tasks/abc/log"))
+
+    assert handled is True
+    assert handler.status == 404
+    body = handler.wfile.getvalue().decode("utf-8")
+    # Exactly one JSON object should have been written. Two concatenated
+    # objects would produce something like `}{` between them.
+    assert body.count("}{") == 0, f"double response detected: {body!r}"
+    payload = json.loads(body)
+    assert payload["error"] == "task not found"
+
+
 def test_kanban_load_resolves_board_before_board_scoped_requests():
     boards_pos = PANELS.find("await loadKanbanBoards();")
     config_pos = PANELS.find("api('/api/kanban/config' + _kanbanBoardQuery())")

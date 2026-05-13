@@ -4,6 +4,43 @@
 > Entries below this notice document upstream releases and were not written by the fork maintainers.
 > Fork-specific changes will be added above this notice as they ship.
 
+## [v0.51.21] — 2026-05-07 — 3-PR batch (P0 hotfix + auto-compression UI + shell route HTML fallback)
+
+### Fixed (3 PRs)
+
+- **PR #1843** by @nesquena — **P0 hotfix**: Avoid double-404 response when Kanban bridge already sent error. Fixes a wire-protocol bug shipped in v0.51.20 #1828 where the new `_kanban_unknown_endpoint` wrapper double-sent a 404 response whenever the inner bridge handler returned `None` (which happens after `bad(...)` calls). Result: concatenated JSON bodies on the wire like `{"error":"task not found"}{"error":"unknown Kanban endpoint: GET ..."}`. Affected every `bad(...)`-returning path in the bridge — task not-found, ImportError 503, LookupError 404, ValueError 400, RuntimeError 409, plus SSE board-resolution failures.
+
+  Fix: in `handle_get/post/patch/delete` (4 call sites), only call `_kanban_unknown_endpoint` when the bridge returned an explicit `False` (truly unmatched). `None` means a response was already sent. New regression test `test_inner_handler_bad_response_does_not_emit_double_404` monkey-patches `_task_log_payload` to force `bad()` and asserts `body.count("}{") == 0`.
+
+  `api/routes.py +20/-12`, 25 LOC test added.
+
+- **PR #1838** by @Michaelyklam — Show auto-compression running state (closes #1832). Bridges Hermes Agent's lifecycle compression status into a WebUI SSE `compressing` event so users see context auto-compression as actively running instead of silently waiting through the LLM summarization pause. Three layers:
+  - `api/streaming.py +27` — new `_agent_status_callback(kind, message)` closure converts agent lifecycle messages matching `'preflight compression'`, `'compressing'`, `'compacting context'`, or `'context too large'` into a `put('compressing', {session_id, message})` SSE event. Wired through fresh-agent (`_agent_kwargs['status_callback']`) and cached-agent reuse (`agent.status_callback = ...`) paths, both gated on `'status_callback' in _agent_params` and `hasattr(agent, 'status_callback')` for backward compatibility with older agent builds.
+  - `static/messages.js +18` — new `source.addEventListener('compressing', ...)` listener mirrors the existing `compressed` listener's session-active gate (returns early if `S.session.session_id !== activeSid` AND if `d.session_id && d.session_id !== activeSid`). Calls `setCompressionUi({phase:'running', automatic:true, ...})` when active.
+  - `tests/test_auto_compression_card.py +50` — three new source-regression tests pinning the listener block, the agent-side bridge predicates, and the listener ordering invariant (`compressing` must precede `compressed` so running phase transitions cleanly to done).
+
+- **PR #1836** by @Michaelyklam — Keep shell route errors HTML (closes #1835). Defense-in-depth fix for restart/update race where the WebUI shell route `/`, `/index.html`, or `/session/...` could bubble an exception out and render a JSON error page. PR wraps the shell-route block in `api/routes.py:handle_get` with a narrow `try/except Exception`, and on failure calls a new `_serve_shell_unavailable()` that returns a minimal `text/html; charset=utf-8` 503 page with `Cache-Control: no-store`. API routes still keep their normal JSON error behavior — only the shell-route block is wrapped. `api/routes.py +34`, 58 LOC test (`test_home_route_internal_error_returns_html_503_not_json` monkey-patches `_INDEX_HTML_PATH` with a broken read, asserts HTML 503 not JSON), 1 PR-media PNG.
+
+### Opus-applied fixes (absorbed in-release)
+
+**From stage-315 absorption pre-release Opus pass:**
+
+- `api/kanban_bridge.py` — Documented `handle_kanban_get`/`handle_kanban_post`/`handle_kanban_patch`/`handle_kanban_delete` three-valued return contract. After PR #1843 made the `False`-vs-`None` distinction load-bearing for the caller's `_kanban_unknown_endpoint` decision, the four entry points still declared `-> bool` while actually returning `True | None | False`. Updated type annotations to `bool | None` and added a docstring on `handle_kanban_get` (with cross-references on the three siblings) so a future contributor adding a new return path can't accidentally produce a `0`/`''` value that would silently revert the double-404 fix. Per Opus pre-release verdict; production behavior unchanged.
+
+### Tests
+
+4805 → **4810 collected** (+5). 4799 passed, 8 skipped (sprint3 prong-2 + QA gating + 2 dev-only spawn from v0.51.15), 1 xfailed, 2 xpassed, 0 failed in 148.5s. JS syntax check 1/1 modified file green (`node -c static/messages.js`). Browser API harness 11/11 endpoints green.
+
+### Pre-release verification
+
+- All 3 PRs CI-green individually
+- File overlap on `api/routes.py` between #1843 (Kanban routes) and #1836 (shell route) resolved cleanly via stage-HEAD rebase — disjoint line ranges (~2629/3429/4607/4621 vs ~2496-2535)
+- Pre-stamp re-fetch: all 3 PR heads still match local rebases (no mid-sweep force-pushes)
+- Opus advisor: SHIP verdict, 1 absorbed in-release (return-type annotation + docstring contract), 1 deferred to follow-up issue (parametrize PR #1843's regression test across GET/POST/PATCH/DELETE for defense-in-depth)
+- No file deletions, no merge-conflict markers, no Python/JS syntax errors
+
+Closes #1832, #1835. Hotfix for v0.51.20 #1828 wire-protocol regression.
+
 ## [v0.51.20] — 2026-05-07 — 5-PR contributor follow-on batch (with parallel-discovery resolution)
 
 ### Fixed (5 contributor PRs)

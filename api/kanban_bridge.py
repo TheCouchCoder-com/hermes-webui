@@ -1072,7 +1072,20 @@ def _handle_events_sse_stream(handler, parsed):
         return True
 
 
-def handle_kanban_get(handler, parsed) -> bool:
+def handle_kanban_get(handler, parsed) -> bool | None:
+    """Dispatch a Kanban GET. Three-valued return:
+
+    - ``False`` — no Kanban path matched; caller should emit a 404
+      (``_kanban_unknown_endpoint``) for genuinely stale-bundle requests.
+    - ``None`` — a path matched and the inner handler already sent a
+      response via ``bad(...)`` / ``j(...)`` (which both return ``None``).
+      The caller MUST NOT emit another response.
+    - ``True`` — a path matched and the inner handler succeeded.
+
+    Treat any falsy-but-not-False return (``0``, ``''``, etc.) as a bug and
+    audit the new return path; the caller uses ``is False`` identity check
+    to distinguish unmatched paths from already-responded paths (#1843).
+    """
     path = parsed.path
     try:
         # Multi-board management endpoints — these do NOT take a board arg
@@ -1122,7 +1135,9 @@ def handle_kanban_get(handler, parsed) -> bool:
         return bad(handler, str(exc), status=409)
 
 
-def handle_kanban_post(handler, parsed, body) -> bool:
+def handle_kanban_post(handler, parsed, body) -> bool | None:
+    """Dispatch a Kanban POST. See ``handle_kanban_get`` for the
+    three-valued ``True | None | False`` contract (#1843)."""
     path = parsed.path
     try:
         # Multi-board management endpoints — `_create_board_payload` and
@@ -1173,7 +1188,9 @@ def handle_kanban_post(handler, parsed, body) -> bool:
     return False
 
 
-def handle_kanban_patch(handler, parsed, body) -> bool:
+def handle_kanban_patch(handler, parsed, body) -> bool | None:
+    """Dispatch a Kanban PATCH. See ``handle_kanban_get`` for the
+    three-valued ``True | None | False`` contract (#1843)."""
     path = parsed.path
     try:
         # /boards/<slug> routes operate on the on-disk board collection
@@ -1209,7 +1226,9 @@ def handle_kanban_patch(handler, parsed, body) -> bool:
     return False
 
 
-def handle_kanban_delete(handler, parsed, body) -> bool:
+def handle_kanban_delete(handler, parsed, body) -> bool | None:
+    """Dispatch a Kanban DELETE. See ``handle_kanban_get`` for the
+    three-valued ``True | None | False`` contract (#1843)."""
     path = parsed.path
     try:
         # Same routing reorder as PATCH: /boards/<slug> path-routed first,
