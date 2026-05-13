@@ -3580,6 +3580,10 @@ def handle_get(handler, parsed) -> bool:
             return bad(handler, "Session not found", 404)
         return j(handler, report)
 
+    if parsed.path == "/api/session/recovery/audit":
+        from api.session_recovery import audit_session_recovery
+        return j(handler, audit_session_recovery(SESSION_DIR, state_db_path=_active_state_db_path()))
+
     if parsed.path == "/api/session/status":
         sid = parse_qs(parsed.query).get("session_id", [""])[0]
         if not sid:
@@ -4160,6 +4164,11 @@ def handle_post(handler, parsed) -> bool:
         if diag:
             diag.finish()
         raise
+
+    if parsed.path == "/api/session/recovery/repair-safe":
+        from api.session_recovery import repair_safe_session_recovery
+        result = repair_safe_session_recovery(SESSION_DIR, state_db_path=_active_state_db_path())
+        return j(handler, result, status=200 if result.get("ok") else 409)
 
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_post
@@ -5996,6 +6005,8 @@ def _handle_media(handler, parsed):
     - Only image MIME types are served inline; all others force download
     - SVG always served as attachment (XSS risk)
     - No path traversal: resolved path must stay within an allowed root
+    - Additional roots can be added via MEDIA_ALLOWED_ROOTS env var
+      (colon-separated list of absolute paths)
     """
     import os as _os
     from api.auth import is_auth_enabled, parse_cookie, verify_session
@@ -6039,6 +6050,21 @@ def _handle_media(handler, parsed):
             allowed_roots.append(ws)
     except Exception:
         pass
+
+    # Also allow additional roots from MEDIA_ALLOWED_ROOTS env var
+    # (colon-separated list of absolute paths, e.g. /home/user/models:/home/user/Pictures)
+    extra_roots = _os.environ.get("MEDIA_ALLOWED_ROOTS", "").strip()
+    if extra_roots:
+        for root in extra_roots.split(":"):
+            root = root.strip()
+            if root:
+                try:
+                    rp = Path(root).resolve()
+                    if rp.is_dir():
+                        allowed_roots.append(rp)
+                except Exception:
+                    pass
+
     within_allowed = any(
         _os.path.commonpath([str(target), str(root)]) == str(root)
         for root in allowed_roots

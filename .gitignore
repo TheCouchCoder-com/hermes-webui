@@ -39,6 +39,8 @@ Thumbs.db
 docs/*
 !docs/ui-ux/
 !docs/ui-ux/**
+!docs/rfcs/
+!docs/rfcs/**
 !docs/docker.md
 !docs/supervisor.md
 !docs/troubleshooting.md

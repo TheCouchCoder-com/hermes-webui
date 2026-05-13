@@ -12,6 +12,32 @@
 
 ## [Unreleased]
 
+## [v0.51.42] — 2026-05-11 — Release R (5-PR contributor batch — session recovery state.db reconciliation + RFC convention + MEDIA_ALLOWED_ROOTS + Slack cron delivery)
+
+### Added
+
+- **PR #2040** by @ai-ag2026 — Read-only `GET /api/session/recovery/audit` endpoint that returns the existing audit report (live + `.bak` + `state.db` cross-check) over HTTP, and `POST /api/session/recovery/repair-safe` that runs the same deterministic repairs as startup recovery (`recover_all_sessions_on_startup`) and returns before/after audit evidence. The POST returns `409` when repairable/unsafe findings remain rather than reporting `ok` for an incomplete repair. Both routes inherit the global `check_auth()` gate at `server.py:133`. CLI parity: `python -m api.session_recovery --repair-safe` for operators on the box without HTTP access.
+
+- **PR #2041** by @ai-ag2026 — DB-backed reconciliation for WebUI-origin sessions whose JSON sidecar is missing. When `state.db.sessions` has a `source='webui'` row but `~/.hermes/webui-public/sessions/<sid>.json` is gone (failed save, manual `rm`, restore-from-backup with mismatched dirs), the new `recover_missing_sidecars_from_state_db()` materializes a safe sidecar from the canonical row plus ordered `messages` rows. **Never overwrites an existing sidecar.** Atomic write via per-pid/per-tid `.json.reconcile.tmp.<pid>.<tid>` + `os.link()` create-or-fail (closes the TOCTOU window against concurrent `Session.save()`; on race-loss the live sidecar wins and reconciliation silently skips). Only `source='webui'` rows are materialized; CLI/messaging/cron rows stay on their existing bridge path. Rows without readable message bodies are skipped (no blank-shell sidecars). Audit reports unrepaired rows as `state_db_missing_sidecar` / `repairable`. Includes a round-trip schema-parity test that loads a materialized sidecar through `Session.load()` to catch future drift between `_state_db_row_to_sidecar()` and `Session.__init__()`.
+
+- **PR #2042** by @ai-ag2026 — Crash-safe turn-journal RFC at `docs/rfcs/turn-journal.md`. Establishes the `docs/rfcs/` convention with a small README explaining when an RFC applies (durability/recovery, schema, new architectural primitives) and the status header format. The RFC itself proposes a JSONL write-ahead log per session that records turn intent before the worker starts, so crash recovery can replace inference-from-fragments with deterministic replay. Status: Proposed; ships as a design document, not as an implementation.
+
+- **PR #2044** by @watzon — `MEDIA_ALLOWED_ROOTS` environment variable extends `/api/media` file-serving whitelist at runtime. The built-in allowed roots (`~/.hermes`, `/tmp`, active workspace) remain the default; setting `MEDIA_ALLOWED_ROOTS=/home/user/models:/home/user/Pictures` (colon-separated absolute paths) appends to the list. Non-existent or invalid entries are silently skipped. Resolves the "local MEDIA: path blocked outside allowed roots" usability gap for power users who keep ComfyUI outputs, model assets, or shared media in custom directories. Path-traversal validation (`Path.resolve()` + `commonpath` containment check) unchanged; SVG-as-attachment guard unchanged; image-MIME inline-only guard unchanged. Static unit test confirms the env var is referenced in source.
+
+- **PR #2045** by @georgebdavis — Slack appears in the cron delivery dropdown alongside Local / Discord / Telegram. The WebUI cron handler at `api/routes.py:7066` passes `body.get("deliver")` straight through to `cron.jobs.create_job`, and hermes-agent already routes `deliver=slack` to the Slack platform adapter — this was a frontend-only gap. First-time contributor.
+
+### Fixed (maintainer follow-up to PR #2041)
+
+- **Concurrency hardening** — Two data-corruption vectors flagged in Opus review of #2041, fixed in the staged release rather than left as follow-up: (1) the `.reconcile.tmp` filename now includes pid+tid (was a fixed path per SID, vulnerable to two-operator interleaved writes corrupting the same tmp); (2) `tmp.replace(target)` swapped for `os.link()` + `unlink(tmp)` so a race with a concurrent `Session.save()` for the same SID can't overwrite a live sidecar (skips with `sidecar_appeared_during_reconcile` instead). Matches the existing `Session.save()` convention at `api/models.py:484`.
+
+### Tests
+
+5108 → **5120 passing, 8 skipped, 1 xfailed, 2 xpassed, 0 regressions** (+12 net passing across new test files for session-recovery-API HTTP-shape contracts, state.db sidecar reconciliation including the round-trip schema-parity guard and the per-pid tmp-suffix guard, and the MEDIA_ALLOWED_ROOTS static reference). Full suite ~161s on Python 3.11 with `HERMES_HOME` isolation.
+
+### Notes
+
+- New convention: `docs/rfcs/` for design documents on durability, recovery, schema, and cross-cutting infrastructure. First entry is the turn-journal RFC from #2042; future contributors are invited to file design proposals there before large changes.
+
 ## [v0.51.41] — 2026-05-11 — Release Q (3-PR contributor batch — session recovery audit + run-lifecycle health + transcript dedup)
 
 ### Fixed
