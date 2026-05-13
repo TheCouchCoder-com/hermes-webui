@@ -11,6 +11,105 @@ const MAX_UPLOAD_MB=Math.round(MAX_UPLOAD_BYTES/1024/1024);
 // single-threaded so only one done event fires at a time in practice.
 let _queueDrainSid=null;
 const $=id=>document.getElementById(id);
+const OFFLINE_RECHECK_MS=2500;
+let _offlineVisible=false;
+let _offlineReason='browser';
+let _offlineProbeTimer=null;
+let _offlineChecking=false;
+let _offlineProbePromise=null;
+let _offlineHealthProbePromise=null;
+let _offlineRawFetch=null;
+let _offlineFetchPatched=false;
+function _browserReportsOnline(){return !('onLine' in navigator)||navigator.onLine!==false;}
+function _offlineHealthUrl(){const url=new URL('health',document.baseURI||location.href);url.searchParams.set('offline_probe',String(Date.now()));return url.href;}
+function _setOfflineChecking(checking){
+  _offlineChecking=!!checking;
+  const btn=$('offlineCheckNow');
+  if(btn){btn.disabled=_offlineChecking;btn.textContent=_offlineChecking?t('offline_checking'):t('offline_check_now');}
+}
+function _renderOfflineBanner(){
+  const banner=$('offlineBanner');
+  if(!banner)return;
+  const detail=$('offlineDetails');
+  if(detail)detail.textContent=t(_offlineReason==='browser'?'offline_browser_detail':'offline_network_detail');
+  const title=$('offlineTitle');
+  if(title)title.textContent=t('offline_title');
+  const auto=$('offlineAutorefresh');
+  if(auto)auto.textContent=t('offline_autorefresh');
+  _setOfflineChecking(_offlineChecking);
+  banner.hidden=false;
+  banner.classList.add('visible');
+}
+function _startOfflineProbeTimer(){
+  if(_offlineProbeTimer)return;
+  _offlineProbeTimer=setInterval(()=>{checkOfflineRecoveryNow();},OFFLINE_RECHECK_MS);
+}
+function _stopOfflineProbeTimer(){
+  if(_offlineProbeTimer){clearInterval(_offlineProbeTimer);_offlineProbeTimer=null;}
+}
+function showOfflineBanner(reason){
+  _offlineVisible=true;
+  _offlineReason=reason||(_browserReportsOnline()?'network':'browser');
+  _renderOfflineBanner();
+  _startOfflineProbeTimer();
+}
+function isOfflineBannerVisible(){return _offlineVisible;}
+function _hideOfflineBanner(){
+  _offlineVisible=false;
+  _stopOfflineProbeTimer();
+  _setOfflineChecking(false);
+  const banner=$('offlineBanner');
+  if(banner){banner.classList.remove('visible');banner.hidden=true;}
+}
+async function _probeOfflineRecovery(){
+  if(_offlineHealthProbePromise)return _offlineHealthProbePromise;
+  _offlineHealthProbePromise=(async()=>{
+    const fetcher=_offlineRawFetch||window.fetch.bind(window);
+    try{
+      const res=await fetcher(_offlineHealthUrl(),{cache:'no-store',credentials:'include'});
+      return !!(res&&res.ok);
+    }catch(_){return false;}
+  })();
+  try{return await _offlineHealthProbePromise;}
+  finally{_offlineHealthProbePromise=null;}
+}
+async function checkOfflineRecoveryNow(){
+  if(_offlineProbePromise)return _offlineProbePromise;
+  _offlineProbePromise=(async()=>{
+    if(!_offlineVisible)return false;
+    if(!_browserReportsOnline()){showOfflineBanner('browser');return false;}
+    _setOfflineChecking(true);
+    const ok=await _probeOfflineRecovery();
+    _setOfflineChecking(false);
+    if(ok){_stopOfflineProbeTimer();window.location.reload();return true;}
+    showOfflineBanner('network');
+    return false;
+  })();
+  try{return await _offlineProbePromise;}
+  finally{_offlineProbePromise=null;}
+}
+function _isAbortError(e){return !!(e&&(e.name==='AbortError'||e.code===20));}
+function _patchOfflineFetch(){
+  if(_offlineFetchPatched||typeof window.fetch!=='function')return;
+  _offlineFetchPatched=true;
+  _offlineRawFetch=window.fetch.bind(window);
+  window.fetch=async function(...args){
+    try{return await _offlineRawFetch(...args);}
+    catch(e){
+      if(!_browserReportsOnline())showOfflineBanner('browser');
+      else if(e instanceof TypeError&&!_isAbortError(e))void _probeOfflineRecovery().then(ok=>{if(!ok)showOfflineBanner('network');});
+      throw e;
+    }
+  };
+}
+function initOfflineMonitor(){
+  _patchOfflineFetch();
+  window.addEventListener('offline',()=>showOfflineBanner('browser'));
+  window.addEventListener('online',()=>{if(_offlineVisible)checkOfflineRecoveryNow();});
+  if(!_browserReportsOnline())showOfflineBanner('browser');
+}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',initOfflineMonitor,{once:true});
+else initOfflineMonitor();
 // Redirect to login when the server responds with 401 (auth session expired).
 // Handles iOS PWA standalone mode and keeps subpath mounts like /hermes/ from
 // escaping to the personal site root /login.
@@ -185,6 +284,9 @@ function _messageRenderableMessageCount(){
 function _messageHiddenBeforeCount(){
   return Math.max(0,_messageRenderableMessageCount()-_currentMessageRenderWindowSize());
 }
+function _isSessionEndlessScrollEnabled(){
+  return window._sessionEndlessScrollEnabled===true;
+}
 function _wireMessageWindowLoadEarlierButton(){
   const indicator=$('loadOlderIndicator');
   if(!indicator) return;
@@ -204,6 +306,48 @@ function _showEarlierRenderedMessages(){
     container.scrollTop=prevScrollTop+(newScrollH-prevScrollH);
   }
   _scrollPinned=false;
+}
+function _isSessionJumpButtonsEnabled(){
+  return window._sessionJumpButtonsEnabled===true;
+}
+function _applySessionNavigationPrefs(){
+  const container=$('messages');
+  if(container) container.classList.toggle('session-nav-enabled',_isSessionJumpButtonsEnabled());
+  _updateSessionStartJumpButton();
+}
+function _updateSessionStartJumpButton(){
+  const btn=$('jumpToSessionStartBtn');
+  const container=$('messages');
+  if(!btn||!container) return;
+  if(!_isSessionJumpButtonsEnabled()){
+    btn.style.display='none';
+    return;
+  }
+  const hasSession=!!(S&&S.session&&S.messages&&S.messages.length);
+  const awayFromStart=container.scrollTop>Math.max(240,container.clientHeight*0.35);
+  const hasScrollableHistory=container.scrollHeight>container.clientHeight+Math.max(240,container.clientHeight*0.35);
+  const canRevealStart=hasScrollableHistory||_messageHiddenBeforeCount()>0||!!(typeof _messagesTruncated!=='undefined'&&_messagesTruncated);
+  btn.style.display=(hasSession&&canRevealStart&&awayFromStart)?'flex':'none';
+}
+async function jumpToSessionStart(){
+  const container=$('messages');
+  if(!container||!S.session) return;
+  _scrollPinned=false;
+  _messageUserUnpinned=true;
+  _programmaticScroll=true;
+  try{
+    if(typeof _ensureAllMessagesLoaded==='function') await _ensureAllMessagesLoaded();
+    _messageRenderWindowSize=Math.max(_currentMessageRenderWindowSize(),_messageRenderableMessageCount());
+    renderMessages({ preserveScroll:true });
+    requestAnimationFrame(()=>{
+      container.scrollTop=0;
+      _updateSessionStartJumpButton();
+      requestAnimationFrame(()=>{ _programmaticScroll=false; });
+    });
+  }catch(e){
+    console.warn('jumpToSessionStart failed:',e);
+    _programmaticScroll=false;
+  }
 }
 
 const DASHBOARD_STATUS_TTL_MS=60000;
@@ -1574,8 +1718,12 @@ if (typeof window !== 'undefined') window._resetScrollDirectionTracker = _resetS
       } // #1360
       const btn=$('scrollToBottomBtn');
       if(btn) btn.style.display=_scrollPinned?'none':'flex';
-      // Load older messages when scrolled near the top
-      if(el.scrollTop<80 && typeof _messagesTruncated!=='undefined' && _messagesTruncated && typeof _loadOlderMessages==='function'){
+      if(typeof _updateSessionStartJumpButton==='function') _updateSessionStartJumpButton();
+      // Prefetch older messages before the reader hits the hard top. Prepending
+      // then preserving scrollTop is seamless only if there is runway left for
+      // the user's continued upward wheel/touch movement.
+      const olderPrefetchPx=Math.max(600,el.clientHeight*1.5);
+      if(_isSessionEndlessScrollEnabled()&&el.scrollTop<olderPrefetchPx && typeof _messagesTruncated!=='undefined' && _messagesTruncated && typeof _loadOlderMessages==='function'){
         _loadOlderMessages();
       }
     });
@@ -1913,6 +2061,7 @@ function scrollToBottom(){
   _settleMessageScrollToBottom(true);
   const btn=$('scrollToBottomBtn');
   if(btn) btn.style.display='none';
+  if(typeof _updateSessionStartJumpButton==='function') _updateSessionStartJumpButton();
 }
 
 function _fmtOllamaLabel(mid){
@@ -4605,6 +4754,7 @@ function renderMessages(options){
       inner.innerHTML=cached.html;
       _sessionHtmlCacheSid=sid;
       _wireMessageWindowLoadEarlierButton();
+      if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
       _scrollAfterMessageRender(preserveScroll);
       requestAnimationFrame(()=>{highlightCode();addCopyButtons();loadDiffInline();loadCsvInline();loadExcalidrawInline();loadPdfInline();loadHtmlInline();renderMermaidBlocks();renderKatexBlocks();});
       requestAnimationFrame(()=>{highlightCode();addCopyButtons();initTreeViews();loadPdfInline();loadHtmlInline();renderMermaidBlocks();renderKatexBlocks();});
@@ -4665,6 +4815,7 @@ function renderMessages(options){
   const renderVisWithIdx=visWithIdx.slice(windowStart);
   const firstRenderedRawIdx=renderVisWithIdx.length?renderVisWithIdx[0].rawIdx:Infinity;
   const hasServerOlder=!!(typeof _messagesTruncated!=='undefined' && _messagesTruncated && S.messages.length>0);
+  if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
   if(hiddenBeforeCount>0 || hasServerOlder){
     const indicator=document.createElement('button');
     indicator.type='button';

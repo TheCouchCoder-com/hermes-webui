@@ -2,7 +2,7 @@
 
 > Web companion to the Hermes Agent CLI. Same workflows, browser-native.
 >
-> Last updated: v0.51.29 (May 8, 2026) — 4960 tests collected — 6-PR Release F batch (Docker hardening + login persistence + scroll/lineage fixes + i18n cleanup)
+> Last updated: v0.51.30 (May 8, 2026) — 4977 tests collected — 3-PR Release G batch (offline recovery + PWA hardening + opt-in session jump buttons + opt-in endless-scroll)
 > Test source: `pytest tests/ --collect-only -q`
 > Per-version detail: see [CHANGELOG.md](./CHANGELOG.md)
 

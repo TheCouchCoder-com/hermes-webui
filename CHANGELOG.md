@@ -10,6 +10,41 @@
 
 ## [v0.51.29] — 2026-05-08 — 6-PR contributor batch (Release F: Docker hardening + login persistence + scroll/lineage fixes + i18n cleanup)
 
+## [v0.51.30] — 2026-05-08 — 3-PR contributor batch (Release G: offline recovery + PWA hardening + opt-in session jump buttons + opt-in endless-scroll)
+
+### Added (3 PRs, all from @ai-ag2026)
+
+- **PR #1891** — Browser offline recovery and PWA cache hardening. Adds an offline/recovery banner that probes `/health` and auto-refreshes when Hermes is reachable again. Defers stream error handling while the browser is offline so reconnecting does not immediately surface a terminal chat error. Makes service-worker shell assets network-first with cache fallback (so local hotfixes are not hidden behind stale cached JS/CSS), while preserving offline-launch capability via `install` pre-caching of SHELL_ASSETS. Keeps PWA/native chrome colors aligned with the dark Hermes background. Stream-error deferral only triggers when the banner is visible OR `navigator.onLine===false` — so Hermes-up + browser-online flows errors through normally; no swallowed auth errors. Supersedes the recovery/PWA portion of #1888.
+
+- **PR #1928** — Opt-in session Start/End jump buttons (`session_jump_buttons` setting, default OFF). Adds an Appearance setting that surfaces a sticky `Start` pill (loads full history and jumps to beginning) and expands the existing scroll-to-bottom button into an `End` pill. Localized text, tooltip, and aria labels for the jump controls. The opt-in default keeps the existing UI unchanged for users who don't want the floating pills.
+
+- **PR #1929** — Opt-in session endless-scroll (`session_endless_scroll` setting, default OFF). Adds automatic prefetching of older transcript pages while scrolling upward (1.5x viewport prefetch window). Builds on #1927's viewport-preservation fix (shipped in v0.51.29) so prepended pages have scroll runway and don't jump. Replaces the previous auto-trigger-at-scrollTop<80 behavior — when the setting is OFF, users get the manual "Load earlier" button path (`_wireMessageWindowLoadEarlierButton`).
+
+### Conflict resolution applied during stage merge
+
+#1928 and #1929 both touch `static/ui.js`, `static/i18n.js`, `static/index.html`, `static/panels.js`, `api/config.py`. Mechanical conflicts (both add new settings keys / locale entries / HTML toggles / accessor branches) were resolved by keeping both — the features are independent opt-in toggles. The `static/ui.js` scroll-listener conflict required an intent-based resolution: #1929 INTENTIONALLY replaces the `el.scrollTop<80` auto-trigger block with the gated prefetch block, so the old block was removed. Test `tests/test_session_endless_scroll.py::test_scroll_listener_prefetches_older_messages_only_when_enabled` enforces this. CHANGELOG conflicts auto-resolved during rebase (took ours strategy).
+
+### Tests
+
+4960 → **4977 collected, 4977 passing, 0 regressions** (+17 net new). Full suite ~140s on Python 3.11 (HERMES_HOME isolated). JS syntax check (`node -c`) clean on all 6 modified `static/*.js` files. Browser API sanity harness (port 8789): all 11 endpoints + 20 QA tests PASS. **Manual browser verification on stage-325 server** (port 8789): both new settings toggles render in the Settings panel; `window._isSessionEndlessScrollEnabled()` correctly reflects toggle state; `_updateSessionStartJumpButton` function is exposed; offline-banner template + "Check now" button present in HTML. Opus advisor: SHIP-WITH-FIXES (one tracked race fast-follow + one i18n polish fast-follow, both non-blockers per Opus's own recommendation "Ship the batch").
+
+### Pre-release verification
+
+- Full pytest under `HERMES_HOME` isolation: **4977 passed, 8 skipped, 1 xfailed, 2 xpassed, 8 subtests passed** in 140.56s.
+- Browser API harness against stage-325 on port 8789: all 11 endpoints + 20 QA tests PASS (111.35s for QA phase).
+- Manual browser verification: stage-325 server up on 8789, navigated to /, verified new toggles render in Settings panel, verified helper functions exposed correctly, verified offline-banner template loaded.
+- `node -c` on all 6 modified `static/*.js` files: clean.
+- Stage diff: 16 files, +649/-30.
+- Opus advisor pass on stage-325 brief: VERDICT=SHIP-WITH-FIXES with explicit "Ship the batch" recommendation. Two fast-follows filed for tracking, neither is blocking.
+- v0.51.29 carry-overs verified preserved (no in-batch changes to `_strip_workspace_prefix`, `evaluate_goal_after_turn`, `_profiles_match`, `mcp_server.py`).
+- Pre-stamp re-fetch of all 3 PR heads: no contributor force-push during Opus window.
+
+### Follow-up items filed (non-blocking)
+
+- **Race between endless-scroll prefetch and Start-jump's `_ensureAllMessagesLoaded`** — with both opt-ins ON, an in-flight prefetch (started by 1.5x-viewport trigger) racing with `jumpToSessionStart` → `_ensureAllMessagesLoaded` could produce duplicate messages if the prefetch resolves last. Narrow window, but the fix is to gate `_ensureAllMessagesLoaded` on the existing `_loadingOlder` flag.
+- **#1928 locale parity** — `session_jump_*` and `settings_*_session_jump_buttons` keys are English literals in ja/ru/es/de/zh/zh-Hant/pt/ko. Default-OFF + English fallback works, but breaks the locale-parity standard set by #1929 and #1891 in the same release.
+
+
 ### Added (1 PR)
 
 - **PR #1919** by @franksong2702 — Persist login rate limit attempts (closes #1910). Stores failed-login buckets in `STATE_DIR/.login_attempts.json` instead of in-process memory, so password-auth deployments keep the same failed-attempt window across restarts. Atomic temp+rename writes, `0600` permissions, prunes expired entries on load. If the file is missing, malformed, or unwritable, the auth path falls back to current in-memory behavior with debug-level logging — no infinite-loop risk.

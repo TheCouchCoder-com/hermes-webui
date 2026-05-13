@@ -1130,10 +1130,17 @@ function _normalizeAppearance(theme,skin){
 // the meta tag.
 function _syncThemeColorMeta(){
   try{
-    const meta=document.getElementById('hermes-theme-color');
-    if(!meta) return;
     const bg=getComputedStyle(document.documentElement).getPropertyValue('--bg').trim();
-    if(bg) meta.setAttribute('content',bg);
+    if(!bg) return;
+    const known=document.getElementById('hermes-theme-color');
+    if(known){
+      known.setAttribute('content',bg);
+      known.removeAttribute('media');
+    }
+    document.querySelectorAll('meta[name="theme-color"]').forEach(meta=>{
+      meta.setAttribute('content',bg);
+      meta.removeAttribute('media');
+    });
   }catch(e){}
 }
 
@@ -1303,11 +1310,13 @@ function applyBotName(){
     window._simplifiedToolCalling=s.simplified_tool_calling!==false;
     window._sidebarDensity=(s.sidebar_density==='detailed'?'detailed':'compact');
     window._busyInputMode=(s.busy_input_mode||'queue');
+    window._sessionEndlessScrollEnabled=!!s.session_endless_scroll;
     window._botName=s.bot_name||'Hermes';
     if(s.default_model) window._defaultModel=s.default_model;
     // Persist default workspace so the blank new-chat page can show it
     // and workspace actions (New file/folder) work before the first session (#804).
     if(s.default_workspace) S._profileDefaultWorkspace=s.default_workspace;
+    window._sessionJumpButtonsEnabled=!!s.session_jump_buttons;
     const appearance=_normalizeAppearance(s.theme,s.skin);
     localStorage.setItem('hermes-theme',appearance.theme);
     _applyTheme(appearance.theme);
@@ -1335,8 +1344,10 @@ function applyBotName(){
     window._notificationsEnabled=false;
     window._showThinking=true;
     window._simplifiedToolCalling=true;
+    window._sessionJumpButtonsEnabled=false;
     window._sidebarDensity='compact';
     window._busyInputMode='queue';
+    window._sessionEndlessScrollEnabled=false;
     window._botName='Hermes';
     _bootSettings={check_for_updates:false};
     if(typeof setLocale==='function'){
