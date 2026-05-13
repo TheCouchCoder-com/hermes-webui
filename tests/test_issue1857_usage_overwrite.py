@@ -3,6 +3,9 @@ import sys
 import types
 from unittest import mock
 
+# Sentinel for sys.modules save/restore — distinguishes "key wasn't there" from None.
+_MISSING = object()
+
 
 def test_stream_completion_overwrites_session_usage_with_latest_turn(cleanup_test_sessions):
     """#1857: completed turns must not add prompt tokens to stale session totals."""
@@ -125,27 +128,40 @@ def test_stream_completion_overwrites_session_usage_with_latest_turn(cleanup_tes
     fake_hermes_state = types.ModuleType("hermes_state")
     fake_hermes_state.SessionDB = mock.Mock(return_value=None)
 
-    with mock.patch.object(streaming, "get_session", return_value=fake_session), \
-         mock.patch.object(streaming, "_get_ai_agent", return_value=UsageAgent), \
-         mock.patch.object(streaming, "resolve_model_provider", return_value=("gpt-5.4", "openai", None)), \
-         mock.patch("api.config.get_config", return_value={}), \
-         mock.patch("api.config._resolve_cli_toolsets", return_value=[]), \
-         mock.patch.dict(
-             sys.modules,
-             {
-                 "hermes_cli": fake_hermes_cli,
-                 "hermes_cli.runtime_provider": fake_runtime_module,
-                 "hermes_state": fake_hermes_state,
-             },
-         ):
-        streaming.STREAMS[fake_stream_id] = fake_queue
-        streaming._run_agent_streaming(
-            session_id=fake_session.session_id,
-            msg_text="new turn",
-            model="gpt-5.4",
-            workspace="/tmp",
-            stream_id=fake_stream_id,
-        )
+    # NOTE: We deliberately avoid mock.patch.dict(sys.modules, ...) here.
+    # patch.dict tracks original keys at __enter__ and on __exit__ DELETES any
+    # keys added during the patch that weren't in the original snapshot. That
+    # silently evicts lazily-imported submodules (e.g. pydantic.root_model)
+    # that other tests rely on, producing KeyError: 'pydantic.root_model' in
+    # downstream tests (notably tests/test_mcp_server.py via fastmcp imports).
+    # Manual save/restore only touches the three keys we explicitly inject.
+    _injected = {
+        "hermes_cli": fake_hermes_cli,
+        "hermes_cli.runtime_provider": fake_runtime_module,
+        "hermes_state": fake_hermes_state,
+    }
+    _saved = {k: sys.modules.get(k, _MISSING) for k in _injected}
+    sys.modules.update(_injected)
+    try:
+        with mock.patch.object(streaming, "get_session", return_value=fake_session), \
+             mock.patch.object(streaming, "_get_ai_agent", return_value=UsageAgent), \
+             mock.patch.object(streaming, "resolve_model_provider", return_value=("gpt-5.4", "openai", None)), \
+             mock.patch("api.config.get_config", return_value={}), \
+             mock.patch("api.config._resolve_cli_toolsets", return_value=[]):
+            streaming.STREAMS[fake_stream_id] = fake_queue
+            streaming._run_agent_streaming(
+                session_id=fake_session.session_id,
+                msg_text="new turn",
+                model="gpt-5.4",
+                workspace="/tmp",
+                stream_id=fake_stream_id,
+            )
+    finally:
+        for k, prev in _saved.items():
+            if prev is _MISSING:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = prev
 
     assert fake_session.input_tokens == 123
     assert fake_session.output_tokens == 45
