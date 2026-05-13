@@ -10,6 +10,29 @@
 
 ## [v0.51.29] — 2026-05-08 — 6-PR contributor batch (Release F: Docker hardening + login persistence + scroll/lineage fixes + i18n cleanup)
 
+## [Unreleased]
+
+## [v0.51.40] — 2026-05-11 — Release P (4-PR contributor batch — quota subprocess hardening + env-lock prewarm + cron one-shot warning + Xiaomi env key)
+
+### Fixed
+
+- **PR #2030** by @Michaelyklam — Hardened the account-usage quota probe subprocess path (#1912 slice 1 of N): added a module-level bounded semaphore to cap concurrent profile-isolated probe children, set `stdin=subprocess.DEVNULL` for the child, and wired `preexec_fn` + `prctl(PR_SET_PDEATHSIG, SIGTERM)` so probe children receive SIGTERM if the WebUI parent dies. Persistent warm worker reuse remains the next follow-up if this slice is not enough under load.
+
+- **PR #2032** by @Michaelyklam — Moved skill-tool imports outside the streaming `_ENV_LOCK` critical section (closes #2024). First-time `tools.skills_tool` / `tools.skill_manager_tool` imports now run via `_prewarm_skill_tool_modules()` before the lock is acquired; the in-lock path uses `sys.modules.get(...)` lookups and existing `HERMES_HOME` / `SKILLS_DIR` attribute patching. Keeps the lock critical section limited to lightweight env/cache mutation so concurrent streams don't wait behind cold import latency. AST/source-level regression test guards against reintroducing in-lock imports.
+
+- **PR #2033** by @franksong2702 — Surfaced one-shot cron schedule semantics in the WebUI Scheduled Jobs form (refs #2031). Hermes Agent treats bare durations/dates (`30m`, `2h`, `2026-05-11T08:00`) as one-shot schedules that get removed after they run; the form now classifies the input and shows a live warning hint pointing users toward `every 30m` or a cron expression for recurring jobs. Static regression coverage for the classifier, warning wiring, i18n keys, and CSS class.
+
+- **PR #2034** by @franksong2702 — Closed the Xiaomi MiMo `XIAOMI_API_KEY` env-detection gap (issue #2025). WebUI now treats Xiaomi like the other API-key providers: exported or `.env`-stored `XIAOMI_API_KEY` enables the Xiaomi model group fallback in `get_available_models()`, Settings provider-key detection via `/api/providers`, and onboarding provider metadata with the direct API base URL. README/CHANGELOG provider notes updated; provider-env scrub lists extended so real local Xiaomi keys don't leak into tests.
+
+### Tests
+
+5082 → **5100 passing, 0 regressions** (+18 net new across the four new test files for #2024 invariant, quota subprocess, cron one-shot warning, and Xiaomi env detection). Full suite under 152s on Python 3.11 with `HERMES_HOME` isolation.
+
+### Notes
+
+- 4 PRs from 3 different authors. `api/providers.py` was touched by #2030 (+110/-7 in quota probe path) and #2034 (+1 in `_PROVIDER_ENV_VAR` map) with disjoint hunks. `CHANGELOG.md` Unreleased section was the only true conflict (#2033 + #2034 both added bullets); resolved by keeping both entries. Stage merge otherwise clean.
+
+
 ## [v0.51.39] — 2026-05-10 — Release O (4-PR contributor batch — Railway docker fix + Stop-button race + provider resolver + live context tracking)
 
 ### Fixed

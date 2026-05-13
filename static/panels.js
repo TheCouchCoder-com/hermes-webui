@@ -232,6 +232,26 @@ function _isRecurringCronJob(job) {
   return kind === 'cron' || kind === 'interval';
 }
 
+function _cronScheduleKindForInput(value) {
+  const schedule = String(value || '').trim();
+  if (!schedule) return '';
+  const lower = schedule.toLowerCase();
+  if (lower.startsWith('every ')) return 'interval';
+  if (lower.startsWith('@')) return 'cron';
+  const parts = schedule.split(/\s+/);
+  if (parts.length >= 5 && parts.slice(0, 5).every(p => /^[\d*\-,/]+$/.test(p))) return 'cron';
+  if (schedule.includes('T') || /^\d{4}-\d{2}-\d{2}/.test(schedule)) return 'once';
+  if (/^\d+\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)$/i.test(schedule)) return 'once';
+  return '';
+}
+
+function _syncCronScheduleWarning() {
+  const input = $('cronFormSchedule');
+  const warning = $('cronFormScheduleOnceWarning');
+  if (!input || !warning) return;
+  warning.style.display = _cronScheduleKindForInput(input.value) === 'once' ? '' : 'none';
+}
+
 function _hasUnlimitedRepeat(job) {
   return !!(job && job.repeat && job.repeat.times == null);
 }
@@ -723,6 +743,7 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, no_agent=fa
           <label for="cronFormSchedule">${esc(t('cron_schedule_label') || 'Schedule')}</label>
           <input type="text" id="cronFormSchedule" value="${esc(schedule || '')}" placeholder="0 9 * * *  —  every 1h  —  @daily" autocomplete="off" required>
           <div class="detail-form-hint">${esc(t('cron_schedule_hint') || "Cron expression or shorthand like 'every 1h'.")}</div>
+          <div id="cronFormScheduleOnceWarning" class="detail-form-warning cron-once-warning" style="display:none">${esc(t('cron_schedule_once_warning') || "Duration forms like '30m' run once and are removed after running. Use 'every 30m' to keep a recurring job.")}</div>
         </div>
         <div class="detail-form-row ${isNoAgent ? 'cron-no-agent-prompt-row' : ''}">
           <label for="cronFormPrompt">${esc(t('cron_prompt_label') || 'Prompt')}</label>
@@ -760,6 +781,12 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, no_agent=fa
   if (empty) empty.style.display = 'none';
   _setCronHeaderButtons(isEdit ? 'edit' : 'create');
   _renderCronSkillTags();
+  const scheduleEl = $('cronFormSchedule');
+  if (scheduleEl) {
+    scheduleEl.addEventListener('input', _syncCronScheduleWarning);
+    scheduleEl.addEventListener('change', _syncCronScheduleWarning);
+    _syncCronScheduleWarning();
+  }
   const focusEl = $('cronFormName');
   if (focusEl) focusEl.focus();
 }

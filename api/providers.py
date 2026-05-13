@@ -10,8 +10,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import signal
 import subprocess
 import sys
+import threading
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -38,6 +40,76 @@ _OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key"
 _PROVIDER_QUOTA_TIMEOUT_SECONDS = 3.0
 _ACCOUNT_USAGE_SUBPROCESS_TIMEOUT_SECONDS = 35.0
 _ACCOUNT_USAGE_PROVIDERS = frozenset({"openai-codex", "anthropic"})
+
+# Upper bound on simultaneous profile-isolated quota probe subprocesses.
+# Each probe runs a Python child for up to 35 s; capping concurrency prevents
+# resource exhaustion when the UI polls all providers rapidly. The limit is
+# deliberately low (2) since _ACCOUNT_USAGE_SUBPROCESS_TIMEOUT_SECONDS is
+# already 35 s and probe I/O is lightweight HTTP calls.
+_MAX_CONCURRENT_ACCOUNT_USAGE_PROBES = 2
+
+# Parent-death-signal setup: on Linux, arrange for the quota-probe child to
+# receive SIGTERM when the WebUI parent dies (e.g. systemctl restart, OOM kill).
+# This prevents probe children from becoming orphaned zombies that continue
+# calling the provider API indefinitely after the WebUI process is gone.
+# We use prctl(PR_SET_DEATHSIG, SIGTERM) which is standard on modern Linux
+# kernels and available via ctypes (no external C extension needed).
+# If prctl is unavailable (non-Linux, or Linux without prctl support), the
+# probe child exits normally when its parent (WebUI) terminates -- on macOS/
+# Windows this is handled by OS-level process tree cleanup.
+# Portable parent-death-signal bootstrap.  On Linux this arranges for the
+# probe child to receive SIGTERM when the WebUI parent dies (systemctl
+# restart, OOM kill, etc.), preventing orphaned zombie probes from continuing
+# to call the provider API indefinitely.  Non-Linux platforms (macOS, Windows)
+# rely on OS-level process-tree cleanup instead; this variable is then unused.
+# prctl(PR_SET_DEATHSIG, SIGTERM) is available via ctypes without any C
+# extension — the same technique used throughout the Hermes codebase.
+_ACCOUNT_USAGE_PARENT_DEATHSIG_BOOTSTRAP = (
+    # fmt: off
+    # Lines are written as string literals so this block passes
+    # `python3 -m py_compile` cleanly and is safe to include verbatim
+    # inside the single argument string passed to `python -c ...`.
+    'import sys\n'
+    'try:\n'
+    '    import ctypes, signal\n'
+    '    libc = ctypes.CDLL(None)\n'
+    '    libc.prctl(1, signal.SIGTERM)   # PR_SET_DEATHSIG=1, SIGTERM=15\n'
+    'except Exception:\n'
+    '    pass\n'
+    # fmt: on
+)
+
+
+# Module-level cap on concurrent quota-probe subprocesses.
+# Lazily created so this module compiles even when threading isn't ready.
+_account_usage_probe_semaphore: threading.BoundedSemaphore | None = None
+
+
+def _get_account_usage_probe_semaphore() -> threading.BoundedSemaphore:
+    global _account_usage_probe_semaphore
+    if _account_usage_probe_semaphore is None:
+        _account_usage_probe_semaphore = threading.BoundedSemaphore(
+            _MAX_CONCURRENT_ACCOUNT_USAGE_PROBES
+        )
+    return _account_usage_probe_semaphore
+
+
+# ── preexec_fn: parent-death signal for the probe subprocess ─────────────────
+# On POSIX/Linux, arrange for the child to receive SIGTERM when the WebUI
+# parent dies (systemctl restart, OOM kill, etc.).  The parent's bootstrap
+# code (_ACCOUNT_USAGE_PARENT_DEATHSIG_BOOTSTRAP) also covers the grandchild
+# fork inside the child, but this preexec_fn handles the direct child-process
+# case.  Returns None on non-POSIX or when prctl is unavailable so that
+# subprocess.run() works on Windows/macOS without changes.
+def _account_usage_preexec_fn() -> None:
+    try:
+        import ctypes
+        libc = ctypes.CDLL(None)
+        libc.prctl(1, signal.SIGTERM)  # PR_SET_PDEATHSIG=1, SIGTERM=15
+    except Exception:
+        pass
+
+
 _ACCOUNT_USAGE_SUBPROCESS_CODE = r"""
 import json
 import sys
@@ -102,6 +174,7 @@ _PROVIDER_ENV_VAR: dict[str, str] = {
     "minimax-cn": "MINIMAX_CN_API_KEY",
     "mistralai": "MISTRAL_API_KEY",
     "x-ai": "XAI_API_KEY",
+    "xiaomi": "XIAOMI_API_KEY",
     "opencode-zen": "OPENCODE_ZEN_API_KEY",
     "opencode-go": "OPENCODE_GO_API_KEY",
     # NOTE: bare "ollama" (local) deliberately omitted — local Ollama is keyless
@@ -533,14 +606,29 @@ def _agent_fetch_account_usage_for_home(provider: str, home: Path, *, api_key: s
         PYTHON_EXE = sys.executable or "python3"
 
     try:
+        # On POSIX (Linux/macOS), wire parent-death signal so the child dies
+        # cleanly if the WebUI parent terminates.  preexec_fn is not safe on
+        # Windows, where OS-level process-tree cleanup handles child orphans.
+        kwargs: dict[str, Any] = {
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "text": True,
+            "timeout": _ACCOUNT_USAGE_SUBPROCESS_TIMEOUT_SECONDS,
+            "check": False,
+        }
+        if hasattr(os, "fork"):  # POSIX
+            kwargs["preexec_fn"] = _account_usage_preexec_fn
+
         proc = subprocess.run(
-            [PYTHON_EXE, "-c", _ACCOUNT_USAGE_SUBPROCESS_CODE, provider, api_key or ""],
+            [
+                PYTHON_EXE, "-c",
+                _ACCOUNT_USAGE_PARENT_DEATHSIG_BOOTSTRAP + _ACCOUNT_USAGE_SUBPROCESS_CODE,
+                provider,
+                api_key or "",
+            ],
             env=_account_usage_subprocess_env(home, provider, api_key),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=_ACCOUNT_USAGE_SUBPROCESS_TIMEOUT_SECONDS,
-            check=False,
+            **kwargs,
         )
     except subprocess.TimeoutExpired:
         logger.debug("Account usage probe for %s timed out", provider)
@@ -561,10 +649,26 @@ def _agent_fetch_account_usage_for_home(provider: str, home: Path, *, api_key: s
 
 
 def _fetch_account_usage_with_profile_context(provider: str) -> Any:
+    """Fetch account usage for a provider within the active profile context.
+
+    Concurrency is capped by the module-level BoundedSemaphore so that rapid
+    UI polls (e.g. Settings page refresh) cannot exhaust file-descriptors or
+    memory by spawning more than _MAX_CONCURRENT_ACCOUNT_USAGE_PROBES probe
+    subprocesses simultaneously.  Each probe runs up to 35 s.
+
+    A warm worker-pool (reuse of persistent subprocess handles) is a natural
+    follow-up if this first slice proves insufficient in production.
+    """
     home = _get_hermes_home()
     api_key = _get_provider_api_key(provider)
+    sem = _get_account_usage_probe_semaphore()
     try:
-        return _agent_fetch_account_usage_for_home(provider, home, api_key=api_key)
+        with sem:
+            return _agent_fetch_account_usage_for_home(
+                provider,
+                home,
+                api_key=api_key,
+            )
     except Exception:
         logger.debug("Failed to fetch account usage for %s", provider, exc_info=True)
         return None

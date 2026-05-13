@@ -40,6 +40,30 @@ from api.metering import meter
 # save/restore around the entire agent run.
 _ENV_LOCK = threading.Lock()
 
+
+def _prewarm_skill_tool_modules():
+    """Import tools.skills_tool and tools.skill_manager_tool outside any lock.
+
+    First-time module imports can trigger heavy initialisation (disk I/O,
+    transitive imports, plugin discovery).  Performing those imports while
+    holding ``_ENV_LOCK`` serialises every concurrent session behind the
+    slowest import.  Prewarming ensures the modules are already in
+    ``sys.modules`` before the lock is acquired, so the lock body only
+    does lightweight attribute patching.
+
+    We cannot place these at module top-level because ``tools.*`` lives
+    in the hermes-agent package which may not be on ``sys.path`` at
+    import time (Docker volume-mount ordering).  A dedicated helper
+    keeps the lazy-import try/except in one place and makes the intent
+    explicit.
+    """
+    for _mod_name in ('tools.skills_tool', 'tools.skill_manager_tool'):
+        try:
+            __import__(_mod_name)
+        except ImportError:
+            pass
+
+
 # Lazy import to avoid circular deps -- hermes-agent is on sys.path via api/config.py
 try:
     from run_agent import AIAgent
@@ -2240,6 +2264,10 @@ def _run_agent_streaming(
             _profile_home,
         )
         _set_thread_env(**_thread_env)
+        # Prewarm skill-tool imports *before* acquiring the lock so that
+        # first-time module initialisation (which can be slow) does not
+        # block other concurrent sessions waiting on _ENV_LOCK (#2024).
+        _prewarm_skill_tool_modules()
         # Still set process-level env as fallback for tools that bypass thread-local
         # Acquire lock only for the env mutation, then release before the agent runs.
         # The finally block re-acquires to restore — keeping critical sections short
@@ -2259,20 +2287,27 @@ def _run_agent_streaming(
                 # Patch module-level caches to match the active profile.
                 # _set_hermes_home() does this for process-wide switches
                 # but per-request switches skip it (#1700).
+                # Modules were prewarmed by _prewarm_skill_tool_modules()
+                # above, so we only do lightweight sys.modules lookups and
+                # attribute assignments here — no first-time import under
+                # the lock (#2024).
                 from pathlib import Path as _P
+                import sys as _sys
                 _ph = _P(_profile_home)
-                try:
-                    import tools.skills_tool as _sk
-                    _sk.HERMES_HOME = _ph
-                    _sk.SKILLS_DIR = _ph / 'skills'
-                except (ImportError, AttributeError):
-                    pass
-                try:
-                    import tools.skill_manager_tool as _sm
-                    _sm.HERMES_HOME = _ph
-                    _sm.SKILLS_DIR = _ph / 'skills'
-                except (ImportError, AttributeError):
-                    pass
+                _sk = _sys.modules.get('tools.skills_tool')
+                if _sk is not None:
+                    try:
+                        _sk.HERMES_HOME = _ph
+                        _sk.SKILLS_DIR = _ph / 'skills'
+                    except AttributeError:
+                        pass
+                _sm = _sys.modules.get('tools.skill_manager_tool')
+                if _sm is not None:
+                    try:
+                        _sm.HERMES_HOME = _ph
+                        _sm.SKILLS_DIR = _ph / 'skills'
+                    except AttributeError:
+                        pass
         # Lock released — agent runs without holding it
         # ── MCP Server Discovery (lazy import, idempotent) ──
         # MUST run AFTER the HERMES_HOME mutation above — `discover_mcp_tools()`
