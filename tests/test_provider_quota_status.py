@@ -541,7 +541,8 @@ def test_provider_quota_route_is_registered():
 def test_provider_quota_card_is_rendered_in_providers_panel():
     """The Providers panel should show active provider quota/status before cards."""
     panels = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
-    assert "api('/api/provider/quota')" in panels
+    assert "_fetchProviderQuotaStatus(false)" in panels
+    assert "'/api/provider/quota'" in panels
     assert "function _buildProviderQuotaCard" in panels
     assert "Active provider quota" in panels
     assert "provider-quota-card" in panels
@@ -549,6 +550,21 @@ def test_provider_quota_card_is_rendered_in_providers_panel():
     assert "remaining_percent" in panels
     assert "provider-quota-details" in panels
     assert "5-hour limit" in panels
+
+
+def test_provider_quota_card_has_manual_refresh_control():
+    """The quota card should let users force an immediate fresh usage lookup."""
+    panels = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+    assert "function _refreshProviderQuota" in panels
+    assert "function _fetchProviderQuotaStatus" in panels
+    assert "refresh=1" in panels
+    assert "cache:'no-store'" in panels
+    assert "data-provider-quota-refresh" in panels
+    assert "Refresh usage" in panels
+    assert "Provider usage refreshed" in panels
+    assert "Provider usage refresh failed" in panels
+    assert "card.isConnected&&button" in panels
+    assert "Last checked" in panels
 
 
 def test_provider_quota_styles_exist():
@@ -562,6 +578,9 @@ def test_provider_quota_styles_exist():
         ".provider-quota-card-invalid_key",
         ".provider-quota-details",
         ".provider-quota-window",
+        ".provider-quota-actions",
+        ".provider-quota-refresh",
+        ".provider-quota-checked",
     ):
         assert token in css
 
