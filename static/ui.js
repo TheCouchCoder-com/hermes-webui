@@ -4054,8 +4054,10 @@ function syncTopbar(){
     if(typeof syncAppTitlebar==='function') syncAppTitlebar();
     // Update profile chip even when no session is active (e.g. right after profile switch).
     // Both #profileChipLabel (composer) and #profileChipTitlebarLabel (titlebar) are kept
-    // in sync via _setProfileChipLabel.
-    _setProfileChipLabel(S.activeProfile||'default');
+    // in sync via _setProfileChipLabel. Guard the call so the test harness in
+    // test_issue1771_session_model_switch_sync.py (which evals syncTopbar alone)
+    // doesn't crash with ReferenceError when the chip helper isn't pulled in.
+    if(typeof _setProfileChipLabel==='function') _setProfileChipLabel(S.activeProfile||'default');
     return;
   }
   const sessionTitle=S.session.title||t('untitled');
@@ -4149,8 +4151,10 @@ function syncTopbar(){
   if(typeof syncWorkspaceDisplays==='function') syncWorkspaceDisplays();
   if(typeof syncTerminalButton==='function') syncTerminalButton();
   // modelSelect already set above
-  // Update profile chip labels (composer + titlebar)
-  _setProfileChipLabel(S.activeProfile||'default');
+  // Update profile chip labels (composer + titlebar); guarded for the same
+  // reason as the no-session branch above (test_issue1771 driver eval'ing
+  // syncTopbar in isolation).
+  if(typeof _setProfileChipLabel==='function') _setProfileChipLabel(S.activeProfile||'default');
 }
 
 function msgContent(m){

@@ -60,7 +60,9 @@ def test_admin_panel_view_div_present():
 def test_admin_buttons_invoke_switch_panel():
     rail_idx = INDEX_HTML.find('id="adminRailBtn"')
     rail_block = INDEX_HTML[rail_idx:INDEX_HTML.find('</button>', rail_idx)]
-    assert "switchPanel('admin')" in rail_block
+    # Upstream v0.51.43 added a 2nd arg `{fromRailClick:true}` to every rail
+    # `switchPanel(...)` call; admin button mirrors that pattern.
+    assert "switchPanel('admin'" in rail_block
 
 
 # ── 2. switchPanel dispatcher ───────────────────────────────────────────────

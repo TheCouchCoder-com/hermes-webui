@@ -178,6 +178,18 @@ def _save_login_attempts_to(path, attempts: dict[str, list[float]]) -> None:
         logger.debug("Failed to persist login attempts to %s: %s", path, e)
 
 
+# Back-compat aliases. Upstream's issue-#1910 tests reference the
+# single-bucket helpers `_load_login_attempts` / `_save_login_attempts`; our
+# fork's _from/_to variants take an explicit path so the IP bucket and the
+# (fork-only) per-username bucket can share the same persistence logic.
+def _load_login_attempts() -> dict[str, list[float]]:
+    return _load_login_attempts_from(_LOGIN_ATTEMPTS_FILE)
+
+
+def _save_login_attempts(attempts: dict[str, list[float]]) -> None:
+    _save_login_attempts_to(_LOGIN_ATTEMPTS_FILE, attempts)
+
+
 _login_attempts = _load_login_attempts_from(_LOGIN_ATTEMPTS_FILE)              # ip -> [timestamp, ...]
 _login_attempts_user = _load_login_attempts_from(_LOGIN_ATTEMPTS_USER_FILE)    # username (lower) -> [timestamp, ...]
 
