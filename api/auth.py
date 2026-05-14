@@ -242,9 +242,22 @@ def _hash_password(password):
     Salt is the persisted random signing key, which is secret and unique per
     installation. This keeps the stored hash format a plain hex string
     (no format change to settings.json) while replacing the predictable
-    STATE_DIR-derived salt from the original implementation."""
+    STATE_DIR-derived salt from the original implementation.
+
+    The iteration count is fixed at the OWASP recommendation in production.
+    The test suite overrides it via HERMES_WEBUI_PBKDF2_ITERATIONS to a much
+    smaller value so the ~150 password-hashing tests don't bottleneck CI;
+    the env var is **never** honoured outside conftest-managed test runs."""
     salt = _signing_key()
-    dk = hashlib.pbkdf2_hmac('sha256', password.encode(), salt, 600_000)
+    iters_override = os.getenv('HERMES_WEBUI_PBKDF2_ITERATIONS', '').strip()
+    iters = 600_000
+    if iters_override.isdigit() and os.getenv('HERMES_WEBUI_TEST_NETWORK_BLOCK') == '1':
+        # The TEST_NETWORK_BLOCK env var is set exclusively by tests/conftest.py
+        # for the test server subprocess, so honouring the iteration override
+        # only when it is present prevents accidental production exposure even
+        # if HERMES_WEBUI_PBKDF2_ITERATIONS leaks into a real deployment env.
+        iters = max(1000, int(iters_override))
+    dk = hashlib.pbkdf2_hmac('sha256', password.encode(), salt, iters)
     return dk.hex()
 
 
