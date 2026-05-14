@@ -77,12 +77,17 @@ os.environ['HERMES_CONFIG_PATH'] = str(TEST_STATE_DIR / 'config.yaml')
 # Speed up PBKDF2 password hashing for the test suite. Production keeps the
 # OWASP-recommended 600k iterations; tests use 1k. ~150 create_user / login
 # tests across the suite were taking 5h+ on GHA runners at the production
-# iteration count. The override is only honoured when HERMES_WEBUI_TEST_NETWORK_BLOCK=1
-# is also set (set unconditionally below for the pytest process, and propagated
-# into the test_server subprocess fixture), so leaking this env var into a real
-# deployment can't weaken hashing.
+# iteration count. The override is only honoured when HERMES_WEBUI_TEST_FAST_HASH=1
+# is also set (owned exclusively by this conftest); leaking
+# HERMES_WEBUI_PBKDF2_ITERATIONS into a real deployment can't weaken hashing
+# without also setting the second flag.
+#
+# Note: this env var must NOT be HERMES_WEBUI_TEST_NETWORK_BLOCK — that one
+# is consumed by server.py at import time to install its own socket blocker,
+# which would clobber the conftest-installed wrapper for any test that does
+# `import server` (test_block_is_active_outside_the_fixture among others).
 os.environ.setdefault('HERMES_WEBUI_PBKDF2_ITERATIONS', '1000')
-os.environ.setdefault('HERMES_WEBUI_TEST_NETWORK_BLOCK', '1')
+os.environ.setdefault('HERMES_WEBUI_TEST_FAST_HASH', '1')
 
 # Transition flag for issue #2: many existing tests construct hermes_profile
 # cookies as bare strings (e.g. 'hermes_profile=work'). Honour the legacy

@@ -263,11 +263,11 @@ def _hash_password(password):
     salt = _signing_key()
     iters_override = os.getenv('HERMES_WEBUI_PBKDF2_ITERATIONS', '').strip()
     iters = 600_000
-    if iters_override.isdigit() and os.getenv('HERMES_WEBUI_TEST_NETWORK_BLOCK') == '1':
-        # The TEST_NETWORK_BLOCK env var is set exclusively by tests/conftest.py
-        # for the test server subprocess, so honouring the iteration override
-        # only when it is present prevents accidental production exposure even
-        # if HERMES_WEBUI_PBKDF2_ITERATIONS leaks into a real deployment env.
+    if iters_override.isdigit() and os.getenv('HERMES_WEBUI_TEST_FAST_HASH') == '1':
+        # The TEST_FAST_HASH flag is set exclusively by tests/conftest.py, so
+        # honouring the iteration override only when it is present prevents
+        # accidental production exposure even if HERMES_WEBUI_PBKDF2_ITERATIONS
+        # leaks into a real deployment env.
         iters = max(1000, int(iters_override))
     dk = hashlib.pbkdf2_hmac('sha256', password.encode(), salt, iters)
     return dk.hex()
