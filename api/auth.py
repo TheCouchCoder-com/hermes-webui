@@ -11,6 +11,7 @@ import logging
 import os
 import secrets
 import tempfile
+import threading
 import time
 
 from api._atomic import atomic_write_json
@@ -178,6 +179,7 @@ def _save_login_attempts_to(path, attempts: dict[str, list[float]]) -> None:
         logger.debug("Failed to persist login attempts to %s: %s", path, e)
 
 
+<<<<<<< HEAD
 # Back-compat aliases. Upstream's issue-#1910 tests reference the
 # single-bucket helpers `_load_login_attempts` / `_save_login_attempts`; our
 # fork's _from/_to variants take an explicit path so the IP bucket and the
@@ -226,36 +228,83 @@ def _record_login_attempt(ip: str, username: str | None = None) -> None:
     if username:
         _login_attempts_user.setdefault(username.lower(), []).append(now)
         _save_login_attempts_to(_LOGIN_ATTEMPTS_USER_FILE, _login_attempts_user)
+=======
+_login_attempts = _load_login_attempts()  # ip -> [timestamp, ...]
+_LOGIN_ATTEMPTS_LOCK = threading.Lock()
 
 
-def _signing_key():
-    """Return a random signing key, generating and persisting one on first call."""
-    key_file = STATE_DIR / '.signing_key'
+def _check_login_rate(ip: str) -> bool:
+    """Return True if the IP is allowed to attempt login (thread-safe)."""
+    with _LOGIN_ATTEMPTS_LOCK:
+        now = time.time()
+        attempts = _login_attempts.get(ip, [])
+        # Prune old attempts
+        attempts = [t for t in attempts if now - t < _LOGIN_WINDOW]
+        if attempts:
+            _login_attempts[ip] = attempts
+        else:
+            _login_attempts.pop(ip, None)
+        _save_login_attempts(_login_attempts)
+        return len(attempts) < _LOGIN_MAX_ATTEMPTS
+
+
+def _record_login_attempt(ip: str) -> None:
+    """Record a login attempt for rate limiting (thread-safe)."""
+    with _LOGIN_ATTEMPTS_LOCK:
+        now = time.time()
+        attempts = _login_attempts.get(ip, [])
+        attempts.append(now)
+        _login_attempts[ip] = attempts
+        _save_login_attempts(_login_attempts)
+>>>>>>> v0.51.57
+
+
+def _load_key(filename: str) -> bytes:
+    """Load a 32-byte key from STATE_DIR, generating and persisting one if missing."""
+    key_file = STATE_DIR / filename
     try:
         if key_file.exists():
             raw = key_file.read_bytes()
             if len(raw) >= 32:
                 return raw[:32]
-    except Exception:
-        logger.debug("Failed to read or access signing key file, using in-memory key")
-    # Generate a new random key
+    except OSError:
+        logger.debug("Failed to read key %s", filename)
     key = secrets.token_bytes(32)
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         key_file.write_bytes(key)
         key_file.chmod(0o600)
-    except Exception:
-        logger.debug("Failed to persist signing key, using in-memory key only")
+    except OSError:
+        logger.debug("Failed to persist key %s", filename)
     return key
 
 
-def _hash_password(password):
+_PBKDF2_KEY_CACHE: bytes | None = None
+_SIGNING_KEY_CACHE: bytes | None = None
+
+
+def _pbkdf2_key() -> bytes:
+    global _PBKDF2_KEY_CACHE
+    if _PBKDF2_KEY_CACHE is None:
+        _PBKDF2_KEY_CACHE = _load_key('.pbkdf2_key')
+    return _PBKDF2_KEY_CACHE
+
+
+def _signing_key() -> bytes:
+    global _SIGNING_KEY_CACHE
+    if _SIGNING_KEY_CACHE is None:
+        _SIGNING_KEY_CACHE = _load_key('.signing_key')
+    return _SIGNING_KEY_CACHE
+
+
+def _hash_password(password, *, salt: bytes | None = None) -> str:
     """PBKDF2-SHA256 with 600k iterations (OWASP recommendation).
-    Salt is the persisted random signing key, which is secret and unique per
+    Salt is the persisted PBKDF2 key, which is secret and unique per
     installation. This keeps the stored hash format a plain hex string
     (no format change to settings.json) while replacing the predictable
     STATE_DIR-derived salt from the original implementation.
 
+<<<<<<< HEAD
     The iteration count is fixed at the OWASP recommendation in production.
     The test suite overrides it via HERMES_WEBUI_PBKDF2_ITERATIONS to a much
     smaller value so the ~150 password-hashing tests don't bottleneck CI;
@@ -270,17 +319,66 @@ def _hash_password(password):
         # leaks into a real deployment env.
         iters = max(1000, int(iters_override))
     dk = hashlib.pbkdf2_hmac('sha256', password.encode(), salt, iters)
+=======
+    The *salt* parameter exists solely to support transparent migration
+    of password hashes that were computed with a different key (e.g. the
+    old `.signing_key`). Normal callers should never pass it.
+    """
+    if salt is None:
+        salt = _pbkdf2_key()
+    dk = hashlib.pbkdf2_hmac('sha256', password.encode(), salt, 600_000)
+>>>>>>> v0.51.57
     return dk.hex()
+
+
+_AUTH_HASH_LOCK = threading.Lock()
+_AUTH_HASH_COMPUTED: bool = False
+_AUTH_HASH_CACHE: str | None = None
+
+
+def _invalidate_password_hash_cache() -> None:
+    """Invalidate the in-process password hash cache so the next call to
+    get_password_hash() re-reads from settings.json or the env var."""
+    global _AUTH_HASH_COMPUTED, _AUTH_HASH_CACHE
+    with _AUTH_HASH_LOCK:
+        _AUTH_HASH_COMPUTED = False
+        _AUTH_HASH_CACHE = None
 
 
 def get_password_hash() -> str | None:
     """Return the active password hash, or None if auth is disabled.
-    Priority: env var > settings.json."""
-    env_pw = os.getenv('HERMES_WEBUI_PASSWORD', '').strip()
-    if env_pw:
-        return _hash_password(env_pw)
-    settings = load_settings()
-    return settings.get('password_hash') or None
+    Priority: env var > settings.json.
+
+    The hash is computed once and cached for the lifetime of the process.
+    PBKDF2-600k takes ~1 s and is called on nearly every HTTP request via
+    check_auth → is_auth_enabled, so caching avoids wasting a full second
+    of CPU per request after the first one.
+
+    Thread-safe: double-checked locking ensures that under a burst of
+    concurrent requests only one thread computes PBKDF2, while the fast
+    path (after initialisation) requires zero locks.
+    """
+    global _AUTH_HASH_COMPUTED, _AUTH_HASH_CACHE
+
+    # Fast path — no lock needed once cache is populated.
+    if _AUTH_HASH_COMPUTED:
+        return _AUTH_HASH_CACHE
+
+    with _AUTH_HASH_LOCK:
+        # Re-check inside lock — another thread may have populated while
+        # we were waiting to acquire.
+        if _AUTH_HASH_COMPUTED:
+            return _AUTH_HASH_CACHE
+
+        env_pw = os.getenv('HERMES_WEBUI_PASSWORD', '').strip()
+        if env_pw:
+            result = _hash_password(env_pw)
+        else:
+            result = load_settings().get('password_hash') or None
+
+        _AUTH_HASH_CACHE = result
+        _AUTH_HASH_COMPUTED = True
+        return result
 
 
 def is_auth_enabled() -> bool:
@@ -295,14 +393,42 @@ def is_auth_enabled() -> bool:
         return False
 
 
+<<<<<<< HEAD
 def verify_password(plain) -> bool:
     """Verify a plaintext password against the legacy single-shared-password
     hash. Used only by the migration path in api.startup; new logins go
     through verify_user_credentials. Removed in commit 9 of issue #2."""
+=======
+def verify_password(plain: str) -> bool:
+    """Verify a plaintext password against the stored hash.
+
+    Supports transparent migration of password hashes that were computed
+    with the old `.signing_key` salt.  When the two keys differ and the
+    legacy-salted hash matches, the password is transparently re-hashed
+    with the current `.pbkdf2_key` and persisted to settings.json.
+    """
+>>>>>>> v0.51.57
     expected = get_password_hash()
     if not expected:
         return False
-    return hmac.compare_digest(_hash_password(plain), expected)
+    # Fast path: current PBKDF2 key
+    if hmac.compare_digest(_hash_password(plain), expected):
+        return True
+    # Migration: some hashes were computed with `.signing_key` before the
+    # PBKDF2 key was separated.  Try the legacy salt; if it matches,
+    # transparently upgrade so the next login uses the fast path.
+    legacy_salt = _signing_key()
+    current_salt = _pbkdf2_key()
+    if legacy_salt != current_salt:
+        if hmac.compare_digest(_hash_password(plain, salt=legacy_salt), expected):
+            from api.config import save_settings
+
+            save_settings({'_set_password': plain})
+            # Password re-hashed and persisted to disk using the current salt.
+            # Cache invalidation is handled by fix 2/3 (#2192) which adds the
+            # _invalidate_password_hash_cache() call inside save_settings().
+            return True
+    return False
 
 
 def verify_user_credentials(username: str, password: str):
@@ -331,7 +457,7 @@ def create_session(user_id: str | None = None) -> str:
     token = secrets.token_hex(32)
     _sessions[token] = {'user_id': user_id, 'expiry': time.time() + _resolve_session_ttl()}
     _save_sessions(_sessions)
-    sig = hmac.new(_signing_key(), token.encode(), hashlib.sha256).hexdigest()[:32]
+    sig = hmac.new(_signing_key(), token.encode(), hashlib.sha256).hexdigest()
     return f"{token}.{sig}"
 
 
@@ -345,7 +471,7 @@ def _prune_expired_sessions():
         _save_sessions(_sessions)
 
 
-def verify_session(cookie_value) -> bool:
+def verify_session(cookie_value: str) -> bool:
     """Verify a signed session cookie. Returns True if valid and not expired."""
     return _session_record_for_cookie(cookie_value) is not None
 
@@ -357,6 +483,7 @@ def _session_record_for_cookie(cookie_value):
         return None
     _prune_expired_sessions()
     token, sig = cookie_value.rsplit('.', 1)
+<<<<<<< HEAD
     expected_sig = hmac.new(_signing_key(), token.encode(), hashlib.sha256).hexdigest()[:32]
     if not hmac.compare_digest(sig, expected_sig):
         return None
@@ -364,6 +491,19 @@ def _session_record_for_cookie(cookie_value):
     if entry is None:
         return None
     if time.time() > _session_expiry(entry):
+=======
+    full_sig = hmac.new(_signing_key(), token.encode(), hashlib.sha256).hexdigest()
+    # Accept both new (64-char) and legacy (32-char truncated) signatures so
+    # existing sessions survive the upgrade without a forced global logout.
+    # The legacy branch can be removed once session TTLs have expired (~30 days).
+    valid = hmac.compare_digest(sig, full_sig) or (
+        len(sig) == 32 and hmac.compare_digest(sig, full_sig[:32])
+    )
+    if not valid:
+        return False
+    expiry = _sessions.get(token)
+    if not expiry or time.time() > expiry:
+>>>>>>> v0.51.57
         _sessions.pop(token, None)
         return None
     return (token, entry)
@@ -585,6 +725,35 @@ def check_auth(handler, parsed) -> bool:
     return False
 
 
+def _is_secure_context(handler=None) -> bool:
+    """Return True if cookies should carry the Secure flag.
+
+    Behaviour is overridable via HERMES_WEBUI_SECURE env var for
+    reverse-proxy setups where TLS terminates at a frontend proxy
+    (nginx, Cloudflare, etc.) and Python only sees plain HTTP.
+    1/true/yes → force Secure on; 0/false/no → force Secure off.
+    When unset, fall back to heuristics: direct TLS socket (getpeercert)
+    or X-Forwarded-Proto header from the request.
+
+    .. warning::
+       The ``X-Forwarded-Proto`` header is only trustworthy when a
+       reverse proxy (nginx, Cloudflare, etc.) is deployed in front
+       of the application.  Without a proxy, any client can forge the
+       header and cause the Secure flag to be set on plain HTTP.
+    """
+    env = os.getenv('HERMES_WEBUI_SECURE', '').strip().lower()
+    if env in ('1', 'true', 'yes'):
+        return True
+    if env in ('0', 'false', 'no'):
+        return False
+    if handler is not None:
+        if getattr(handler.request, 'getpeercert', None) is not None:
+            return True
+        if handler.headers.get('X-Forwarded-Proto', '') == 'https':
+            return True
+    return False
+
+
 def set_auth_cookie(handler, cookie_value) -> None:
     """Set the auth cookie on the response."""
     cookie = http.cookies.SimpleCookie()
@@ -593,8 +762,7 @@ def set_auth_cookie(handler, cookie_value) -> None:
     cookie[COOKIE_NAME]['samesite'] = 'Lax'
     cookie[COOKIE_NAME]['path'] = '/'
     cookie[COOKIE_NAME]['max-age'] = str(_resolve_session_ttl())
-    # Set Secure flag when connection is HTTPS
-    if getattr(handler.request, 'getpeercert', None) is not None or handler.headers.get('X-Forwarded-Proto', '') == 'https':
+    if _is_secure_context(handler):
         cookie[COOKIE_NAME]['secure'] = True
     handler.send_header('Set-Cookie', cookie[COOKIE_NAME].OutputString())
 

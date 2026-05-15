@@ -127,6 +127,9 @@ def _clarify_timeout_seconds(default: int = 120) -> int:
         return default
 
 
+_CANCEL_MARKER_PATTERNS = ('task cancelled', 'task canceled', 'response interrupted')
+
+
 def _classify_provider_error(err_str: str, exc=None, *, silent_failure: bool = False) -> dict:
     """Classify provider/agent failure text for WebUI apperror UX.
 
@@ -136,6 +139,41 @@ def _classify_provider_error(err_str: str, exc=None, *, silent_failure: bool = F
     err_str = str(err_str or '')
     _err_lower = err_str.lower()
     _exc_name = type(exc).__name__ if exc is not None else ''
+    _is_cancelled = (
+        'cancelled by user' in _err_lower
+        or 'canceled by user' in _err_lower
+        or 'user cancelled' in _err_lower
+        or 'user canceled' in _err_lower
+        or 'task cancelled' in _err_lower
+        or 'task canceled' in _err_lower
+        or 'cancellederror' in _err_lower
+        or (exc is not None and _exc_name in ('CancelledError', 'CanceledError'))
+    )
+    _is_interrupted = (
+        not _is_cancelled
+        and (
+            'interrupted by user' in _err_lower
+            or 'response interrupted' in _err_lower
+            or 'operation interrupted' in _err_lower
+            or 'operation was interrupted' in _err_lower
+            or 'operation aborted' in _err_lower
+            or 'request was aborted' in _err_lower
+            or 'aborterror' in _err_lower
+            or (exc is not None and type(exc).__name__ in ('KeyboardInterrupt', 'AbortError'))
+        )
+    )
+    if _is_cancelled:
+        return {
+            'label': 'Task cancelled',
+            'type': 'cancelled',
+            'hint': 'The run was cancelled by the user before Skyly finished. No provider failure occurred.',
+        }
+    if _is_interrupted:
+        return {
+            'label': 'Response interrupted',
+            'type': 'interrupted',
+            'hint': 'The run stopped before a provider response completed. If you did not cancel it, try again.',
+        }
     _is_quota = _is_quota_error_text(err_str)
     _is_auth = (
         not _is_quota and (
@@ -211,6 +249,90 @@ def _provider_error_payload(message: str, err_type: str, hint: str = '') -> dict
         if _details:
             payload['details'] = _details
     return payload
+
+
+def _session_has_cancel_marker(session) -> bool:
+    """Return True if a visible cancel/interrupted marker is already persisted."""
+    for msg in reversed(getattr(session, 'messages', None) or []):
+        if not isinstance(msg, dict):
+            continue
+        if msg.get('role') == 'user':
+            return False
+        if msg.get('role') != 'assistant':
+            continue
+        content = msg.get('content')
+        text = ''
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list):
+            parts = []
+            for part in content:
+                if isinstance(part, dict):
+                    parts.append(str(part.get('text') or part.get('content') or ''))
+            text = '\n'.join(parts)
+        normalized = text.strip().lower()
+        if any(pattern in normalized for pattern in _CANCEL_MARKER_PATTERNS):
+            return True
+    return False
+
+
+def _cancelled_turn_content(message: str = 'Task cancelled.') -> str:
+    """Return cancelled-turn copy matching the verbose provider-error layout."""
+    _message = str(message or 'Task cancelled.').strip()
+    if not _message.endswith('.'):
+        _message += '.'
+    return (
+        f"**Task cancelled:** {_message}\n\n"
+        "*The run was cancelled by the user before Skyly finished. No provider failure occurred.*"
+    )
+
+
+def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.') -> None:
+    """Persist a user-cancelled terminal state without provider-error wording.
+
+    cancel_stream() usually writes this marker first, but the streaming thread can
+    later unwind through the silent-failure or exception path. Those paths must
+    not append a misleading provider no-response error after an explicit cancel.
+    """
+    _materialize_pending_user_turn_before_error(session)
+    session.active_stream_id = None
+    session.pending_user_message = None
+    session.pending_attachments = []
+    session.pending_started_at = None
+    if not _session_has_cancel_marker(session):
+        session.messages.append({
+            'role': 'assistant',
+            'content': _cancelled_turn_content(message),
+            '_error': True,
+            'provider_details': str(message or 'Task cancelled.').strip(),
+            'provider_details_label': 'Cancellation details',
+            'timestamp': int(time.time()),
+        })
+
+
+def _cleanup_ephemeral_cancelled_turn(session) -> None:
+    """Remove transient /btw session state after a cancel without saving it."""
+    session.active_stream_id = None
+    session.pending_user_message = None
+    session.pending_attachments = []
+    session.pending_started_at = None
+    try:
+        import pathlib
+        pathlib.Path(session.path).unlink(missing_ok=True)
+    except Exception:
+        logger.debug("Failed to clean up ephemeral cancelled session", exc_info=True)
+
+
+def _finalize_cancelled_turn(session, *, ephemeral: bool = False, message: str = 'Task cancelled.') -> None:
+    """Finalize a cancelled turn for persistent or ephemeral sessions."""
+    if ephemeral:
+        _cleanup_ephemeral_cancelled_turn(session)
+        return
+    _persist_cancelled_turn(session, message=message)
+    try:
+        session.save()
+    except Exception:
+        logger.debug("Failed to persist cancelled turn", exc_info=True)
 
 
 def _aiagent_import_error_detail() -> str:
@@ -2287,6 +2409,8 @@ def _run_agent_streaming(
         # TD1: set thread-local env context so concurrent sessions don't clobber globals
         # Check for pre-flight cancel (user cancelled before agent even started)
         if cancel_event.is_set():
+            with _agent_lock:
+                _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.')
             put('cancel', {'message': 'Cancelled before start'})
             return
 
@@ -3006,6 +3130,8 @@ def _run_agent_streaming(
                         agent.interrupt("Cancelled before start")
                     except Exception:
                         logger.debug("Failed to interrupt agent before start")
+                    with _agent_lock:
+                        _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.')
                     put('cancel', {'message': 'Cancelled by user'})
                     return
 
@@ -3107,6 +3233,30 @@ def _run_agent_streaming(
                 task_id=session_id,
                 persist_user_message=msg_text,
             )
+            if cancel_event.is_set():
+                if _checkpoint_stop is not None:
+                    _checkpoint_stop.set()
+                if _ckpt_thread is not None:
+                    _ckpt_thread.join(timeout=15)
+                if ephemeral:
+                    _cleanup_ephemeral_cancelled_turn(s)
+                else:
+                    with _agent_lock:
+                        _finalize_cancelled_turn(s, ephemeral=False)
+                        try:
+                            append_turn_journal_event_for_stream(
+                                s.session_id,
+                                stream_id,
+                                {
+                                    "event": "interrupted",
+                                    "created_at": time.time(),
+                                    "reason": "cancelled",
+                                },
+                            )
+                        except Exception:
+                            logger.debug("Failed to append cancelled turn journal event", exc_info=True)
+                put('cancel', {'message': 'Cancelled by user'})
+                return
             # ── Ephemeral mode (/btw): deliver answer, skip persistence, cleanup ──
             if ephemeral:
                 _answer = ''
@@ -3132,6 +3282,23 @@ def _run_agent_streaming(
                 _checkpoint_stop.set()
             if _ckpt_thread is not None:
                 _ckpt_thread.join(timeout=15)
+            if cancel_event.is_set():
+                with _agent_lock:
+                    _finalize_cancelled_turn(s, ephemeral=False)
+                    try:
+                        append_turn_journal_event_for_stream(
+                            s.session_id,
+                            stream_id,
+                            {
+                                "event": "interrupted",
+                                "created_at": time.time(),
+                                "reason": "cancelled",
+                            },
+                        )
+                    except Exception:
+                        logger.debug("Failed to append cancelled turn journal event", exc_info=True)
+                put('cancel', {'message': 'Cancelled by user'})
+                return
             with _agent_lock:
                 if not ephemeral and not _stream_writeback_is_current(s, stream_id):
                     logger.info(
@@ -3142,6 +3309,22 @@ def _run_agent_streaming(
                     )
                     return
                 _result_messages = result.get('messages') or _previous_context_messages
+                if cancel_event.is_set():
+                    _finalize_cancelled_turn(s, ephemeral=False)
+                    try:
+                        append_turn_journal_event_for_stream(
+                            s.session_id,
+                            stream_id,
+                            {
+                                "event": "interrupted",
+                                "created_at": time.time(),
+                                "reason": "cancelled",
+                            },
+                        )
+                    except Exception:
+                        logger.debug("Failed to append cancelled turn journal event", exc_info=True)
+                    put('cancel', {'message': 'Cancelled by user'})
+                    return
                 _next_context_messages = _restore_reasoning_metadata(
                     _previous_context_messages,
                     _result_messages,
@@ -3180,6 +3363,23 @@ def _run_agent_streaming(
                 )
                 # _token_sent tracks whether on_token() was called (any streamed text)
                 if not _assistant_added and not _token_sent:
+                    if cancel_event.is_set():
+                        _finalize_cancelled_turn(s, ephemeral=ephemeral)
+                        if not ephemeral:
+                            try:
+                                append_turn_journal_event_for_stream(
+                                    s.session_id,
+                                    stream_id,
+                                    {
+                                        "event": "interrupted",
+                                        "created_at": time.time(),
+                                        "reason": "cancelled",
+                                    },
+                                )
+                            except Exception:
+                                logger.debug("Failed to append cancelled turn journal event", exc_info=True)
+                        put('cancel', {'message': 'Cancelled by user'})
+                        return
                     _last_err = getattr(agent, '_last_error', None) or result.get('error') or ''
                     _err_str = str(_last_err) if _last_err else ''
                     _classification = _classify_provider_error(
@@ -3331,6 +3531,10 @@ def _run_agent_streaming(
                         }
                         if _error_payload.get('details'):
                             _error_message['provider_details'] = _error_payload['details']
+                        if _err_type == 'cancelled':
+                            _error_message['provider_details_label'] = 'Cancellation details'
+                        elif _err_type == 'interrupted':
+                            _error_message['provider_details_label'] = 'Interruption details'
                         s.messages.append(_error_message)
                         try:
                             s.save()
@@ -3620,7 +3824,39 @@ def _run_agent_streaming(
                             )
                         except Exception:
                             logger.debug("Failed to append assistant_started turn journal event", exc_info=True)
+                if cancel_event.is_set():
+                    _finalize_cancelled_turn(s, ephemeral=False)
+                    try:
+                        append_turn_journal_event_for_stream(
+                            s.session_id,
+                            stream_id,
+                            {
+                                "event": "interrupted",
+                                "created_at": time.time(),
+                                "reason": "cancelled",
+                            },
+                        )
+                    except Exception:
+                        logger.debug("Failed to append cancelled turn journal event", exc_info=True)
+                    put('cancel', {'message': 'Cancelled by user'})
+                    return
                 s.save()
+                if cancel_event.is_set():
+                    _finalize_cancelled_turn(s, ephemeral=False)
+                    try:
+                        append_turn_journal_event_for_stream(
+                            s.session_id,
+                            stream_id,
+                            {
+                                "event": "interrupted",
+                                "created_at": time.time(),
+                                "reason": "cancelled",
+                            },
+                        )
+                    except Exception:
+                        logger.debug("Failed to append cancelled turn journal event", exc_info=True)
+                    put('cancel', {'message': 'Cancelled by user'})
+                    return
                 if not ephemeral:
                     try:
                         append_turn_journal_event_for_stream(
@@ -3877,12 +4113,38 @@ def _run_agent_streaming(
             err_str = _stripped
         _exc_lower = err_str.lower()
         _classification = _classify_provider_error(err_str, e)
+        if cancel_event.is_set():
+            if s is not None:
+                if _checkpoint_stop is not None:
+                    _checkpoint_stop.set()
+                if _ckpt_thread is not None:
+                    _ckpt_thread.join(timeout=15)
+                _lock_ctx = _agent_lock if _agent_lock is not None else contextlib.nullcontext()
+                with _lock_ctx:
+                    _finalize_cancelled_turn(s, ephemeral=ephemeral)
+                    if not ephemeral:
+                        try:
+                            append_turn_journal_event_for_stream(
+                                s.session_id,
+                                stream_id,
+                                {
+                                    "event": "interrupted",
+                                    "created_at": time.time(),
+                                    "reason": "cancelled",
+                                },
+                            )
+                        except Exception:
+                            logger.debug("Failed to append cancelled turn journal event", exc_info=True)
+            put('cancel', {'message': 'Cancelled by user'})
+            return
         _exc_is_quota = _classification['type'] == 'quota_exhausted'
         # Exception quota text still includes: 'more credits' in _exc_lower, 'can only afford' in _exc_lower, 'fewer max_tokens' in _exc_lower.
         # Rate-limit detection remains guarded as: (not _exc_is_quota).
         _exc_is_rate_limit = (_classification['type'] == 'rate_limit') and (not _exc_is_quota)
         _exc_is_auth = _classification['type'] == 'auth_mismatch'  # detects '401' and 'unauthorized' via _classify_provider_error.
         _exc_is_not_found = _classification['type'] == 'model_not_found'  # detects '404', 'not found', 'does not exist', and 'invalid model'.
+        _exc_is_cancelled = _classification['type'] == 'cancelled'
+        _exc_is_interrupted = _classification['type'] == 'interrupted'
 
         # The user hint still points to Settings / `hermes model` from _classify_provider_error().
         if _exc_is_quota:
@@ -3983,6 +4245,10 @@ def _run_agent_streaming(
             _exc_label, _exc_type, _exc_hint = (
                 _classification['label'], _classification['type'], _classification['hint'],
             )
+        elif _exc_is_cancelled or _exc_is_interrupted:
+            _exc_label, _exc_type, _exc_hint = (
+                _classification['label'], _classification['type'], _classification['hint'],
+            )
         else:
             _exc_label, _exc_type, _exc_hint = 'Error', 'error', ''
 
@@ -4018,6 +4284,10 @@ def _run_agent_streaming(
                 }
                 if _error_payload.get('details'):
                     _error_message['provider_details'] = _error_payload['details']
+                if _exc_type == 'cancelled':
+                    _error_message['provider_details_label'] = 'Cancellation details'
+                elif _exc_type == 'interrupted':
+                    _error_message['provider_details_label'] = 'Interruption details'
                 s.messages.append(_error_message)
                 try:
                     s.save()
@@ -4221,13 +4491,12 @@ def cancel_stream(stream_id: str) -> bool:
         except Exception:
             logger.debug("Failed to clear clarify prompt during cancel")
 
-        # Put a cancel sentinel into the queue so the SSE handler wakes up
+        # Capture the queue while the stream still exists, but do not emit the
+        # terminal cancel event until the session cleanup below confirms the turn
+        # is still active. Otherwise a late Stop click can race with a successful
+        # worker save and show cancel in the client while persistence says done.
         q = streams.get(stream_id)
-        if q:
-            try:
-                q.put_nowait(('cancel', {'message': 'Cancelled by user'}))
-            except Exception:
-                logger.debug("Failed to put cancel event to queue")
+        _emit_cancel_event = True
 
         # ── Eager session lock release (fixes #653) ──────────────────────────
         # Pop stream state now so the 409 guard in routes.py sees the session
@@ -4277,13 +4546,21 @@ def cancel_stream(stream_id: str) -> bool:
         with _get_session_agent_lock(_cancel_session_id):
             try:
                 _cs = get_session(_cancel_session_id)
+                if not isinstance(getattr(_cs, 'messages', None), list):
+                    _cs.messages = []
                 if not _stream_writeback_is_current(_cs, stream_id):
+                    # The stream has rotated to a different stream id (newer
+                    # turn started, or the worker already finalized this one).
+                    # Skip the cancel-marker append AND suppress the terminal
+                    # cancel event so we don't contradict a possibly-already-
+                    # delivered done payload (#2151 + #2154 / PR #2136).
                     logger.info(
                         "Skipping stale cancel writeback for session %s stream %s; active_stream_id=%s",
                         _cancel_session_id,
                         stream_id,
                         getattr(_cs, 'active_stream_id', None),
                     )
+                    _emit_cancel_event = False
                     return True
                 # ── Preserve the user's typed message before clearing pending state (#1298) ──
                 # The agent's internal messages list (where the user message was appended at
@@ -4378,7 +4655,35 @@ def cancel_stream(stream_id: str) -> bool:
                 # reasoning-only or tool-only stream produced NO partial message).
                 _has_reasoning = bool(_cancel_reasoning and _cancel_reasoning.strip())
                 _has_tools = bool(_cancel_tool_calls)
-                if _stripped or _has_reasoning or _has_tools:
+                _cancel_marker_exists = _session_has_cancel_marker(_cs)
+                _cancel_marker_idx = len(_cs.messages)
+                if _cancel_marker_exists:
+                    for _idx in range(len(_cs.messages) - 1, -1, -1):
+                        _m = _cs.messages[_idx]
+                        if not isinstance(_m, dict) or _m.get('role') != 'assistant':
+                            continue
+                        _content = str(_m.get('content') or '').strip().lower()
+                        if any(pattern in _content for pattern in _CANCEL_MARKER_PATTERNS):
+                            _cancel_marker_idx = _idx
+                            break
+                _partial_already_present = False
+                if _stripped:
+                    for _m in _cs.messages:
+                        # Stage-350 Opus SHOULD-FIX (#2151): only dedup
+                        # against actual prior _partial markers from the
+                        # same stream, with exact content match. The original
+                        # substring check (`_stripped in _existing or
+                        # _existing in _stripped`) was too broad — any short
+                        # prior assistant reply (e.g. "OK", "Here is the
+                        # answer:") becomes a substring of many later partial
+                        # bodies and could silently drop the new partial,
+                        # resurrecting the #893 data-loss bug on long sessions.
+                        if not isinstance(_m, dict) or not _m.get('_partial'):
+                            continue
+                        if str(_m.get('content') or '').strip() == _stripped:
+                            _partial_already_present = True
+                            break
+                if (_stripped or _has_reasoning or _has_tools) and not _partial_already_present:
                     _partial_msg: dict = {
                         'role': 'assistant',
                         'content': _stripped,  # may be empty for reasoning/tool-only turns
@@ -4405,18 +4710,27 @@ def cancel_stream(stream_id: str) -> bool:
                         # alongside the regular tool_calls path.
                         # (Opus pre-release review pass 2 of v0.50.251.)
                         _partial_msg['_partial_tool_calls'] = list(_cancel_tool_calls)
-                    _cs.messages.append(_partial_msg)
+                    _cs.messages.insert(_cancel_marker_idx, _partial_msg)
                 # Cancel marker — flagged _error=True so it is stripped from conversation
                 # history on the next turn (prevents model from seeing "Task cancelled."
                 # as a prior assistant reply).
-                _cs.messages.append({
-                    'role': 'assistant',
-                    'content': '*Task cancelled.*',
-                    '_error': True,
-                    'timestamp': int(time.time()),
-                })
+                if not _cancel_marker_exists:
+                    _cs.messages.append({
+                        'role': 'assistant',
+                        'content': _cancelled_turn_content('Task cancelled.'),
+                        '_error': True,
+                        'provider_details': 'Task cancelled.',
+                        'provider_details_label': 'Cancellation details',
+                        'timestamp': int(time.time()),
+                    })
                 _cs.save()
             except Exception:
                 logger.debug("Failed to clear session state on cancel for %s", _cancel_session_id)
+
+    if _emit_cancel_event and q:
+        try:
+            q.put_nowait(('cancel', {'message': 'Cancelled by user'}))
+        except Exception:
+            logger.debug("Failed to put cancel event to queue")
 
     return True
