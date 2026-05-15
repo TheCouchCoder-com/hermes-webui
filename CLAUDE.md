@@ -116,12 +116,40 @@ both churn. When resolving:
   upstream's `## [vX.Y.Z]` block above any of our fork-only entries that
   follow it chronologically. Don't drop upstream's release notes.
 
-Files Claude may auto-resolve on a sync PR (with the playbook above):
-`api/auth.py`, `api/routes.py`, `api/helpers.py`, `static/login.js`,
-`static/panels.js`, `static/ui.js`, `static/index.html`,
-`static/boot.js`, `server.py`, `CHANGELOG.md`, `ROADMAP.md`,
-`TESTING.md`. Anything else (tests, workflows, `Dockerfile`, dependency
-files, other docs) requires human review.
+### Auto-resolve tiers
+
+Conflicts on a sync PR fall into three tiers. The sync babysitter (Claude
+routine) follows these rules; humans should follow the same logic.
+
+**Tier 1 — union-both auto-resolve.** Conflicts are almost always
+additive (both sides added different entries to a list, doc, or
+changelog). Generic rule: **keep all lines/entries from both sides,
+preserving order where it matters**. No per-file judgement required.
+
+Files: `.gitignore`, `CHANGELOG.md`, `ROADMAP.md`, `TESTING.md`,
+`README.md`, `docs/**/*.md`.
+
+Exception inside Tier 1: if a Tier 1 file has a *structural* conflict
+(not just additive — e.g. upstream rewrote a section we also rewrote),
+treat it as Tier 3 and escalate.
+
+**Tier 2 — playbook auto-resolve.** Real semantic conflicts where the
+per-file playbook above (hot files: `api/auth.py`, `static/login.js`,
+etc.) tells Claude what to keep. Apply the playbook; validate with
+`pytest`. Files: `api/auth.py`, `api/routes.py`, `api/helpers.py`,
+`static/login.js`, `static/panels.js`, `static/ui.js`,
+`static/index.html`, `static/boot.js`, `server.py`.
+
+**Tier 3 — always escalate.** Files where being wrong is
+shipping-breaking, security-breaking, or self-corrupting. Never
+auto-resolve. Open a PR comment summarizing the conflict and pinging the
+maintainers.
+
+Files: `CLAUDE.md` (load-bearing meta-config — corrupting this corrupts
+all future sync runs), `tests/**`, `.github/workflows/**`, `Dockerfile`,
+`docker-compose*.yml`, `requirements*.txt`, `setup.py`, `pyproject.toml`,
+`.env*`, anything under `secrets/` or matching `*key*`/`*token*`, and
+**any file not explicitly named in Tier 1 or Tier 2**.
 
 ### Validation after a sync merge
 
