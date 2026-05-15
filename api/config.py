@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import queue
+import re
 import sys
 import threading
 import time
@@ -657,6 +658,7 @@ _PROVIDER_DISPLAY = {
     "qwen": "Qwen",
     "x-ai": "xAI",
     "nvidia": "NVIDIA NIM",
+    "xiaomi": "Xiaomi",
 }
 
 # Provider alias → canonical slug.  Users configure providers using the
@@ -707,6 +709,8 @@ _PROVIDER_ALIASES = {
     "nvidia-nim": "nvidia",
     "build-nvidia": "nvidia",
     "nemotron": "nvidia",
+    "mimo": "xiaomi",
+    "xiaomi-mimo": "xiaomi",
     # Legacy alias — earlier WebUI builds wrote ``provider: local`` for unknown
     # loopback endpoints, but ``local`` is not registered in
     # ``hermes_cli.auth.PROVIDER_REGISTRY``. Routing it through ``custom``
@@ -736,6 +740,104 @@ def _resolve_provider_alias(name: str) -> str:
     except Exception:
         pass
     return _PROVIDER_ALIASES.get(raw, name)
+
+
+def _custom_provider_slug_from_name(name: object) -> str:
+    raw = str(name or "").strip().lower()
+    if not raw:
+        return ""
+    if raw.startswith("custom:"):
+        return raw
+    # Keep name-derived custom provider slugs out of the @provider:model colon
+    # grammar. Endpoint-derived slugs may still be custom:<host>:<port>, but a
+    # friendly name like "Local (127.0.0.1:15721)" should not preserve ':'.
+    slug = re.sub(r"[^a-z0-9._-]+", "-", raw).strip("-")
+    slug = re.sub(r"-{2,}", "-", slug)
+    if not slug:
+        return ""
+    return "custom:" + slug
+
+
+def _custom_provider_entries(config_obj: dict | None = None) -> list[dict]:
+    source = config_obj if isinstance(config_obj, dict) else cfg
+    entries = source.get("custom_providers", [])
+    if not isinstance(entries, list):
+        return []
+    return [entry for entry in entries if isinstance(entry, dict)]
+
+
+def _named_custom_provider_slugs(config_obj: dict | None = None) -> set[str]:
+    return {
+        slug
+        for slug in (
+            _custom_provider_slug_from_name(entry.get("name"))
+            for entry in _custom_provider_entries(config_obj)
+        )
+        if slug
+    }
+
+
+def _named_custom_provider_slug_for_provider(
+    provider: object,
+    config_obj: dict | None = None,
+) -> str:
+    raw = str(provider or "").strip().lower()
+    if not raw:
+        return ""
+    raw_suffix = raw.removeprefix("custom:")
+    for entry in _custom_provider_entries(config_obj):
+        entry_name = str(entry.get("name") or "").strip().lower()
+        slug = _custom_provider_slug_from_name(entry_name)
+        if not entry_name or not slug:
+            continue
+        if raw in {entry_name, slug} or raw_suffix == slug.removeprefix("custom:"):
+            return slug
+    return ""
+
+
+def _resolve_configured_provider_id(
+    provider: object,
+    config_obj: dict | None = None,
+    *,
+    base_url: object = None,
+    resolve_alias: bool = True,
+) -> str:
+    """Normalize a configured provider id.
+
+    When ``resolve_alias`` is True (default, used for active-provider /
+    badge surfaces), falls through to ``_resolve_provider_alias`` after the
+    named-custom check. When False (used by ``resolve_model_provider``),
+    preserves the raw provider value so downstream local-server detection
+    (`_LOCAL_SERVER_PROVIDERS` membership in #1625) sees the original name
+    like ``ollama`` / ``lm-studio`` rather than alias-collapsed ``custom`` /
+    ``lmstudio``. The base-url-to-named-slug fallback still runs in both
+    modes when applicable.
+
+    See in-stage absorption note on stage-313 for the #1625 regression that
+    motivated the ``resolve_alias`` flag.
+    """
+    named_slug = _named_custom_provider_slug_for_provider(provider, config_obj)
+    if named_slug:
+        return named_slug
+
+    if not resolve_alias:
+        raw = str(provider or "").strip().lower()
+        if base_url and raw == "custom":
+            by_base_url = _named_custom_provider_slug_for_base_url(base_url, config_obj)
+            if by_base_url:
+                return by_base_url
+        return str(provider or "")
+
+    resolved = _resolve_provider_alias(provider)
+    if (
+        base_url
+        and str(resolved or "").strip().lower() == "custom"
+    ):
+        by_base_url = _named_custom_provider_slug_for_base_url(base_url, config_obj)
+        if by_base_url:
+            return by_base_url
+
+    return resolved
 
 
 def _canonicalise_provider_id(name: object) -> str:
@@ -778,6 +880,34 @@ def _canonicalise_provider_id(name: object) -> str:
     if resolved and resolved.lower() in _PROVIDER_DISPLAY:
         return resolved.lower()
     return raw
+
+
+def _normalize_base_url_for_match(value: object) -> str:
+    url = str(value or "").strip().rstrip("/")
+    if not url:
+        return ""
+    parsed_url = urlparse(url if "://" in url else f"http://{url}")
+    scheme = (parsed_url.scheme or "http").lower()
+    netloc = (parsed_url.netloc or parsed_url.path).lower().rstrip("/")
+    path = parsed_url.path.rstrip("/")
+    if not parsed_url.netloc:
+        path = ""
+    return f"{scheme}://{netloc}{path}"
+
+
+def _named_custom_provider_slug_for_base_url(
+    base_url: object,
+    config_obj: dict | None = None,
+) -> str:
+    target = _normalize_base_url_for_match(base_url)
+    if not target:
+        return ""
+    for entry in _custom_provider_entries(config_obj):
+        entry_base_url = _normalize_base_url_for_match(entry.get("base_url"))
+        if entry_base_url != target:
+            continue
+        return _custom_provider_slug_from_name(entry.get("name")) or "custom"
+    return ""
 
 
 # Well-known models per provider (used to populate dropdown for direct API providers)
@@ -946,6 +1076,14 @@ _PROVIDER_MODELS = {
         {"id": "nvidia/nemotron-3-nano-30b-a3b", "label": "Nemotron 3 Nano 30B"},
         {"id": "nvidia/llama-3.3-nemotron-super-49b-v1.5", "label": "Llama 3.3 Nemotron Super 49B"},
         {"id": "qwen/qwen3-next-80b-a3b-instruct", "label": "Qwen3 Next 80B"},
+    ],
+    # Xiaomi MiMo — direct API via api.xiaomimimo.com
+    "xiaomi": [
+        {"id": "mimo-v2.5-pro",    "label": "MiMo V2.5 Pro"},
+        {"id": "mimo-v2.5",        "label": "MiMo V2.5"},
+        {"id": "mimo-v2-pro",      "label": "MiMo V2 Pro"},
+        {"id": "mimo-v2-omni",     "label": "MiMo V2 Omni"},
+        {"id": "mimo-v2-flash",    "label": "MiMo V2 Flash"},
     ],
     # xAI — prefix used in OpenRouter model IDs (x-ai/grok-4-20)
     "x-ai": [
@@ -1266,6 +1404,20 @@ _LOCAL_SERVER_PROVIDERS = {
 }
 
 
+def _is_local_server_provider(provider_id: str) -> bool:
+    """True when provider_id names a local model server.
+
+    Named custom providers resolve to ``custom:<slug>``. Treat those as local
+    when the bare slug is one of the known local-server provider names too.
+    """
+    provider = str(provider_id or "").strip().lower()
+    if provider in _LOCAL_SERVER_PROVIDERS:
+        return True
+    if provider.startswith("custom:"):
+        return provider.removeprefix("custom:") in _LOCAL_SERVER_PROVIDERS
+    return False
+
+
 def _base_url_points_at_local_server(base_url: str) -> bool:
     """True if base_url's host is a loopback or private IP (likely local server).
 
@@ -1297,6 +1449,71 @@ def _base_url_points_at_local_server(base_url: str) -> bool:
         return False
 
 
+def _custom_slug_rest_looks_like_host_port(rest: str) -> bool:
+    """True when ``custom:<rest>`` is an endpoint-style slug ``host:port``.
+
+    WebUI sometimes derives ``custom:10.8.71.41:8080`` from ``base_url`` authority.
+    The #1776 peel must not treat that middle colon as part of an eaten model
+    segment — otherwise ``@custom:10.8.71.41:8080:Qwen3`` wrongly becomes model
+    ``8080:Qwen3``.
+    """
+    rest = str(rest or "").strip()
+    if ":" not in rest:
+        return False
+    host, port_s = rest.rsplit(":", 1)
+    if not host or ":" in host:
+        return False
+    if not port_s.isdigit():
+        return False
+    try:
+        port_n = int(port_s)
+    except ValueError:
+        return False
+    if not (1 <= port_n <= 65535):
+        return False
+    try:
+        import ipaddress
+
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        pass
+    hl = host.lower()
+    if hl == "localhost":
+        return True
+    # Typical DNS hostname used as proxy slug (contains at least one label dot).
+    if "." in host:
+        return True
+    return False
+
+
+def _get_provider_base_url(provider_id):
+    """Look up the configured base_url for a provider (e.g. lmstudio).
+
+    Checks two locations, in order:
+      1. ``cfg["providers"][<provider_id>]["base_url"]`` — the explicit
+         per-provider override.
+      2. ``cfg["model"]["base_url"]`` — falls back here when
+         ``cfg["model"]["provider"] == provider_id``. This is the historical
+         shape (the model block carries both the active provider AND the
+         base URL for that provider in a single record).
+
+    Returns the URL stripped of trailing ``/`` if configured, otherwise None.
+    """
+    prov_cfg = cfg.get("providers", {}).get(provider_id, {}) or {}
+    explicit = (prov_cfg.get("base_url") or "").strip().rstrip("/")
+    if explicit:
+        return explicit
+    model_cfg = cfg.get("model", {}) or {}
+    if isinstance(model_cfg, dict):
+        model_provider = str(model_cfg.get("provider") or "").strip().lower()
+        if model_provider == str(provider_id).strip().lower():
+            model_base = (model_cfg.get("base_url") or "").strip().rstrip("/")
+            if model_base:
+                return model_base
+    return None
+
+
 def resolve_model_provider(model_id: str) -> tuple:
     """Resolve model name, provider, and base_url for AIAgent.
 
@@ -1322,8 +1539,13 @@ def resolve_model_provider(model_id: str) -> tuple:
     config_base_url = None
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, dict):
-        config_provider = model_cfg.get("provider")
         config_base_url = model_cfg.get("base_url")
+        config_provider = _resolve_configured_provider_id(
+            model_cfg.get("provider"),
+            cfg,
+            base_url=config_base_url,
+            resolve_alias=False,
+        )
 
     # Heal legacy ``provider: local`` entries (written by WebUI < v0.50.252)
     # at read time. ``local`` is not a registered provider, so passing it
@@ -1341,16 +1563,44 @@ def resolve_model_provider(model_id: str) -> tuple:
 
     # Custom providers declared in config.yaml should win over slash-based
     # OpenRouter heuristics. Their model IDs commonly contain '/' too.
-    custom_providers = cfg.get("custom_providers", [])
-    if isinstance(custom_providers, list):
+    # However, when the active provider is an explicit non-custom provider and
+    # the requested model_id is the configured default model, that active
+    # provider takes precedence over overlapping custom_providers[] entries.
+    # Otherwise WebUI routes to custom:<name> instead of the intended endpoint
+    # and can surface a 401 from the wrong provider (#1922).
+    # For all other cases, preserve custom_providers[] routing for explicitly
+    # selected custom provider models.
+    _is_explicit_non_custom_provider = (
+        config_provider is not None
+        and config_provider != 'custom'
+        and not config_provider.startswith('custom:')
+    )
+    _default_model = model_cfg.get('default') if isinstance(model_cfg, dict) else None
+    _skip_custom_providers = (
+        _is_explicit_non_custom_provider
+        and _default_model is not None
+        and model_id == _default_model
+    )
+    custom_providers = cfg.get('custom_providers', [])
+    if isinstance(custom_providers, list) and not _skip_custom_providers:
         for entry in custom_providers:
             if not isinstance(entry, dict):
                 continue
-            entry_model = (entry.get("model") or "").strip()
-            entry_name = (entry.get("name") or "").strip()
-            entry_base_url = (entry.get("base_url") or "").strip()
-            if entry_model and entry_name and model_id == entry_model:
-                provider_hint = "custom:" + entry_name.lower().replace(" ", "-")
+            entry_model = (entry.get('model') or '').strip()
+            entry_name = (entry.get('name') or '').strip()
+            entry_base_url = (entry.get('base_url') or '').strip()
+            entry_model_ids = set()
+            if entry_model:
+                entry_model_ids.add(entry_model)
+            entry_models = entry.get('models')
+            if isinstance(entry_models, dict):
+                entry_model_ids.update(
+                    key.strip()
+                    for key in entry_models.keys()
+                    if isinstance(key, str) and key.strip()
+                )
+            if entry_name and model_id in entry_model_ids:
+                provider_hint = _custom_provider_slug_from_name(entry_name)
                 return model_id, provider_hint, entry_base_url or None
 
     # @provider:model format — explicit provider hint from the dropdown.
@@ -1358,9 +1608,35 @@ def resolve_model_provider(model_id: str) -> tuple:
     # resolve credentials in streaming.py).
     # Use rsplit to handle provider_ids that contain ':' (e.g. custom:my-key).
     # With rsplit, "@custom:my-key:model" → provider="custom:my-key", model="model".
+    # BUT: model IDs that end in :free / :beta / :thinking collide with the
+    # rsplit grammar (e.g. "@openrouter:tencent/hy3-preview:free" would split
+    # into provider="openrouter:tencent/hy3-preview", model="free").  Guard
+    # against that by falling back to split(":") when the rsplit result is not
+    # a recognised provider (#1744).
+    #
+    # Edge case (#1776): for custom providers with the same suffix
+    # ("@custom:my-key:some-model:free"), rsplit yields
+    # provider_hint="custom:my-key:some-model", bare_model="free", and the
+    # custom-prefix guard below skips the split-fallback. Detect the
+    # over-split structurally — custom hints normally carry one slug segment
+    # after ``custom:``. If ``provider_hint`` has extra ``:`` tokens because the
+    # model ID contained tags like ``:free``, peel one segment back (#1776).
+    #
+    # Exception: ``custom:<ip-or-host>:<port>`` is a single logical slug derived
+    # from OpenAI ``base_url`` authority and contains no eaten model segments.
     if model_id.startswith("@") and ":" in model_id:
-        provider_hint, bare_model = model_id[1:].rsplit(":", 1)
-        return bare_model, provider_hint, None
+        inner = model_id[1:]
+        provider_hint, bare_model = inner.rsplit(":", 1)
+        if provider_hint.startswith("custom:") and provider_hint.count(":") >= 2:
+            _slug_rest = provider_hint[len("custom:"):]
+            if not _custom_slug_rest_looks_like_host_port(_slug_rest):
+                provider_hint, extra = provider_hint.rsplit(":", 1)
+                bare_model = f"{extra}:{bare_model}"
+        elif (provider_hint not in _PROVIDER_MODELS
+                and provider_hint not in _PROVIDER_DISPLAY
+                and not provider_hint.startswith("custom:")):
+            provider_hint, bare_model = inner.split(":", 1)
+        return bare_model, provider_hint, _get_provider_base_url(provider_hint)
 
     if "/" in model_id:
         prefix, bare = model_id.split("/", 1)
@@ -1368,20 +1644,21 @@ def resolve_model_provider(model_id: str) -> tuple:
         # anthropic/claude-sonnet-4.6). Never strip the prefix for OpenRouter.
         if config_provider == "openrouter":
             return model_id, "openrouter", config_base_url
+        # Portal providers (Nous, OpenCode, NVIDIA NIM) serve models from multiple
+        # upstream namespaces — check them BEFORE the prefix-strip branch so that
+        # a model id whose prefix happens to equal the config_provider (e.g.
+        # nvidia/nemotron-... on NVIDIA NIM) still keeps the full namespaced path.
+        # The earlier ordering ran this guard AFTER the prefix-strip, so it never
+        # fired in the prefix==config_provider case, causing HTTP 404 from the
+        # portal which requires the full provider/model id (#2177; sibling of
+        # #854 / #894 for Nous, where this guard was originally added).
+        _PORTAL_PROVIDERS = {"nous", "opencode-zen", "opencode-go", "nvidia"}
+        if config_provider in _PORTAL_PROVIDERS:
+            return model_id, config_provider, config_base_url
         # If prefix matches config provider exactly, strip it and use that provider directly.
         # e.g. config=anthropic, model=anthropic/claude-... → bare name to anthropic API
         if config_provider and prefix == config_provider:
             return bare, config_provider, config_base_url
-        # Portal providers (Nous, OpenCode) serve models from multiple upstream
-        # namespaces — check them BEFORE the config_base_url branch so that a
-        # Nous user whose config.yaml also has a base_url doesn't accidentally
-        # fall into the prefix-stripping path (#894: minimax/minimax-m2.7 → bare
-        # name sent to Nous → 404 because Nous requires the full namespace path).
-        # NVIDIA NIM also serves models from multiple namespaces (qwen, nvidia, etc.)
-        # and requires the full model path.
-        _PORTAL_PROVIDERS = {"nous", "opencode-zen", "opencode-go", "nvidia"}
-        if config_provider in _PORTAL_PROVIDERS:
-            return model_id, config_provider, config_base_url
         # The OpenAI Codex provider uses a real base_url, but its default
         # ChatGPT endpoint cannot serve OpenRouter-style provider/model IDs.
         # Keep that narrow exception before the custom endpoint protection so
@@ -1406,7 +1683,7 @@ def resolve_model_provider(model_id: str) -> tuple:
             # default settings, ignoring user-tuned context length / parallel slots.
             # See #1625. Detect either by canonical provider name OR by base_url
             # pointing at a loopback/private host.
-            if (str(config_provider or "").lower() in _LOCAL_SERVER_PROVIDERS
+            if (_is_local_server_provider(config_provider)
                     or _base_url_points_at_local_server(config_base_url)):
                 return model_id, config_provider, config_base_url
             # Only strip the provider prefix when it's a known provider namespace
@@ -1425,6 +1702,102 @@ def resolve_model_provider(model_id: str) -> tuple:
             return model_id, "openrouter", None
 
     return model_id, config_provider, config_base_url
+
+
+def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, str | None]:
+    """Return (api_key, base_url) for a named ``custom:*`` provider.
+
+    Supports ``custom_providers[].api_key`` as either a literal key or
+    ``${ENV_VAR}``, and ``custom_providers[].key_env`` as an env-var hint.
+    Returns ``(None, None)`` when no named custom provider matches.
+    """
+    pid = str(provider_id or "").strip().lower()
+    if not pid.startswith("custom:"):
+        return None, None
+
+    def _slugify(value: str) -> str:
+        s = str(value or "").strip().lower().replace("_", "-").replace(" ", "-")
+        while "--" in s:
+            s = s.replace("--", "-")
+        return s.strip("-")
+
+    slug = _slugify(pid.split(":", 1)[1].strip())
+    if not slug:
+        return None, None
+
+    # Read the live config snapshot to avoid stale module-level cache edge
+    # cases after profile switches or runtime config edits.
+    cfg_data = get_config()
+
+    def _resolve_key(raw_api_key, raw_key_env) -> str | None:
+        api_key = None
+        if raw_api_key is not None:
+            key_text = str(raw_api_key).strip()
+            if key_text.startswith("${") and key_text.endswith("}") and len(key_text) > 3:
+                api_key = os.getenv(key_text[2:-1], "").strip() or None
+            elif key_text:
+                api_key = key_text
+        if not api_key:
+            key_env = str(raw_key_env or "").strip()
+            if key_env:
+                api_key = os.getenv(key_env, "").strip() or None
+        return api_key
+
+    custom_providers = cfg_data.get("custom_providers", [])
+    if not isinstance(custom_providers, list):
+        custom_providers = []
+
+    for entry in custom_providers:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "").strip()
+        if not name:
+            continue
+        entry_slug = _slugify(name)
+        if entry_slug != slug:
+            continue
+
+        base_url = str(entry.get("base_url") or "").strip() or None
+        api_key = _resolve_key(entry.get("api_key"), entry.get("key_env"))
+        return api_key, base_url
+
+    # If exactly one custom provider is configured, use it as a pragmatic
+    # fallback for mismatched slugs (e.g. punctuation differences).
+    if len(custom_providers) == 1 and isinstance(custom_providers[0], dict):
+        entry = custom_providers[0]
+        return (
+            _resolve_key(entry.get("api_key"), entry.get("key_env")),
+            str(entry.get("base_url") or "").strip() or None,
+        )
+
+    # Fallbacks for setups that don't use custom_providers names directly.
+    providers_cfg = cfg_data.get("providers", {})
+    provider_specific = providers_cfg.get(pid, {}) if isinstance(providers_cfg, dict) else {}
+    provider_custom = providers_cfg.get("custom", {}) if isinstance(providers_cfg, dict) else {}
+
+    model_cfg = cfg_data.get("model", {})
+    model_provider = str(model_cfg.get("provider") or "").strip().lower() if isinstance(model_cfg, dict) else ""
+
+    fallback_base = None
+    for candidate in (provider_specific, provider_custom, model_cfg):
+        if isinstance(candidate, dict):
+            _base = str(candidate.get("base_url") or "").strip()
+            if _base:
+                fallback_base = _base
+                break
+
+    fallback_key = None
+    if isinstance(provider_specific, dict):
+        fallback_key = _resolve_key(provider_specific.get("api_key"), provider_specific.get("key_env"))
+    if not fallback_key and isinstance(provider_custom, dict):
+        fallback_key = _resolve_key(provider_custom.get("api_key"), provider_custom.get("key_env"))
+    if not fallback_key and isinstance(model_cfg, dict) and model_provider in {"custom", pid, slug}:
+        fallback_key = _resolve_key(model_cfg.get("api_key"), model_cfg.get("key_env"))
+
+    if fallback_key or fallback_base:
+        return fallback_key, fallback_base or None
+
+    return None, None
 
 
 def model_with_provider_context(model_id: str, model_provider: str | None = None) -> str:
@@ -2271,9 +2644,16 @@ def get_available_models() -> dict:
             if cfg_default:
                 default_model = cfg_default
 
-        # Normalize active_provider to its canonical key
+        # Normalize active_provider to its canonical key.  Named custom
+        # providers are first-class provider ids in WebUI routing; accept the
+        # user-facing name from config.yaml (``provider: ollama-local``) and
+        # route it through the same ``custom:<name>`` slug the picker emits.
         if active_provider:
-            active_provider = _resolve_provider_alias(active_provider)
+            active_provider = _resolve_configured_provider_id(
+                active_provider,
+                cfg,
+                base_url=cfg_base_url,
+            )
 
         # 2. Read auth store (active_provider fallback + credential_pool inspection)
         auth_store = {}
@@ -2284,7 +2664,11 @@ def get_available_models() -> dict:
 
                 auth_store = _j.loads(auth_store_path.read_text(encoding="utf-8"))
                 if not active_provider:
-                    active_provider = _resolve_provider_alias(auth_store.get("active_provider"))
+                    active_provider = _resolve_configured_provider_id(
+                        auth_store.get("active_provider"),
+                        cfg,
+                        base_url=cfg_base_url,
+                    )
             except Exception:
                 logger.debug("Failed to load auth store from %s", auth_store_path)
 
@@ -2412,6 +2796,7 @@ def get_available_models() -> dict:
                 "GLM_API_KEY",
                 "KIMI_API_KEY",
                 "DEEPSEEK_API_KEY",
+                "XIAOMI_API_KEY",
                 "OPENCODE_ZEN_API_KEY",
                 "OPENCODE_GO_API_KEY",
                 "MINIMAX_API_KEY",
@@ -2447,6 +2832,8 @@ def get_available_models() -> dict:
                 detected_providers.add("minimax-cn")
             if all_env.get("DEEPSEEK_API_KEY"):
                 detected_providers.add("deepseek")
+            if all_env.get("XIAOMI_API_KEY"):
+                detected_providers.add("xiaomi")
             if all_env.get("XAI_API_KEY"):
                 detected_providers.add("x-ai")
             if all_env.get("MISTRAL_API_KEY"):
@@ -2455,6 +2842,9 @@ def get_available_models() -> dict:
                 detected_providers.add("opencode-zen")
             if all_env.get("OPENCODE_GO_API_KEY"):
                 detected_providers.add("opencode-go")
+            # LM Studio: detect via LM_API_KEY + LM_BASE_URL in ~/.hermes/.env
+            if all_env.get("LM_API_KEY") and all_env.get("LM_BASE_URL"):
+                detected_providers.add("lmstudio")
 
         # Also detect providers explicitly listed in config.yaml providers section.
         # A user may configure a provider key via config.yaml providers.<name>.api_key
@@ -2475,18 +2865,6 @@ def get_available_models() -> dict:
                 if _canonical in _PROVIDER_MODELS or _canonical in _cfg_providers or _pid_key in _cfg_providers:
                     detected_providers.add(_canonical)
 
-        def _normalize_base_url_for_match(value: object) -> str:
-            url = str(value or "").strip().rstrip("/")
-            if not url:
-                return ""
-            parsed_url = urlparse(url if "://" in url else f"http://{url}")
-            scheme = (parsed_url.scheme or "http").lower()
-            netloc = (parsed_url.netloc or parsed_url.path).lower().rstrip("/")
-            path = parsed_url.path.rstrip("/")
-            if not parsed_url.netloc:
-                path = ""
-            return f"{scheme}://{netloc}{path}"
-
         def _configured_provider_for_base_url(base_url: object) -> str:
             target = _normalize_base_url_for_match(base_url)
             if not target:
@@ -2495,7 +2873,11 @@ def get_available_models() -> dict:
             if isinstance(model_cfg, dict):
                 model_base_url = _normalize_base_url_for_match(model_cfg.get("base_url"))
                 if model_base_url == target:
-                    provider_hint = _resolve_provider_alias(model_cfg.get("provider"))
+                    provider_hint = _resolve_configured_provider_id(
+                        model_cfg.get("provider"),
+                        cfg,
+                        base_url=base_url,
+                    )
                     if provider_hint:
                         return str(provider_hint).strip().lower()
 
@@ -2522,7 +2904,7 @@ def get_available_models() -> dict:
                         continue
                     entry_name = str(entry.get("name") or "").strip()
                     if entry_name:
-                        return "custom:" + entry_name.lower().replace(" ", "-")
+                        return _custom_provider_slug_from_name(entry_name)
                     return "custom"
 
             return ""
@@ -2681,12 +3063,14 @@ def get_available_models() -> dict:
         _custom_providers_cfg = cfg.get("custom_providers", [])
         _named_custom_groups: dict = {}
         if isinstance(_custom_providers_cfg, list):
-            _seen_custom_ids = {m["id"] for m in auto_detected_models}
+            _seen_custom_ids = set()
             for _cp in _custom_providers_cfg:
                 if not isinstance(_cp, dict):
                     continue
                 _cp_name = (_cp.get("name") or "").strip()
-                _slug = ("custom:" + _cp_name.lower().replace(" ", "-")) if _cp_name else None
+                _slug = _custom_provider_slug_from_name(_cp_name) if _cp_name else None
+                if _slug and _slug not in _named_custom_groups:
+                    _named_custom_groups[_slug] = (_cp_name, [])
 
                 # Collect model IDs: singular "model" field first, then "models" dict keys
                 _cp_model_ids: list[str] = []
@@ -2700,12 +3084,11 @@ def get_available_models() -> dict:
                             _cp_model_ids.append(_m_id.strip())
 
                 for _cp_model in _cp_model_ids:
-                    if _cp_model and _cp_model not in _seen_custom_ids:
+                    _dedup_key = f"{_slug}:{_cp_model}" if _slug else _cp_model
+                    if _cp_model and _dedup_key not in _seen_custom_ids:
                         _cp_label = _get_label_for_model(_cp_model, [])
-                        _seen_custom_ids.add(_cp_model)
+                        _seen_custom_ids.add(_dedup_key)
                         if _slug:
-                            if _slug not in _named_custom_groups:
-                                _named_custom_groups[_slug] = (_cp_name, [])
                             detected_providers.add(_slug)
                             _cp_option_id = _cp_model
                             if active_provider != _slug and not _cp_option_id.startswith("@"):
@@ -2730,6 +3113,14 @@ def get_available_models() -> dict:
             )
             if not _has_unnamed:
                 detected_providers.discard("custom")
+
+        _named_custom_slugs = _named_custom_provider_slugs(cfg)
+        _base_matched_named_slug = _named_custom_provider_slug_for_base_url(cfg_base_url, cfg)
+        if _base_matched_named_slug and _named_custom_slugs:
+            for _pid in list(detected_providers):
+                _pid_norm = str(_pid or "").strip().lower()
+                if _pid_norm.startswith("custom:") and _pid_norm not in _named_custom_slugs:
+                    detected_providers.discard(_pid)
 
         # Filter providers if providers.only_configured is set
         providers_cfg = cfg.get("providers", {})
@@ -2767,24 +3158,31 @@ def get_available_models() -> dict:
         # 5. Build model groups
         if detected_providers:
             for pid in sorted(detected_providers):
-                if pid.startswith("custom:") and pid in _named_custom_groups:
-                    _nc_display, _nc_models = _named_custom_groups[pid]
-                    # If all named-group models were deduped (already auto-detected
-                    # from base_url /v1/models), fall back to auto-detected models
-                    # instead of silently dropping the group (issue #1619).
-                    #
-                    # Per Opus advisor on stage-295: the load-bearing fix for the
-                    # reporter's symptom is the api/routes.py:/api/models/live
-                    # broadening to handle custom:* slugs. This block is defensive
-                    # belt-and-braces — under current _named_custom_groups
-                    # population logic (atomic add+append inside the same dedup
-                    # guard at line ~2640), an empty list shouldn't reach here.
-                    # Kept for future-proofing in case the population logic
-                    # changes (e.g. supporting model-less custom_providers entries).
-                    if not _nc_models:
-                        _nc_models = auto_detected_models_by_provider.get(pid, [])
-                    if _nc_models:
-                        groups.append({"provider": _nc_display, "provider_id": pid, "models": _nc_models})
+                # Custom-provider PIDs are populated above via the
+                # _named_custom_groups branch (or skipped intentionally).
+                # They MUST NOT fall through to the auto_detected_models
+                # fallback below, otherwise the active provider's models
+                # get copied into a phantom Custom group with mismatched
+                # provider prefixes (#1881).
+                if pid.startswith("custom:"):
+                    if pid in _named_custom_groups:
+                        _nc_display, _nc_models = _named_custom_groups[pid]
+                        # If all named-group models were deduped (already auto-detected
+                        # from base_url /v1/models), fall back to auto-detected models
+                        # instead of silently dropping the group (issue #1619).
+                        #
+                        # Per Opus advisor on stage-295: the load-bearing fix for the
+                        # reporter's symptom is the api/routes.py:/api/models/live
+                        # broadening to handle custom:* slugs. This block is defensive
+                        # belt-and-braces — under current _named_custom_groups
+                        # population logic (atomic add+append inside the same dedup
+                        # guard at line ~2640), an empty list shouldn't reach here.
+                        # Kept for future-proofing in case the population logic
+                        # changes (e.g. supporting model-less custom_providers entries).
+                        if not _nc_models:
+                            _nc_models = auto_detected_models_by_provider.get(pid, [])
+                        if _nc_models:
+                            groups.append({"provider": _nc_display, "provider_id": pid, "models": _nc_models})
                     continue
                 provider_name = _PROVIDER_DISPLAY.get(pid, pid.title())
                 if pid == "openrouter":
@@ -3033,6 +3431,62 @@ def get_available_models() -> dict:
                         if extras:
                             group_entry["extra_models"] = extras
                         groups.append(group_entry)
+                elif pid == "lmstudio":
+                    # LM Studio is a local server — fetch live loaded models via
+                    # the OpenAI-compatible /v1/models endpoint (#WebUI).
+                    #
+                    # Two-tier lookup, each in its own try so a failure in one
+                    # does not abort the other (the bug pattern that broke
+                    # tests/test_issue1527_lmstudio_base_url_classification on
+                    # CI environments where hermes_cli isn't importable —
+                    # ImportError in the cli tier was hijacking the whole
+                    # branch and silently skipping the urlopen fallback).
+                    raw_models = []
+                    lm_ids: list[str] = []
+                    try:
+                        from hermes_cli.models import provider_model_ids as _provider_model_ids
+                        lm_ids = _provider_model_ids("lmstudio") or []
+                    except Exception:
+                        logger.debug("hermes_cli LM Studio lookup unavailable; using urlopen fallback")
+
+                    if lm_ids:
+                        raw_models = [{"id": mid, "label": mid} for mid in lm_ids]
+                    else:
+                        # Fallback: fetch /models directly from the configured
+                        # base URL. Looks for the URL in either
+                        # `cfg["providers"]["lmstudio"]["base_url"]` or
+                        # `cfg["model"]["base_url"]` (via _get_provider_base_url),
+                        # so the historical model-block config shape still works.
+                        lm_cfg = cfg.get("providers", {}).get("lmstudio", {}) or {}
+                        lm_base_url = _get_provider_base_url("lmstudio") or ""
+                        lm_api_key = str(lm_cfg.get("api_key") or "").strip() if isinstance(lm_cfg, dict) else ""
+                        if lm_base_url:
+                            headers = {"User-Agent": "OpenAI/Python 1.0"}
+                            if lm_api_key:
+                                headers["Authorization"] = f"Bearer {lm_api_key}"
+                            endpoint = (lm_base_url + "/models").rstrip("/")
+                            try:
+                                import urllib.request as _urlreq
+                                req = _urlreq.Request(endpoint, method="GET", headers=headers)
+                                with _urlreq.urlopen(req, timeout=5) as resp:
+                                    lm_data = json.loads(resp.read().decode())
+                                for m in (lm_data.get("data") or []):
+                                    if isinstance(m, dict):
+                                        mid = str(m.get("id") or "").strip()
+                                        if mid and {"id": mid, "label": mid} not in raw_models:
+                                            raw_models.append({"id": mid, "label": mid})
+                            except Exception:
+                                logger.debug("LM Studio /models fetch failed at %s", endpoint)
+
+                    if raw_models:
+                        models = _apply_provider_prefix(raw_models, pid, active_provider)
+                        groups.append(
+                            {
+                                "provider": provider_name,
+                                "provider_id": pid,
+                                "models": models,
+                            }
+                        )
                 elif pid in _PROVIDER_MODELS or pid in cfg.get("providers", {}):
                     provider_cfg = cfg.get("providers", {}).get(pid, {})
                     raw_models = []
@@ -3047,7 +3501,9 @@ def get_available_models() -> dict:
                         if isinstance(cfg_models, dict):
                             raw_models = [{"id": k, "label": k} for k in cfg_models.keys()]
                         elif isinstance(cfg_models, list):
-                            raw_models = [{"id": k, "label": k} for k in cfg_models]
+                            raw_models = [{"id": k["id"] if isinstance(k, dict) else k,
+                                            "label": k.get("label", k["id"]) if isinstance(k, dict) else k}
+                                           for k in cfg_models]
 
                     if not raw_models:
                         raw_models = _models_from_live_provider_ids(
@@ -3074,7 +3530,17 @@ def get_available_models() -> dict:
                     if detected_models:
                         models_for_group = copy.deepcopy(detected_models)
                     elif auto_detected_models:
-                        models_for_group = copy.deepcopy(auto_detected_models)
+                        # Don't fall back to the global auto_detected_models
+                        # list for the bare "custom" PID when the active
+                        # provider is something concrete (e.g. ai-gateway,
+                        # openrouter). Those auto-detected entries already
+                        # belong to the active provider's group — copying
+                        # them into a Custom group too produces phantom
+                        # duplicates with mismatched prefixes (#1881).
+                        if pid == "custom" and active_provider and active_provider != "custom":
+                            models_for_group = []
+                        else:
+                            models_for_group = copy.deepcopy(auto_detected_models)
                     else:
                         models_for_group = []
                     if models_for_group:
@@ -3313,7 +3779,49 @@ AGENT_INSTANCES: dict = {}  # stream_id -> AIAgent instance for interrupt propag
 STREAM_PARTIAL_TEXT: dict = {}  # stream_id -> partial assistant text accumulated during streaming
 STREAM_REASONING_TEXT: dict = {}  # stream_id -> reasoning trace accumulated during streaming (#1361 §A)
 STREAM_LIVE_TOOL_CALLS: dict = {}  # stream_id -> live tool calls accumulated during streaming (#1361 §B)
+STREAM_GOAL_RELATED: dict = {}  # stream_id -> bool: only evaluate goal for goal-related turns (#1932)
+PENDING_GOAL_CONTINUATION: set = set()  # session_ids awaiting a goal continuation turn (#1932)
+
+# Active agent-run registry. This intentionally tracks worker lifecycle rather
+# than SSE lifecycle: cancel/reconnect may remove STREAMS while the worker is
+# still unwinding, blocked in a provider call, or waiting for delegated work.
+ACTIVE_RUNS: dict = {}
+ACTIVE_RUNS_LOCK = threading.Lock()
+LAST_RUN_FINISHED_AT: float | None = None
 SERVER_START_TIME = time.time()
+
+
+def register_active_run(stream_id: str, **metadata) -> None:
+    """Mark a WebUI agent worker as alive until its outer finally exits."""
+    if not stream_id:
+        return
+    now = time.time()
+    entry = dict(metadata or {})
+    entry.setdefault("stream_id", stream_id)
+    entry.setdefault("started_at", now)
+    entry.setdefault("phase", "running")
+    with ACTIVE_RUNS_LOCK:
+        ACTIVE_RUNS[stream_id] = entry
+
+
+def update_active_run(stream_id: str, **metadata) -> None:
+    """Update active-run metadata without creating a new run implicitly."""
+    if not stream_id:
+        return
+    with ACTIVE_RUNS_LOCK:
+        entry = ACTIVE_RUNS.get(stream_id)
+        if entry is not None:
+            entry.update(metadata)
+
+
+def unregister_active_run(stream_id: str) -> None:
+    """Remove a worker from the active-run registry and record idle start."""
+    if not stream_id:
+        return
+    global LAST_RUN_FINISHED_AT
+    with ACTIVE_RUNS_LOCK:
+        ACTIVE_RUNS.pop(stream_id, None)
+        LAST_RUN_FINISHED_AT = time.time()
 
 # Agent cache: reuse AIAgent across messages in the same WebUI session so that
 # _user_turn_count survives between turns.  This mirrors the gateway's
@@ -3389,6 +3897,8 @@ _SETTINGS_DEFAULTS = {
     "theme": "dark",  # light | dark | system
     "skin": "default",  # accent color skin: default | ares | mono | slate | poseidon | sisyphus | charizard
     "font_size": "default",  # small | default | large
+    "session_jump_buttons": False,  # show Start/End transcript jump pills
+    "session_endless_scroll": False,  # auto-load older transcript pages while scrolling upward
     "language": "en",  # UI locale code; must match a key in static/i18n.js LOCALES
     "bot_name": os.getenv(
         "HERMES_WEBUI_BOT_NAME", "Hermes"
@@ -3517,6 +4027,8 @@ _SETTINGS_BOOL_KEYS = {
     "show_thinking",
     "simplified_tool_calling",
     "api_redact_enabled",
+    "session_jump_buttons",
+    "session_endless_scroll",
 }
 # Language codes are validated as short alphanumeric BCP-47-like tags (e.g. 'en', 'zh', 'fr')
 _SETTINGS_LANG_RE = __import__("re").compile(r"^[a-zA-Z]{2,10}(-[a-zA-Z0-9]{2,8})?$")

@@ -1,6 +1,8 @@
-const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[],toolCalls:[],activeStreamId:null,currentDir:'.',activeProfile:'default'};
+const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[],toolCalls:[],activeStreamId:null,currentDir:'.',activeProfile:'default',showHiddenWorkspaceFiles:false};
 const INFLIGHT={};  // keyed by session_id while request in-flight
 const SESSION_QUEUES={};  // keyed by session_id for queued follow-up turns
+const MAX_UPLOAD_BYTES=20*1024*1024;
+const MAX_UPLOAD_MB=Math.round(MAX_UPLOAD_BYTES/1024/1024);
 // Tracks which session's queue to drain in setBusy(false).
 // Set to activeSid just before setBusy(false) in done/error handlers so the
 // queue drains the session that *finished*, not the one currently viewed.
@@ -9,6 +11,105 @@ const SESSION_QUEUES={};  // keyed by session_id for queued follow-up turns
 // single-threaded so only one done event fires at a time in practice.
 let _queueDrainSid=null;
 const $=id=>document.getElementById(id);
+const OFFLINE_RECHECK_MS=2500;
+let _offlineVisible=false;
+let _offlineReason='browser';
+let _offlineProbeTimer=null;
+let _offlineChecking=false;
+let _offlineProbePromise=null;
+let _offlineHealthProbePromise=null;
+let _offlineRawFetch=null;
+let _offlineFetchPatched=false;
+function _browserReportsOnline(){return !('onLine' in navigator)||navigator.onLine!==false;}
+function _offlineHealthUrl(){const url=new URL('health',document.baseURI||location.href);url.searchParams.set('offline_probe',String(Date.now()));return url.href;}
+function _setOfflineChecking(checking){
+  _offlineChecking=!!checking;
+  const btn=$('offlineCheckNow');
+  if(btn){btn.disabled=_offlineChecking;btn.textContent=_offlineChecking?t('offline_checking'):t('offline_check_now');}
+}
+function _renderOfflineBanner(){
+  const banner=$('offlineBanner');
+  if(!banner)return;
+  const detail=$('offlineDetails');
+  if(detail)detail.textContent=t(_offlineReason==='browser'?'offline_browser_detail':'offline_network_detail');
+  const title=$('offlineTitle');
+  if(title)title.textContent=t('offline_title');
+  const auto=$('offlineAutorefresh');
+  if(auto)auto.textContent=t('offline_autorefresh');
+  _setOfflineChecking(_offlineChecking);
+  banner.hidden=false;
+  banner.classList.add('visible');
+}
+function _startOfflineProbeTimer(){
+  if(_offlineProbeTimer)return;
+  _offlineProbeTimer=setInterval(()=>{checkOfflineRecoveryNow();},OFFLINE_RECHECK_MS);
+}
+function _stopOfflineProbeTimer(){
+  if(_offlineProbeTimer){clearInterval(_offlineProbeTimer);_offlineProbeTimer=null;}
+}
+function showOfflineBanner(reason){
+  _offlineVisible=true;
+  _offlineReason=reason||(_browserReportsOnline()?'network':'browser');
+  _renderOfflineBanner();
+  _startOfflineProbeTimer();
+}
+function isOfflineBannerVisible(){return _offlineVisible;}
+function _hideOfflineBanner(){
+  _offlineVisible=false;
+  _stopOfflineProbeTimer();
+  _setOfflineChecking(false);
+  const banner=$('offlineBanner');
+  if(banner){banner.classList.remove('visible');banner.hidden=true;}
+}
+async function _probeOfflineRecovery(){
+  if(_offlineHealthProbePromise)return _offlineHealthProbePromise;
+  _offlineHealthProbePromise=(async()=>{
+    const fetcher=_offlineRawFetch||window.fetch.bind(window);
+    try{
+      const res=await fetcher(_offlineHealthUrl(),{cache:'no-store',credentials:'include'});
+      return !!(res&&res.ok);
+    }catch(_){return false;}
+  })();
+  try{return await _offlineHealthProbePromise;}
+  finally{_offlineHealthProbePromise=null;}
+}
+async function checkOfflineRecoveryNow(){
+  if(_offlineProbePromise)return _offlineProbePromise;
+  _offlineProbePromise=(async()=>{
+    if(!_offlineVisible)return false;
+    if(!_browserReportsOnline()){showOfflineBanner('browser');return false;}
+    _setOfflineChecking(true);
+    const ok=await _probeOfflineRecovery();
+    _setOfflineChecking(false);
+    if(ok){_stopOfflineProbeTimer();window.location.reload();return true;}
+    showOfflineBanner('network');
+    return false;
+  })();
+  try{return await _offlineProbePromise;}
+  finally{_offlineProbePromise=null;}
+}
+function _isAbortError(e){return !!(e&&(e.name==='AbortError'||e.code===20));}
+function _patchOfflineFetch(){
+  if(_offlineFetchPatched||typeof window.fetch!=='function')return;
+  _offlineFetchPatched=true;
+  _offlineRawFetch=window.fetch.bind(window);
+  window.fetch=async function(...args){
+    try{return await _offlineRawFetch(...args);}
+    catch(e){
+      if(!_browserReportsOnline())showOfflineBanner('browser');
+      else if(e instanceof TypeError&&!_isAbortError(e))void _probeOfflineRecovery().then(ok=>{if(!ok)showOfflineBanner('network');});
+      throw e;
+    }
+  };
+}
+function initOfflineMonitor(){
+  _patchOfflineFetch();
+  window.addEventListener('offline',()=>showOfflineBanner('browser'));
+  window.addEventListener('online',()=>{if(_offlineVisible)checkOfflineRecoveryNow();});
+  if(!_browserReportsOnline())showOfflineBanner('browser');
+}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',initOfflineMonitor,{once:true});
+else initOfflineMonitor();
 // Redirect to login when the server responds with 401 (auth session expired).
 // Handles iOS PWA standalone mode and keeps subpath mounts like /hermes/ from
 // escaping to the personal site root /login.
@@ -67,10 +168,32 @@ function _isBacktickFenceClose(line,minLen){
  * All non-fenced text stays escaped (no bold/italic/link interpretation).
  */
 
+function _stripWorkspaceDisplayPrefix(text){
+  // v1 sentinel format `[Workspace::v1: <escaped path>]\n` injected since #1918.
+  // Legacy format `[Workspace: <path>]\n` may still be present in transcripts
+  // saved before the v1 migration; fall through to the legacy regex when the
+  // v1 strip didn't match. Mirrors the Python `include_legacy=True` branch in
+  // api/streaming.py:_strip_workspace_prefix(). Per Opus advisor on stage-322.
+  const value = String(text||'');
+  const stripped = value.replace(/^\s*\[Workspace::v1:\s*(?:\\.|[^\]\\])+\]\s*/,'');
+  if(stripped !== value) return stripped.trim();
+  return value.replace(/^\s*\[Workspace:[^\]]+\]\s*/,'').trim();
+}
 function _renderUserFencedBlocks(text){
   const stash=[];
+  const mathStash=[];
+  const stashMath=(type,src)=>{mathStash.push({type,src});return '\x00UM'+(mathStash.length-1)+'\x00';};
+  const restoreMath=html=>String(html||'').replace(/\x00UM(\d+)\x00/g,(_,i)=>{
+    const item=mathStash[+i];
+    if(!item) return '';
+    if(item.type==='display') return `<div class="katex-block" data-katex="display">${esc(item.src)}</div>`;
+    return `<span class="katex-inline" data-katex="inline">${esc(item.src)}</span>`;
+  });
   let s=String(text||'');
-  // Extract fenced code blocks → stash, replace with null-token placeholder
+  // Extract fenced code blocks FIRST so math regexes never run inside fenced
+  // content. If math were stashed first, a user-typed code block containing
+  // \[..\] / \(..\) / $$..$$ would be rendered as a KaTeX block inside
+  // <pre><code> instead of as literal source. Mirrors renderMd()'s ordering.
   // CommonMark §4.5 line-anchored fence: the closing run must use at least
   // as many backticks as the opener, so inner triple-backtick fences remain content.
   s=s.replace(/(^|\n)[ ]{0,3}(`{3,})([^\n`]*)\n(?:([\s\S]*?)\n)?[ ]{0,3}\2`*[ \t]*(?=\n|$)/g,(_,lead,_fence,info,code)=>{
@@ -95,10 +218,17 @@ function _renderUserFencedBlocks(text){
     }
     return lead+'\x00UF'+(stash.length-1)+'\x00';
   });
+  // Now stash math from the OUTSIDE-of-fence text. Display delimiters must
+  // run before inline so $$..$$ isn't mis-parsed as $..$..$..$.
+  s=s.replace(/\$\$([\s\S]+?)\$\$/g,(_,m)=>stashMath('display',m));
+  s=s.replace(/\\\[([\s\S]+?)\\\]/g,(_,m)=>stashMath('display',m));
+  s=s.replace(/\$([^\s$\n][^$\n]*?[^\s$\n]|\S)\$/g,(_,m)=>stashMath('inline',m));
+  s=s.replace(/\\\((.+?)\\\)/g,(_,m)=>stashMath('inline',m));
   // Escape remaining plain text and convert newlines to <br>
   s=esc(s).replace(/\n/g,'<br>');
-  // Restore stashed code blocks
+  // Restore stashed code blocks, then math placeholders as KaTeX targets.
   s=s.replace(/\x00UF(\d+)\x00/g,(_,i)=>stash[+i]);
+  s=restoreMath(s);
   return s;
 }
 function _statusCardHtml(card){
@@ -154,6 +284,9 @@ function _messageRenderableMessageCount(){
 function _messageHiddenBeforeCount(){
   return Math.max(0,_messageRenderableMessageCount()-_currentMessageRenderWindowSize());
 }
+function _isSessionEndlessScrollEnabled(){
+  return window._sessionEndlessScrollEnabled===true;
+}
 function _wireMessageWindowLoadEarlierButton(){
   const indicator=$('loadOlderIndicator');
   if(!indicator) return;
@@ -173,6 +306,48 @@ function _showEarlierRenderedMessages(){
     container.scrollTop=prevScrollTop+(newScrollH-prevScrollH);
   }
   _scrollPinned=false;
+}
+function _isSessionJumpButtonsEnabled(){
+  return window._sessionJumpButtonsEnabled===true;
+}
+function _applySessionNavigationPrefs(){
+  const container=$('messages');
+  if(container) container.classList.toggle('session-nav-enabled',_isSessionJumpButtonsEnabled());
+  _updateSessionStartJumpButton();
+}
+function _updateSessionStartJumpButton(){
+  const btn=$('jumpToSessionStartBtn');
+  const container=$('messages');
+  if(!btn||!container) return;
+  if(!_isSessionJumpButtonsEnabled()){
+    btn.style.display='none';
+    return;
+  }
+  const hasSession=!!(S&&S.session&&S.messages&&S.messages.length);
+  const awayFromStart=container.scrollTop>Math.max(240,container.clientHeight*0.35);
+  const hasScrollableHistory=container.scrollHeight>container.clientHeight+Math.max(240,container.clientHeight*0.35);
+  const canRevealStart=hasScrollableHistory||_messageHiddenBeforeCount()>0||!!(typeof _messagesTruncated!=='undefined'&&_messagesTruncated);
+  btn.style.display=(hasSession&&canRevealStart&&awayFromStart)?'flex':'none';
+}
+async function jumpToSessionStart(){
+  const container=$('messages');
+  if(!container||!S.session) return;
+  _scrollPinned=false;
+  _messageUserUnpinned=true;
+  _programmaticScroll=true;
+  try{
+    if(typeof _ensureAllMessagesLoaded==='function') await _ensureAllMessagesLoaded();
+    _messageRenderWindowSize=Math.max(_currentMessageRenderWindowSize(),_messageRenderableMessageCount());
+    renderMessages({ preserveScroll:true });
+    requestAnimationFrame(()=>{
+      container.scrollTop=0;
+      _updateSessionStartJumpButton();
+      requestAnimationFrame(()=>{ _programmaticScroll=false; });
+    });
+  }catch(e){
+    console.warn('jumpToSessionStart failed:',e);
+    _programmaticScroll=false;
+  }
 }
 
 const DASHBOARD_STATUS_TTL_MS=60000;
@@ -200,8 +375,17 @@ function _applyDashboardStatus(status){
     btn.classList.toggle('dashboard-link-visible',running);
     btn.style.display=running?'':'none';
     btn.dataset.dashboardUrl=url;
-    btn.title=warning||t('tab_dashboard');
-    btn.setAttribute('aria-label',warning||t('tab_dashboard'));
+    const tipText=warning||t('tab_dashboard');
+    if(btn.hasAttribute('data-tooltip')){
+      // Sync the custom CSS tooltip and explicitly clear the native title so
+      // the slow ~1.5s native browser tooltip does not co-fire alongside the
+      // fast custom tooltip (#1775).
+      btn.setAttribute('data-tooltip',tipText);
+      if(btn.hasAttribute('title')) btn.removeAttribute('title');
+    } else {
+      btn.title=tipText;
+    }
+    btn.setAttribute('aria-label',tipText);
   });
 }
 async function refreshDashboardStatus(force=false){
@@ -296,9 +480,19 @@ function _closeImgLightbox(lb) {
 }
 
 document.addEventListener('click', e => {
-  const img = e.target && e.target.closest ? e.target.closest('.msg-media-img') : null;
-  if(!img) return;
-  _openImgLightbox(img.src, img.alt);
+  if(!e.target || !e.target.closest) return;
+  // Message-attached images (already wired since v0.50.x).
+  let img = e.target.closest('.msg-media-img');
+  if(img){ _openImgLightbox(img.src, img.alt); return; }
+  // Composer attach-tray image thumbnails — click any pasted/dropped image
+  // chip to lightbox-zoom it before sending. Excludes audio/video chips,
+  // which keep their inline media controls. SVG thumbnails (.attach-thumb--svg)
+  // are still images visually, so they qualify.
+  img = e.target.closest('.attach-thumb');
+  if(img && img.tagName === 'IMG'){
+    _openImgLightbox(img.src, img.alt || img.title || 'Attached image');
+    return;
+  }
 });
 
 const _IMAGE_EXTS=/\.(png|jpg|jpeg|gif|webp|bmp|ico|avif)$/i;
@@ -361,6 +555,10 @@ function _renderAttachmentHtml(fname, url){
   const kind=_mediaKindForName(fname);
   if(kind==='image') return `<img class="msg-media-img" src="${esc(url)}" alt="${esc(fname)}" loading="lazy">`;
   if(kind==='audio'||kind==='video') return _mediaPlayerHtml(kind,url,fname);
+  if(_HTML_EXTS.test(fname)){
+    const inlineUrl=url+(String(url).includes('?')?'&':'?')+'inline=1';
+    return `<a class="msg-file-badge msg-file-badge--html" href="${esc(inlineUrl)}" target="_blank" rel="noopener">${li('file-code',12)} ${esc(fname)}</a>`;
+  }
   return `<div class="msg-file-badge">${li('paperclip',12)} ${esc(fname)}</div>`;
 }
 document.addEventListener('click', e => {
@@ -506,13 +704,55 @@ function _findModelInDropdown(modelId, sel, preferredProviderId){
 
 // Set the model picker to the best match for modelId.
 // Returns the resolved value that was actually set, or null if nothing matched.
+function _refreshOpenModelDropdown(){
+  const dd=$('composerModelDropdown');
+  if(dd&&dd.classList&&dd.classList.contains('open')&&typeof renderModelDropdown==='function'){
+    renderModelDropdown();
+    if(typeof _positionModelDropdown==='function') _positionModelDropdown();
+  }
+}
 function _applyModelToDropdown(modelId, sel, preferredProviderId){
   if(!modelId||!sel) return null;
   const resolved=_findModelInDropdown(modelId,sel,preferredProviderId);
   if(resolved){
     sel.value=resolved;
-    if(sel.id==='modelSelect' && typeof syncModelChip==='function') syncModelChip();
+    if(sel.id==='modelSelect'){
+      if(typeof syncModelChip==='function') syncModelChip();
+      _refreshOpenModelDropdown();
+    }
     return resolved;
+  }
+  return null;
+}
+function _modelStateFromAppliedDropdown(sel, modelValue){
+  const state=(typeof _modelStateForSelect==='function')
+    ? _modelStateForSelect(sel,modelValue)
+    : {model:modelValue,model_provider:null};
+  return {model:state.model||modelValue,model_provider:state.model_provider||null};
+}
+function _persistSessionModelCorrection(model, provider){
+  if(!S.session) return;
+  fetch(new URL('api/session/update',document.baseURI||location.href).href,{
+    method:'POST',credentials:'include',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({session_id:S.session.id||S.session.session_id,model:model,model_provider:provider||null})
+  }).catch(()=>{});
+}
+function _applySessionModelFallback(sel){
+  if(!sel) return null;
+  const configuredDefault=String(window._defaultModel||'').trim();
+  if(configuredDefault){
+    const appliedDefault=_applyModelToDropdown(configuredDefault,sel,window._activeProvider||null);
+    if(appliedDefault) return _modelStateFromAppliedDropdown(sel,appliedDefault);
+  }
+  const first=sel.querySelector('optgroup > option, option');
+  if(first){
+    sel.value=first.value;
+    if(sel.id==='modelSelect'){
+      if(typeof syncModelChip==='function') syncModelChip();
+      _refreshOpenModelDropdown();
+    }
+    return _modelStateFromAppliedDropdown(sel,first.value);
   }
   return null;
 }
@@ -563,6 +803,11 @@ async function populateModelDropdown(){
       _applyModelToDropdown(data.default_model, sel, data.active_provider||null);
     }
     if(typeof syncModelChip==='function') syncModelChip();
+    const dd=$('composerModelDropdown');
+    if(dd&&dd.classList.contains('open')&&typeof renderModelDropdown==='function'){
+      renderModelDropdown();
+      _positionModelDropdown();
+    }
     // Kick off a background live-model fetch for the active provider.
     // This runs after the static list is already shown (no blocking flicker).
     if(data.active_provider) _fetchLiveModels(data.active_provider, sel);
@@ -661,7 +906,7 @@ async function _fetchLiveModels(provider, sel){
     const added=_addLiveModelsToSelect(provider,data.models,sel);
     if(added>0){
       if(typeof syncModelChip==='function') syncModelChip();
-      console.log('[hermes] Live models loaded for',provider+':',added,'new models added');
+      console.debug('[hermes] Live models loaded for',provider+':',added,'new models added');
     }
   }catch(e){
     console.debug('[hermes] Live model fetch failed for',provider,e.message);
@@ -963,7 +1208,7 @@ async function selectModelFromDropdown(value){
   if(typeof sel.onchange==='function') await sel.onchange();
 }
 
-function toggleModelDropdown(){
+async function toggleModelDropdown(){
   const dd=$('composerModelDropdown');
   const chip=$('composerModelChip');
   const sel=$('modelSelect');
@@ -974,6 +1219,11 @@ function toggleModelDropdown(){
   if(typeof closeWsDropdown==='function') closeWsDropdown();
   if(typeof closeReasoningDropdown==='function') closeReasoningDropdown();
   if(typeof closeToolsetsDropdown==='function') closeToolsetsDropdown();
+  const ready=window._modelDropdownReady;
+  if(ready&&typeof ready.then==='function'){
+    try{await ready;}catch(_){}
+  }
+  if(dd.classList.contains('open')) return;
   renderModelDropdown();
   dd.classList.add('open');
   _positionModelDropdown();
@@ -1401,6 +1651,47 @@ let _scrollPinned=true;
 let _programmaticScroll=false;
 let _nearBottomCount=0;
 let _lastScrollTop=null;
+let _lastNonMessageScrollIntentMs=0;
+let _lastMessageUpwardIntentMs=0;
+let _messageUserUnpinned=false;
+let _bottomSettleToken=0;
+const NON_MESSAGE_SCROLL_INTENT_SUPPRESS_MS=350;
+const MESSAGE_UPWARD_INTENT_MS=450;
+function _cancelBottomSettle(){ _bottomSettleToken++; }
+function _recordNonMessageScrollIntent(e){
+  const el=document.getElementById('messages');
+  const target=e&&e.target;
+  if(!el||!target) return;
+  // Streaming token renders should keep pinning the chat only while the user is
+  // actually interacting with the chat pane. A wheel/touch gesture over the
+  // session sidebar (or another independent pane) must not be immediately fought
+  // by scrollIfPinned() writing #messages.scrollTop on the next token (#1784).
+  if(!el.contains(target)) _lastNonMessageScrollIntentMs=performance.now();
+  else if(e.type==='touchmove'||(typeof e.deltaY==='number'&&e.deltaY<0)){
+    // User is intentionally moving upward in the transcript. Record the real
+    // input event so later scrollTop decreases caused by layout/windowing do
+    // not masquerade as user intent and strand live streaming away from bottom.
+    _lastMessageUpwardIntentMs=performance.now();
+    // User is intentionally moving in the transcript. Cancel any delayed
+    // scrollToBottom settling that was scheduled by session-load/layout growth.
+    _cancelBottomSettle();
+    if(typeof e.deltaY==='number'&&e.deltaY<0){
+      _messageUserUnpinned=true;
+      _nearBottomCount=0;
+      _scrollPinned=false;
+    }
+  }
+}
+function _recentMessageUpwardIntent(){
+  return performance.now()-_lastMessageUpwardIntentMs<MESSAGE_UPWARD_INTENT_MS;
+}
+function _recentNonMessageScrollIntent(){
+  return performance.now()-_lastNonMessageScrollIntentMs<NON_MESSAGE_SCROLL_INTENT_SUPPRESS_MS;
+}
+if(typeof document!=='undefined'){
+  document.addEventListener('wheel',_recordNonMessageScrollIntent,{capture:true,passive:true});
+  document.addEventListener('touchmove',_recordNonMessageScrollIntent,{capture:true,passive:true});
+}
 // Reset hook for session-switch — called from sessions.js loadSession() to
 // prevent the new chat's first scroll comparing against the previous chat's
 // scrollTop (Opus stage-302 SHOULD-FIX, #1731 follow-up).
@@ -1416,14 +1707,26 @@ if (typeof window !== 'undefined') window._resetScrollDirectionTracker = _resetS
     _scrollRaf=requestAnimationFrame(()=>{
       const top=el.scrollTop;
       const nearBottom=el.scrollHeight-top-el.clientHeight<250;
-      const movedUp=_lastScrollTop!==null && top<_lastScrollTop-2;
+      // scrollToBottomBtn visibility is updated below after pin state settles.
+      const movedUp=_lastScrollTop!==null && top<_lastScrollTop-2 && _recentMessageUpwardIntent();
       _lastScrollTop=top;
-      if(movedUp){ _nearBottomCount=0; _scrollPinned=false; } // #1731
-      else { _nearBottomCount=nearBottom?_nearBottomCount+1:0; _scrollPinned=_nearBottomCount>=2; } // #1360
+      if(movedUp){ _cancelBottomSettle(); _nearBottomCount=0; _scrollPinned=false; _messageUserUnpinned=true; } // #1731
+      else {
+        if(nearBottom){
+          _nearBottomCount=_nearBottomCount+1;
+          if(_nearBottomCount>=2) _scrollPinned=true;
+        } else { _nearBottomCount=0; _scrollPinned=false; }
+        if(_scrollPinned) _messageUserUnpinned=false;
+      } // #1360
       const btn=$('scrollToBottomBtn');
-      if(btn) btn.style.display=_scrollPinned?'none':'flex';
-      // Load older messages when scrolled near the top
-      if(el.scrollTop<80 && typeof _messagesTruncated!=='undefined' && _messagesTruncated && typeof _loadOlderMessages==='function'){
+      const showBottomButton=!_scrollPinned && el.scrollHeight-top-el.clientHeight>80;
+      if(btn) btn.style.display=showBottomButton?'flex':'none';
+      if(typeof _updateSessionStartJumpButton==='function') _updateSessionStartJumpButton();
+      // Prefetch older messages before the reader hits the hard top. Prepending
+      // then preserving scrollTop is seamless only if there is runway left for
+      // the user's continued upward wheel/touch movement.
+      const olderPrefetchPx=Math.max(600,el.clientHeight*1.5);
+      if(_isSessionEndlessScrollEnabled()&&el.scrollTop<olderPrefetchPx && typeof _messagesTruncated!=='undefined' && _messagesTruncated && typeof _loadOlderMessages==='function'){
         _loadOlderMessages();
       }
     });
@@ -1705,17 +2008,63 @@ document.addEventListener('DOMContentLoaded',function(){
   tooltip.addEventListener('click',function(e){e.stopPropagation();});
 });
 
+function _setMessageScrollToBottom(){
+  const el=$('messages');
+  if(!el) return;
+  _programmaticScroll=true;
+  el.scrollTop=el.scrollHeight;
+  _lastScrollTop=el.scrollTop;
+  _nearBottomCount=2;
+  _scrollPinned=true;
+  requestAnimationFrame(()=>{ setTimeout(()=>{_programmaticScroll=false;},0); });
+}
+function _isMessagePaneNearBottom(threshold=250){
+  const el=$('messages');
+  if(!el) return false;
+  return el.scrollHeight-el.scrollTop-el.clientHeight<=threshold;
+}
+function _shouldFollowMessagesOnDomReplace(){
+  return !_messageUserUnpinned && (_scrollPinned || _isMessagePaneNearBottom(1200));
+}
+function _settleMessageScrollToBottom(force){
+  // Markdown post-processing (Prism, tables, Mermaid/KaTeX/PDF placeholders)
+  // can grow the transcript after the first scroll write. Re-apply the bottom
+  // position across a few frames while pinned so late layout does not leave the
+  // viewport a few lines above the real end. User scroll increments
+  // _bottomSettleToken and cancels the delayed passes.
+  const token=++_bottomSettleToken;
+  const passes=[0,16,80,180];
+  passes.forEach(delay=>setTimeout(()=>{
+    if(token!==_bottomSettleToken) return;
+    if(!force && (!_scrollPinned||_recentNonMessageScrollIntent())) return;
+    _setMessageScrollToBottom();
+  },delay));
+  requestAnimationFrame(()=>{
+    if(token!==_bottomSettleToken) return;
+    if(force || (_scrollPinned&&!_recentNonMessageScrollIntent())) _setMessageScrollToBottom();
+    requestAnimationFrame(()=>{
+      if(token!==_bottomSettleToken) return;
+      if(force || (_scrollPinned&&!_recentNonMessageScrollIntent())) _setMessageScrollToBottom();
+    });
+  });
+}
 function scrollIfPinned(){
   if(!_scrollPinned) return;
-  const el=$('messages');
-  if(el){_programmaticScroll=true;el.scrollTop=el.scrollHeight;setTimeout(()=>{_programmaticScroll=false;},0);}
+  if(_recentNonMessageScrollIntent()) return;
+  _settleMessageScrollToBottom(false);
 }
 function scrollToBottom(){
   _scrollPinned=true;
-  const el=$('messages');
-  if(el){_programmaticScroll=true;el.scrollTop=el.scrollHeight;setTimeout(()=>{_programmaticScroll=false;},0);}
+  _messageUserUnpinned=false;
+  // Write the first bottom position synchronously. A final renderMessages()
+  // rebuild can queue a native scroll event from the temporary scrollTop=0
+  // layout state; if we only schedule delayed settles, that event can cancel
+  // them before the viewport ever reaches the bottom.
+  _setMessageScrollToBottom();
+  _settleMessageScrollToBottom(true);
   const btn=$('scrollToBottomBtn');
   if(btn) btn.style.display='none';
+  if(typeof _updateSessionStartJumpButton==='function') _updateSessionStartJumpButton();
 }
 
 function _fmtOllamaLabel(mid){
@@ -1978,14 +2327,16 @@ function renderMd(raw){
   // Math stash: protect $$..$$ and $..$ from markdown processing
   // Runs AFTER fence_stash so backtick code spans protect their dollar-sign contents
   const math_stash=[];
-  // Display math: $$...$$  (must come before inline to avoid mis-parsing)
+  // Display math: $$...$$ and \[...\] (must come before inline to avoid mis-parsing)
   s=s.replace(/\$\$([\s\S]+?)\$\$/g,(_,m)=>{math_stash.push({type:'display',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
+  // Match a single literal backslash before the display delimiter (the common LLM form).
+  s=s.replace(/\\\[([\s\S]+?)\\\]/g,(_,m)=>{math_stash.push({type:'display',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
   // Inline math: $...$ — require non-space at boundaries to avoid false positives
   // e.g. "costs $5 and $10" should not trigger (space after opening $)
   s=s.replace(/\$([^\s$\n][^$\n]*?[^\s$\n]|\S)\$/g,(_,m)=>{math_stash.push({type:'inline',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
-  // Also stash \(...\) and \[...\] LaTeX delimiters
-  s=s.replace(/\\\\\((.+?)\\\\\)/g,(_,m)=>{math_stash.push({type:'inline',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
-  s=s.replace(/\\\\\[(.+?)\\\\\]/gs,(_,m)=>{math_stash.push({type:'display',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
+  // Also stash \(...\) LaTeX delimiters.
+  // Match a single literal backslash before the delimiter (the common LLM form).
+  s=s.replace(/\\\((.+?)\\\)/g,(_,m)=>{math_stash.push({type:'inline',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
   // Safe tag → markdown equivalent (these produce the same output as **text** etc.)
   // Stash raw <pre> blocks so the inline <code> rewrite below does not run
   // inside them. Running that rewrite in <pre> content can introduce stray
@@ -2379,6 +2730,13 @@ let _composerLockState=null;
 function lockComposerForClarify(placeholderText){
   const input=$('msg');
   if(!input) return;
+  // Save the current composer text as a server-side draft before locking,
+  // so the user's draft is preserved if they switch sessions while a clarify
+  // card is active (and survives page refresh / syncs across clients).
+  const sid = S && S.session && S.session.session_id;
+  if (sid && typeof _saveComposerDraftNow === 'function') {
+    _saveComposerDraftNow(sid, input.value || '', S.pendingFiles ? [...S.pendingFiles] : []);
+  }
   if(!_composerLockState){
     _composerLockState={
       disabled: input.disabled,
@@ -2823,7 +3181,31 @@ function updateQueueBadge(sessionId){
     }
   }
 }
-function showToast(msg,ms,type){const el=$('toast');if(!el)return;const s=String(msg==null?'':msg);let t=type;if(!t){const low=s.toLowerCase();if(/fail|error|denied|invalid|unavailable|no active|no workspace match|no model match|no personalities/.test(low))t='error';else if(/warn|queued|takes effect|skipped|fallback/.test(low))t='warning';else if(/saved|created|imported|restored|switched|set to|updated|duplicated|moved to|renamed|deleted|complete|pinned|archived|cleared|stopped/.test(low))t='success';else t='info';}el.textContent=s;el.className='toast show '+t;clearTimeout(el._t);el._t=setTimeout(()=>{el.classList.remove('show');},ms||2800);}
+const TOAST_DEFAULT_MS=2800;
+const TOAST_ERROR_DEFAULT_MS=20000;
+function clearToastDismissTimer(el){if(!el)return;clearTimeout(el._t);el._t=null;}
+function setToastDismissTimer(el,duration){if(!el)return;clearToastDismissTimer(el);el._t=setTimeout(()=>{el.classList.remove('show');},duration);}
+function copyToastText(btn){
+  const el=btn&&btn.closest?btn.closest('#toast'):null;
+  const text=el?(el.dataset.toastMessage||el.textContent||''):'';
+  const done=()=>{const old=btn.textContent;btn.textContent='Copied';setTimeout(()=>{btn.textContent=old;},1200);};
+  _copyText(text).then(done).catch(()=>{});
+}
+function showToast(msg,ms,type){
+  const el=$('toast');if(!el)return;
+  const s=String(msg==null?'':msg);let t=type;
+  if(!t){const low=s.toLowerCase();if(/fail|error|denied|invalid|unavailable|no active|no workspace match|no model match|no personalities/.test(low))t='error';else if(/warn|queued|takes effect|skipped|fallback/.test(low))t='warning';else if(/saved|created|imported|restored|switched|set to|updated|duplicated|moved to|renamed|deleted|complete|pinned|archived|cleared|stopped/.test(low))t='success';else t='info';}
+  const duration=(ms==null)?(t==='error'?TOAST_ERROR_DEFAULT_MS:TOAST_DEFAULT_MS):ms;
+  el.className='toast show '+t;
+  el.dataset.toastMessage=s;
+  if(t==='error') el.innerHTML=`<span class="toast-message">${esc(s)}</span><button class="toast-copy" type="button" data-toast-copy="1" onclick="copyToastText(this);event.stopPropagation()">Copy</button>`;
+  else el.textContent=s;
+  el.onmouseenter=()=>clearToastDismissTimer(el);
+  el.onmouseleave=()=>setToastDismissTimer(el,duration);
+  el.onfocusin=()=>clearToastDismissTimer(el);
+  el.onfocusout=()=>setToastDismissTimer(el,duration);
+  setToastDismissTimer(el,duration);
+}
 
 // ── Shared app dialogs ───────────────────────────────────────────────────────
 // showConfirmDialog(opts) and showPromptDialog(opts) replace browser-native dialog calls
@@ -2954,7 +3336,11 @@ function showPromptDialog(opts={}){
   if(desc) desc.textContent=opts.message||'';
   if(input){
     input.type=opts.inputType||'text';input.style.display='';
-    input.value=opts.value||'';input.placeholder=opts.placeholder||'';
+    // Pre-fill: prefer `value`, accept `defaultValue` as alias for callers that
+    // mirror the standard HTMLInputElement.defaultValue naming. Both empty →
+    // blank field (the default rename-from-scratch flow stays unchanged).
+    const prefill=(opts.value!=null?opts.value:(opts.defaultValue!=null?opts.defaultValue:''));
+    input.value=prefill;input.placeholder=opts.placeholder||'';
     input.autocomplete='off';input.spellcheck=false;
   }
   if(cancelBtn) cancelBtn.textContent=opts.cancelLabel||t('cancel');
@@ -2963,7 +3349,27 @@ function showPromptDialog(opts={}){
   if(overlay){overlay.style.display='flex';overlay.setAttribute('aria-hidden','false');}
   return new Promise(resolve=>{
     APP_DIALOG.resolve=resolve;
-    setTimeout(()=>{if(input&&input.style.display!=='none')input.focus();else if(confirmBtn)confirmBtn.focus();},0);
+    setTimeout(()=>{
+      if(input&&input.style.display!=='none'){
+        input.focus();
+        // Selection behavior on focus:
+        //   selectStem:true → select everything before the LAST '.' (e.g. for
+        //     'report.txt' selects 'report' so a user can retype the basename
+        //     without losing the extension; matches macOS Finder rename UX).
+        //     Falls back to selecting the full value when there's no '.' or
+        //     the dot is at index 0 ('.gitignore' → full select).
+        //   selectAll:true → select the entire prefilled value.
+        //   default       → caret at end (current behavior).
+        const v=input.value||'';
+        if(opts.selectStem && v){
+          const dot=v.lastIndexOf('.');
+          if(dot>0) input.setSelectionRange(0,dot);
+          else input.select();
+        } else if(opts.selectAll && v){
+          input.select();
+        }
+      } else if(confirmBtn) confirmBtn.focus();
+    },0);
   });
 }
 
@@ -3635,6 +4041,7 @@ function syncTopbar(){
   if(!S.session){
     document.title=window._botName||'Hermes';
     if(typeof syncWorkspaceDisplays==='function') syncWorkspaceDisplays();
+    if(typeof _syncWorkspaceHeadingState==='function') _syncWorkspaceHeadingState();
     if(typeof syncModelChip==='function') syncModelChip();
     if(typeof syncTerminalButton==='function') syncTerminalButton();
     if(typeof _syncHermesPanelSessionActions==='function') _syncHermesPanelSessionActions();
@@ -3647,8 +4054,10 @@ function syncTopbar(){
     if(typeof syncAppTitlebar==='function') syncAppTitlebar();
     // Update profile chip even when no session is active (e.g. right after profile switch).
     // Both #profileChipLabel (composer) and #profileChipTitlebarLabel (titlebar) are kept
-    // in sync via _setProfileChipLabel.
-    _setProfileChipLabel(S.activeProfile||'default');
+    // in sync via _setProfileChipLabel. Guard the call so the test harness in
+    // test_issue1771_session_model_switch_sync.py (which evals syncTopbar alone)
+    // doesn't crash with ReferenceError when the chip helper isn't pulled in.
+    if(typeof _setProfileChipLabel==='function') _setProfileChipLabel(S.activeProfile||'default');
     return;
   }
   const sessionTitle=S.session.title||t('untitled');
@@ -3669,6 +4078,7 @@ function syncTopbar(){
     }
   }
   if(typeof syncAppTitlebar==='function') syncAppTitlebar();
+  if(typeof _syncWorkspaceHeadingState==='function') _syncWorkspaceHeadingState();
   // If a profile switch just happened, apply its model rather than the session's stale value.
   // S._pendingProfileModel is set by switchToProfile() and cleared here after one application.
   const modelOverride=S._pendingProfileModel;
@@ -3680,35 +4090,52 @@ function syncTopbar(){
     _applyModelToDropdown(modelOverride,$('modelSelect'),providerOverride);
     currentModel=modelOverride;
   } else {
-    const applied=_applyModelToDropdown(currentModel,$('modelSelect'),S.session.model_provider||null);
-    // If the model isn't in the current provider list, silently reset to the
-    // first available model so stale values don't pollute the picker (#829).
-    if(!applied && currentModel){
-      const deferModelCorrection=Boolean(S.session._modelResolutionDeferred);
-      // Also defer if a live model fetch is still in flight — the model may be
-      // in the list once the fetch completes. Persisting now would corrupt the
-      // session with the wrong model before live models arrive (#1169).
-      const liveStillPending=window._activeProvider&&_liveModelFetchPending.has(window._activeProvider);
-      if(liveStillPending){
-        // Live fetch in flight — don't touch sel.value or S.session.model yet.
-        // _addLiveModelsToSelect() will re-apply S.session.model once done (#1169).
-      } else {
-        // Stale session model not in the current provider catalog — reset to the
-        // first available model rather than injecting an "(unavailable)" option
-        // that visually appears under the wrong provider group (#829).
-        const modelSel=$('modelSelect');
-        const first=modelSel&&modelSel.querySelector('optgroup > option, option');
-        if(first){
-          modelSel.value=first.value;
-          if(!deferModelCorrection){
-            S.session.model=first.value;
-            S.session.model_provider=_getOptionProviderId(first)||null;
+    const modelSel=$('modelSelect');
+    const rawCurrentModel=String(currentModel||'').trim();
+    const hasSessionModel=rawCurrentModel&&rawCurrentModel.toLowerCase()!=='unknown';
+    if(!hasSessionModel){
+      // Missing/unknown session metadata must not leave the picker on the
+      // previously viewed chat's model (#1771). Apply the configured default
+      // first, then the first available option only as an HTML fallback.
+      const fallback=_applySessionModelFallback(modelSel);
+      if(fallback){
+        // Defer state mutation + network write while the live model resolution
+        // is in flight — sessions.js sets _modelResolutionDeferred=true between
+        // the fast-path session render and the resolve_model=1 round-trip.
+        // Persisting here would race that resolution and would also issue
+        // silent /api/session/update POSTs against imported/read-only CLI
+        // sessions whose model field reads "unknown" (#1779 stage-310 review).
+        // The visible sel.value change still happens above for UX; only the
+        // state mutation + persist defers.
+        const deferModelCorrection=Boolean(S.session._modelResolutionDeferred);
+        if(!deferModelCorrection){
+          S.session.model=fallback.model;
+          S.session.model_provider=fallback.model_provider||null;
+          currentModel=fallback.model;
+          _persistSessionModelCorrection(fallback.model,S.session.model_provider||null);
+        }
+      }
+    } else {
+      const applied=_applyModelToDropdown(currentModel,modelSel,S.session.model_provider||null);
+      // If the model isn't in the current provider list, reset to the configured
+      // default rather than silently retaining the previous chat's selection (#1771).
+      if(!applied){
+        const deferModelCorrection=Boolean(S.session._modelResolutionDeferred);
+        // Also defer if a live model fetch is still in flight — the model may be
+        // in the list once the fetch completes. Persisting now would corrupt the
+        // session with the wrong model before live models arrive (#1169).
+        const liveStillPending=window._activeProvider&&_liveModelFetchPending.has(window._activeProvider);
+        if(liveStillPending){
+          // Live fetch in flight — don't touch sel.value or S.session.model yet.
+          // _addLiveModelsToSelect() will re-apply S.session.model once done (#1169).
+        } else {
+          const fallback=_applySessionModelFallback(modelSel);
+          if(fallback&&!deferModelCorrection){
+            S.session.model=fallback.model;
+            S.session.model_provider=fallback.model_provider||null;
+            currentModel=fallback.model;
             // Persist the correction so the session doesn't re-inject on next load.
-            fetch(new URL('api/session/update',document.baseURI||location.href).href,{
-              method:'POST',credentials:'include',
-              headers:{'Content-Type':'application/json'},
-              body:JSON.stringify({session_id:S.session.id||S.session.session_id,model:first.value,model_provider:S.session.model_provider||null})
-            }).catch(()=>{});
+            _persistSessionModelCorrection(fallback.model,S.session.model_provider||null);
           }
         }
       }
@@ -3724,8 +4151,10 @@ function syncTopbar(){
   if(typeof syncWorkspaceDisplays==='function') syncWorkspaceDisplays();
   if(typeof syncTerminalButton==='function') syncTerminalButton();
   // modelSelect already set above
-  // Update profile chip labels (composer + titlebar)
-  _setProfileChipLabel(S.activeProfile||'default');
+  // Update profile chip labels (composer + titlebar); guarded for the same
+  // reason as the no-session branch above (test_issue1771 driver eval'ing
+  // syncTopbar in isolation).
+  if(typeof _setProfileChipLabel==='function') _setProfileChipLabel(S.activeProfile||'default');
 }
 
 function msgContent(m){
@@ -4298,12 +4727,135 @@ function clearMessageRenderCache(){
   _sessionHtmlCacheSid=null;
 }
 
-function _scrollAfterMessageRender(preserveScroll){
+function _clipCliToolSnippet(text, maxLen=20000){
+  const s=String(text||'');
+  if(s.length<=maxLen) return s;
+  return `${s.slice(0,maxLen)}\n\n... truncated ${s.length-maxLen} chars ...`;
+}
+
+function _cliToolResultText(raw){
+  const s=String(raw||'');
+  try{
+    const rd=JSON.parse(s);
+    if(rd && typeof rd==='object'){
+      for(const key of ['output','result','error','content','diff','patch']){
+        if(Object.prototype.hasOwnProperty.call(rd,key)){
+          const v=rd[key];
+          if(v==null) return '';
+          return typeof v==='string' ? v : JSON.stringify(v,null,2);
+        }
+      }
+    }
+  }catch(e){}
+  return s;
+}
+
+function _cliLooksLikePatchDiff(text){
+  const s=String(text||'');
+  if(!s) return false;
+  if(/\*\*\* Begin Patch/.test(s)) return true;
+  if(/^diff --git /m.test(s)) return true;
+  if(/^@@\s/m.test(s)) return true;
+  if(/(^|\n)---\s+/.test(s) && /(^|\n)\+\+\+\s+/.test(s)) return true;
+  return false;
+}
+
+function _cliToolResultSnippet(raw){
+  const fullText=_cliToolResultText(raw);
+  if(_cliLooksLikePatchDiff(fullText)) return _clipCliToolSnippet(fullText);
+  return String(fullText||'').slice(0,200);
+}
+
+function _prefixedCliDiffLines(prefix, value){
+  return String(value||'').split('\n').map(line=>`${prefix}${line}`).join('\n');
+}
+
+function _firstOwnedValue(obj, keys){
+  for(const key of keys){
+    if(obj && Object.prototype.hasOwnProperty.call(obj,key)) return obj[key];
+  }
+  return undefined;
+}
+
+function _cliPatchSnippetFromArgs(name, args){
+  if(!args || typeof args!=='object') return '';
+  const toolName=String(name||'').toLowerCase();
+  for(const key of ['patch','diff']){
+    const v=args[key];
+    if(typeof v==='string' && v.trim()) return _clipCliToolSnippet(v);
+  }
+  for(const key of ['input','content']){
+    const v=args[key];
+    if(typeof v==='string' && _cliLooksLikePatchDiff(v)) return _clipCliToolSnippet(v);
+  }
+  const isEditLike=toolName==='apply_patch'
+    || toolName==='patch'
+    || toolName.includes('edit')
+    || toolName==='replace'
+    || toolName==='str_replace';
+  if(!isEditLike) return '';
+  const oldValue=_firstOwnedValue(args,['old_string','old_str','old','before']);
+  const newValue=_firstOwnedValue(args,['new_string','new_str','new','after']);
+  if(oldValue!==undefined || newValue!==undefined){
+    const path=String(_firstOwnedValue(args,['file_path','path','filename'])||'');
+    const lines=[];
+    if(path) lines.push(path);
+    if(oldValue!==undefined) lines.push(_prefixedCliDiffLines('-', oldValue));
+    if(newValue!==undefined) lines.push(_prefixedCliDiffLines('+', newValue));
+    return _clipCliToolSnippet(lines.join('\n'));
+  }
+  if(Array.isArray(args.edits)){
+    const path=String(_firstOwnedValue(args,['file_path','path','filename'])||'');
+    const chunks=[];
+    if(path) chunks.push(path);
+    args.edits.slice(0,5).forEach(edit=>{
+      if(!edit || typeof edit!=='object') return;
+      const before=_firstOwnedValue(edit,['old_string','old_str','old','before']);
+      const after=_firstOwnedValue(edit,['new_string','new_str','new','after']);
+      if(before!==undefined) chunks.push(_prefixedCliDiffLines('-', before));
+      if(after!==undefined) chunks.push(_prefixedCliDiffLines('+', after));
+    });
+    if(chunks.length) return _clipCliToolSnippet(chunks.join('\n'));
+  }
+  return '';
+}
+
+function _cliToolCardSnippet(resultSnippet, patchSnippet){
+  if(_cliLooksLikePatchDiff(resultSnippet)) return resultSnippet;
+  if(!patchSnippet) return resultSnippet || '';
+  const result=String(resultSnippet||'').trim();
+  if(!result) return patchSnippet;
+  const generic=/^(success|ok|done|done\.|exit code: 0)$/i.test(result);
+  if(generic) return patchSnippet;
+  return `${resultSnippet}\n\n${patchSnippet}`;
+}
+
+function _cliToolCardHasDiffSnippet(resultSnippet, patchSnippet){
+  return !!patchSnippet || _cliLooksLikePatchDiff(resultSnippet);
+}
+
+function _captureMessageScrollSnapshot(){
+  const el=$('messages');
+  if(!el) return null;
+  return {top:el.scrollTop};
+}
+function _restoreMessageScrollSnapshot(snapshot){
+  const el=$('messages');
+  if(!el||!snapshot) return;
+  const maxTop=Math.max(0,el.scrollHeight-el.clientHeight);
+  _programmaticScroll=true;
+  el.scrollTop=Math.max(0,Math.min(Number(snapshot.top)||0,maxTop));
+  _lastScrollTop=el.scrollTop;
+  requestAnimationFrame(()=>{ setTimeout(()=>{_programmaticScroll=false;},0); });
+}
+function _scrollAfterMessageRender(preserveScroll, scrollSnapshot){
   // Terminal stream renders can happen after S.activeStreamId is cleared.
   // In that case, preserveScroll asks the normal pin-state helper to decide:
-  // pinned users stay at bottom; users who manually scrolled up stay put.
+  // pinned users stay at bottom; users who manually scrolled up get their
+  // pre-render scrollTop restored after the DOM replacement.
   if(preserveScroll){
-    scrollIfPinned();
+    if(_scrollPinned) scrollIfPinned();
+    else _restoreMessageScrollSnapshot(scrollSnapshot);
     return;
   }
   if(S.activeStreamId){
@@ -4315,6 +4867,7 @@ function _scrollAfterMessageRender(preserveScroll){
 
 function renderMessages(options){
   const preserveScroll=!!(options&&options.preserveScroll);
+  const scrollSnapshot=preserveScroll?_captureMessageScrollSnapshot():null;
   const inner=$('msgInner');
   const sid=S.session?S.session.session_id:null;
   const msgCount=S.messages.length;
@@ -4339,9 +4892,9 @@ function renderMessages(options){
       inner.innerHTML=cached.html;
       _sessionHtmlCacheSid=sid;
       _wireMessageWindowLoadEarlierButton();
-      _scrollAfterMessageRender(preserveScroll);
-      requestAnimationFrame(()=>{highlightCode();addCopyButtons();loadDiffInline();loadCsvInline();loadExcalidrawInline();loadPdfInline();loadHtmlInline();renderMermaidBlocks();renderKatexBlocks();});
-      requestAnimationFrame(()=>{highlightCode();addCopyButtons();initTreeViews();loadPdfInline();loadHtmlInline();renderMermaidBlocks();renderKatexBlocks();});
+      if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
+      _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
+      requestAnimationFrame(()=>postProcessRenderedMessages(inner));
       if(typeof _initMediaPlaybackObserver==='function') _initMediaPlaybackObserver();
       if(typeof loadTodos==='function'&&document.getElementById('panelTodos')&&document.getElementById('panelTodos').classList.contains('active')){loadTodos();}
       return;
@@ -4358,6 +4911,9 @@ function renderMessages(options){
   const sessionCompressionAnchorKey=(
     S.session && S.session.compression_anchor_message_key && typeof S.session.compression_anchor_message_key==='object'
   ) ? S.session.compression_anchor_message_key : null;
+  const sessionCompressionSummary=(
+    S.session && typeof S.session.compression_anchor_summary==='string'
+  ) ? S.session.compression_anchor_summary.trim() : '';
   const preservedCompressionTaskMessages=_latestPreservedCompressionTaskListMessages(S.messages);
   const vis=S.messages.filter(m=>{
     if(!m||!m.role||m.role==='tool')return false;
@@ -4374,8 +4930,10 @@ function renderMessages(options){
   inner.innerHTML='';
   const compressionNode=compressionState?_compressionCardsNode(compressionState):null;
   const referenceMessage=S.messages.find(m=>_isContextCompactionMessage(m));
-  const referenceText=referenceMessage?msgContent(referenceMessage)||String(referenceMessage.content||''):'';
-  const referenceNode=(!compressionState && referenceMessage && (sessionCompressionAnchor!==null || sessionCompressionAnchorKey))
+  const referenceText=referenceMessage
+    ? msgContent(referenceMessage)||String(referenceMessage.content||'')
+    : sessionCompressionSummary;
+  const referenceNode=(!compressionState && !!referenceText && (sessionCompressionAnchor!==null || sessionCompressionAnchorKey || sessionCompressionSummary))
     ? (()=>{const row=document.createElement('div');row.innerHTML=`<div class="compression-turn"><div class="compression-turn-blocks">${_compressionReferenceCardHtml(referenceText,false)}${_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages)}</div></div>`;return row.firstElementChild;})()
     : null;
   let preservedCompressionTaskCardsAttached=!!referenceNode;
@@ -4399,6 +4957,7 @@ function renderMessages(options){
   const renderVisWithIdx=visWithIdx.slice(windowStart);
   const firstRenderedRawIdx=renderVisWithIdx.length?renderVisWithIdx[0].rawIdx:Infinity;
   const hasServerOlder=!!(typeof _messagesTruncated!=='undefined' && _messagesTruncated && S.messages.length>0);
+  if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
   if(hiddenBeforeCount>0 || hasServerOlder){
     const indicator=document.createElement('button');
     indicator.type='button';
@@ -4480,6 +5039,7 @@ function renderMessages(options){
       }
     }
     const isUser=m.role==='user';
+    const displayContent=isUser?_stripWorkspaceDisplayPrefix(content):content;
     const isLastAssistant=!isUser&&vi===renderVisWithIdx.length-1;
     let filesHtml='';
     if(m.attachments&&m.attachments.length){
@@ -4493,7 +5053,10 @@ function renderMessages(options){
         return _renderAttachmentHtml(fname,fileUrl);
       }).join('')}</div>`;
     }
-    const bodyHtml = isUser ? _renderUserFencedBlocks(content) : renderMd(_stripXmlToolCallsDisplay(String(content)));
+    let bodyHtml = isUser ? _renderUserFencedBlocks(displayContent) : renderMd(_stripXmlToolCallsDisplay(String(displayContent)));
+    if(!isUser&&m.provider_details){
+      bodyHtml += `<details class="provider-error-details"><summary>Provider details</summary><pre><code>${esc(String(m.provider_details))}</code></pre></details>`;
+    }
     const statusHtml = (!isUser&&m._statusCard) ? _statusCardHtml(m._statusCard) : '';
     const isEditableUser=isUser&&rawIdx===lastUserRawIdx;
     const editBtn  = isEditableUser ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
@@ -4531,7 +5094,7 @@ function renderMessages(options){
       row.className='msg-row';
       row.dataset.msgIdx=rawIdx;
       row.dataset.role='user';
-      row.dataset.rawText=String(content).trim();
+      row.dataset.rawText=String(displayContent).trim();
       row.innerHTML=`${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`;
       inner.appendChild(row);
       userRows.set(rawIdx, row);
@@ -4664,20 +5227,12 @@ function renderMessages(options){
     // fallback-built cards carry their result snippet (not just the command).
     // Without this step CLI-origin sessions reload with empty tool cards.
     const resultsByTid={};
-    const _snipFromRaw=(raw)=>{
-      const s=String(raw||'');
-      try{
-        const rd=JSON.parse(s);
-        if(rd && typeof rd==='object') return String(rd.output||rd.result||rd.error||s).slice(0,200);
-      }catch(e){}
-      return s.slice(0,200);
-    };
     S.messages.forEach(m=>{
       if(!m) return;
       // OpenAI / Hermes CLI format: role=tool with tool_call_id
       if(m.role==='tool'){
         const tid=m.tool_call_id||m.tool_use_id||'';
-        if(tid) resultsByTid[tid]=_snipFromRaw(m.content);
+        if(tid) resultsByTid[tid]=_cliToolResultSnippet(m.content);
         return;
       }
       // Anthropic format: tool_result blocks inside a user message content array
@@ -4689,7 +5244,7 @@ function renderMessages(options){
           const raw=typeof p.content==='string'?p.content
                    :Array.isArray(p.content)?p.content.map(c=>c&&c.text?c.text:'').join('')
                    :'';
-          resultsByTid[tid]=_snipFromRaw(raw);
+          resultsByTid[tid]=_cliToolResultSnippet(raw);
         });
       }
     });
@@ -4703,10 +5258,20 @@ function renderMessages(options){
         const name=fn.name||tc.name||'tool';
         let args={};
         try{ args=JSON.parse(fn.arguments||'{}'); }catch(e){}
+        const tid=tc.id||tc.call_id||'';
+        const patchSnippet=_cliPatchSnippetFromArgs(name,args);
+        const resultSnippet=resultsByTid[tid]||'';
         let argsSnap={};
         Object.keys(args).slice(0,4).forEach(k=>{ const v=String(args[k]); argsSnap[k]=v.slice(0,120)+(v.length>120?'...':''); });
-        const tid=tc.id||tc.call_id||'';
-        derived.push({name,snippet:resultsByTid[tid]||'',tid,assistant_msg_idx:rawIdx,args:argsSnap,done:true});
+        derived.push({
+          name,
+          snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
+          is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
+          tid,
+          assistant_msg_idx:rawIdx,
+          args:argsSnap,
+          done:true,
+        });
       });
       // Anthropic format: tool_use blocks inside assistant content array
       if(Array.isArray(m.content)){
@@ -4714,12 +5279,22 @@ function renderMessages(options){
           if(!p||typeof p!=='object'||p.type!=='tool_use') return;
           const name=p.name||'tool';
           const args=p.input||{};
+          const tid=p.id||'';
+          const patchSnippet=_cliPatchSnippetFromArgs(name,args);
+          const resultSnippet=resultsByTid[tid]||'';
           const argsSnap={};
           if(args && typeof args==='object'){
             Object.keys(args).slice(0,4).forEach(k=>{ const v=String(args[k]); argsSnap[k]=v.slice(0,120)+(v.length>120?'...':''); });
           }
-          const tid=p.id||'';
-          derived.push({name,snippet:resultsByTid[tid]||'',tid,assistant_msg_idx:rawIdx,args:argsSnap,done:true});
+          derived.push({
+            name,
+            snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
+            is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
+            tid,
+            assistant_msg_idx:rawIdx,
+            args:argsSnap,
+            done:true,
+          });
         });
       }
     });
@@ -4874,10 +5449,9 @@ function renderMessages(options){
   // Only force-scroll when not actively streaming — mid-stream re-renders
   // (tool completion, session switch) must not override the user's scroll position.
   // scrollIfPinned() respects _scrollPinned, so it's a no-op if user scrolled up.
-  _scrollAfterMessageRender(preserveScroll);
+  _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
   // Apply syntax highlighting after DOM is built
-  requestAnimationFrame(()=>{highlightCode();addCopyButtons();loadDiffInline();loadCsvInline();loadExcalidrawInline();loadPdfInline();loadHtmlInline();renderMermaidBlocks();renderKatexBlocks();});
-  requestAnimationFrame(()=>{highlightCode();addCopyButtons();initTreeViews();loadPdfInline();loadHtmlInline();renderMermaidBlocks();renderKatexBlocks();}); 
+  requestAnimationFrame(()=>postProcessRenderedMessages(inner));
   // Refresh todo panel if it's currently open
   if(typeof loadTodos==='function' && document.getElementById('panelTodos') && document.getElementById('panelTodos').classList.contains('active')){
     loadTodos();
@@ -4941,6 +5515,8 @@ function buildToolCard(tc){
     }
   }
   const hasMore=tc.snippet&&tc.snippet.length>displaySnippet.length;
+  const moreLabel=tc.is_diff?'Show diff':'Show more';
+  const lessLabel=tc.is_diff?'Hide diff':'Show less';
   const runIndicator=tc.done===false?'<span class="tool-card-running-dot"></span>':'';
   const isSubagent=tc.name==='subagent_progress';
   const isDelegation=tc.name==='delegate_task';
@@ -4964,7 +5540,7 @@ function buildToolCard(tc){
         }</div>`:''}
         ${displaySnippet?`<div class="tool-card-result">
           <pre>${esc(displaySnippet)}</pre>
-          ${hasMore?`<button class="tool-card-more" data-full="${esc(tc.snippet||'').replace(/"/g,'&quot;')}" data-short="${esc(displaySnippet||'').replace(/"/g,'&quot;')}" onclick="event.stopPropagation();const p=this.previousElementSibling;const full=this.dataset.full;const short=this.dataset.short;p.textContent=p.textContent===short?full:short;this.textContent=p.textContent===short?'Show more':'Show less'">Show more</button>`:''}
+          ${hasMore?`<button class="tool-card-more" data-full="${esc(tc.snippet||'').replace(/"/g,'&quot;')}" data-short="${esc(displaySnippet||'').replace(/"/g,'&quot;')}" data-more-label="${esc(moreLabel)}" data-less-label="${esc(lessLabel)}" onclick="event.stopPropagation();const p=this.previousElementSibling;const full=this.dataset.full;const short=this.dataset.short;p.textContent=p.textContent===short?full:short;this.textContent=p.textContent===short?this.dataset.moreLabel:this.dataset.lessLabel">${esc(moreLabel)}</button>`:''}
         </div>`:''}
       </div>`:''}
     </div>`;
@@ -5186,6 +5762,19 @@ async function regenerateResponse(btn) {
   } catch(e) { setStatus(t('regen_failed') + e.message); }
 }
 
+function postProcessRenderedMessages(container) {
+  highlightCode(container);
+  addCopyButtons(container);
+  loadDiffInline(container);
+  loadCsvInline(container);
+  loadExcalidrawInline(container);
+  loadPdfInline(container);
+  loadHtmlInline(container);
+  renderMermaidBlocks(container);
+  renderKatexBlocks(container);
+  initTreeViews(container);
+}
+
 function highlightCode(container) {
   // Apply Prism.js syntax highlighting to all code blocks in container (or whole messages area)
   if(typeof Prism === 'undefined' || !Prism.highlightAllUnder) return;
@@ -5209,8 +5798,9 @@ function _loadJsyamlThen(cb){
   document.head.appendChild(s);
 }
 
-function initTreeViews(){
-  document.querySelectorAll('.code-tree-wrap:not([data-tree-init])').forEach(wrap=>{
+function initTreeViews(container){
+  const root=container||document;
+  root.querySelectorAll('.code-tree-wrap:not([data-tree-init])').forEach(wrap=>{
     const rawText=wrap.dataset.raw;
     const lang=wrap.dataset.lang;
     let parsed=null;
@@ -5367,9 +5957,10 @@ function addCopyButtons(container){
 let _mermaidLoading=false;
 let _mermaidReady=false;
 
-function loadDiffInline(){
+function loadDiffInline(container){
   const DIFF_MAX_SIZE=512*1024; // 512 KB cap for inline diff rendering
-  document.querySelectorAll('.diff-inline-load:not([data-loaded])').forEach(el=>{
+  const root=container||document;
+  root.querySelectorAll('.diff-inline-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
     fetch('api/media?path='+encodeURIComponent(path))
@@ -5394,9 +5985,10 @@ function loadDiffInline(){
   });
 }
 
-function loadCsvInline(){
+function loadCsvInline(container){
   const CSV_MAX_SIZE=256*1024; // 256 KB cap for inline CSV rendering
-  document.querySelectorAll('.csv-inline-load:not([data-loaded])').forEach(el=>{
+  const root=container||document;
+  root.querySelectorAll('.csv-inline-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
     fetch('api/media?path='+encodeURIComponent(path))
@@ -5429,9 +6021,10 @@ function loadCsvInline(){
   });
 }
 
-function loadExcalidrawInline(){
+function loadExcalidrawInline(container){
   const EXCALIDRAW_MAX_SIZE=512*1024; // 512 KB cap
-  document.querySelectorAll('.excalidraw-inline-load:not([data-loaded])').forEach(el=>{
+  const root=container||document;
+  root.querySelectorAll('.excalidraw-inline-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
     fetch('api/media?path='+encodeURIComponent(path))
@@ -5555,9 +6148,10 @@ function _renderExcalidrawCanvases(){
 // the full buffer is received — ideally the server would enforce it before
 // streaming (out of scope for this client-side PR).
 let _pdfjsReady=false, _pdfjsLoading=false;
-function loadPdfInline(){
+function loadPdfInline(container){
   const PDF_MAX_SIZE=4*1024*1024; // 4 MB cap for inline PDF preview
-  document.querySelectorAll('.pdf-preview-load:not([data-loaded])').forEach(el=>{
+  const root=container||document;
+  root.querySelectorAll('.pdf-preview-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
     const fname=path.split('/').pop()||path;
@@ -5629,9 +6223,10 @@ function loadPdfInline(){
 }
 
 // ── HTML inline preview (sandboxed iframe) ─────────────────────────────────
-function loadHtmlInline(){
+function loadHtmlInline(container){
   const HTML_MAX_SIZE=256*1024; // 256 KB cap for inline HTML preview
-  document.querySelectorAll('.html-preview-load:not([data-loaded])').forEach(el=>{
+  const root=container||document;
+  root.querySelectorAll('.html-preview-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
     const fname=path.split('/').pop()||path;
@@ -5639,13 +6234,13 @@ function loadHtmlInline(){
       .then(r=>{if(!r.ok) throw new Error(r.status); return r.text();})
       .then(html=>{
         if(html.length>HTML_MAX_SIZE){
-          const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
-          el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('html_too_large')}</span></div>`;
+          const openUrl='api/media?path='+encodeURIComponent(path)+'&inline=1';
+          el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${openUrl}" target="_blank" rel="noopener">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('html_too_large')}</span></div>`;
           return;
         }
-        const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+        const openUrl='api/media?path='+encodeURIComponent(path)+'&inline=1';
         const safeHtml=html.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-        el.outerHTML=`<div class="html-preview-wrap"><div class="html-preview-header"><span>${t('html_sandbox_label')}</span><a href="${dlUrl}" download="${esc(fname)}" class="html-open-link">${t('html_open_full')} ↗</a></div><iframe srcdoc="${safeHtml}" sandbox="allow-scripts" class="html-preview-iframe" loading="lazy"></iframe></div>`;
+        el.outerHTML=`<div class="html-preview-wrap"><div class="html-preview-header"><span>${t('html_sandbox_label')}</span><a href="${openUrl}" target="_blank" rel="noopener" class="html-open-link">${t('html_open_full')} ↗</a></div><iframe srcdoc="${safeHtml}" sandbox="allow-scripts" class="html-preview-iframe" loading="lazy"></iframe></div>`;
       })
       .catch(()=>{
         const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
@@ -5654,8 +6249,9 @@ function loadHtmlInline(){
   });
 }
 
-function renderMermaidBlocks(){
-  const blocks=document.querySelectorAll('.mermaid-block:not([data-rendered])');
+function renderMermaidBlocks(container){
+  const root=container||document;
+  const blocks=root.querySelectorAll('.mermaid-block:not([data-rendered])');
   if(!blocks.length) return;
   if(!_mermaidReady){
     if(!_mermaidLoading){
@@ -5704,8 +6300,9 @@ function renderMermaidBlocks(){
 let _katexLoading=false;
 let _katexReady=false;
 
-function renderKatexBlocks(){
-  const blocks=document.querySelectorAll('.katex-block:not([data-rendered]),.katex-inline:not([data-rendered])');
+function renderKatexBlocks(container){
+  const root=container||document;
+  const blocks=root.querySelectorAll('.katex-block:not([data-rendered]),.katex-inline:not([data-rendered])');
   if(!blocks.length) return;
   if(!_katexReady){
     if(!_katexLoading){
@@ -5943,6 +6540,250 @@ function renderBreadcrumb(){
   }
 }
 
+const WORKSPACE_HIDDEN_FILE_NAMES=new Set([
+  '.DS_Store','._.DS_Store','.AppleDouble','.Spotlight-V100','.Trashes','.fseventsd',
+  'Thumbs.db','Desktop.ini','ehthumbs.db','$RECYCLE.BIN',
+  '.directory','.git','.svn','.hg','node_modules','__pycache__',
+  '.pytest_cache','.mypy_cache','.ruff_cache','.tox','.venv','venv'
+]);
+const WORKSPACE_HIDDEN_FILE_PREFIXES=['._','.Trash-'];
+function _workspaceShouldHideEntry(item){
+  if(!item||S.showHiddenWorkspaceFiles)return false;
+  const name=String(item.name||'');
+  if(!name)return false;
+  if(WORKSPACE_HIDDEN_FILE_NAMES.has(name))return true;
+  return WORKSPACE_HIDDEN_FILE_PREFIXES.some(prefix=>name.startsWith(prefix));
+}
+function _visibleWorkspaceEntries(entries){
+  const list=Array.isArray(entries)?entries:[];
+  return S.showHiddenWorkspaceFiles?list:list.filter(item=>!_workspaceShouldHideEntry(item));
+}
+function _syncWorkspaceHiddenToggle(){
+  const el=$('workspaceShowHiddenFiles');
+  if(el)el.checked=!!S.showHiddenWorkspaceFiles;
+  // Reflect "hidden files are visible" state on the panel heading + kebab dot,
+  // so users can see they've flipped a non-default workspace pref without
+  // having to open the menu. The menu itself stays out of the way otherwise.
+  const ind=$('workspaceHiddenIndicator');
+  if(ind){
+    if(S.showHiddenWorkspaceFiles){ ind.hidden=false; ind.removeAttribute('hidden'); }
+    else { ind.hidden=true; ind.setAttribute('hidden',''); }
+  }
+  const dot=$('workspacePrefsDot');
+  if(dot){
+    if(S.showHiddenWorkspaceFiles){ dot.hidden=false; dot.removeAttribute('hidden'); }
+    else { dot.hidden=true; dot.setAttribute('hidden',''); }
+  }
+}
+function toggleWorkspaceHiddenFiles(value){
+  S.showHiddenWorkspaceFiles=!!value;
+  try{localStorage.setItem('hermes-workspace-show-hidden-files',S.showHiddenWorkspaceFiles?'1':'0');}catch(_){}
+  _syncWorkspaceHiddenToggle();
+  renderFileTree();
+}
+try{S.showHiddenWorkspaceFiles=localStorage.getItem('hermes-workspace-show-hidden-files')==='1';}catch(_){}
+
+// ── Workspace preferences kebab menu (#1793 UX refinement) ───────────────
+// The "Show hidden files" toggle used to live as a permanent inline row
+// below the breadcrumb bar. That ate ~32px of vertical space on every
+// panel view (root, subdir, file preview), even though the toggle is a
+// set-once preference — most users flip it once or never. Moving the
+// control into a kebab dropdown reclaims the space; the small "(hidden
+// files visible)" indicator on the heading reflects the non-default state
+// so the affordance isn't lost.
+let _workspacePrefsMenu = null;
+let _workspacePrefsAnchor = null;
+function _closeWorkspacePrefsMenu(){
+  if(_workspacePrefsMenu){ _workspacePrefsMenu.remove(); _workspacePrefsMenu=null; }
+  if(_workspacePrefsAnchor){
+    _workspacePrefsAnchor.classList.remove('active');
+    _workspacePrefsAnchor.setAttribute('aria-expanded','false');
+    _workspacePrefsAnchor=null;
+  }
+}
+function _positionWorkspacePrefsMenu(anchorEl){
+  if(!_workspacePrefsMenu||!anchorEl) return;
+  const rect=anchorEl.getBoundingClientRect();
+  const menuW=Math.min(260, Math.max(220, _workspacePrefsMenu.scrollWidth||220));
+  let left=rect.right-menuW;
+  if(left<8) left=8;
+  if(left+menuW>window.innerWidth-8) left=window.innerWidth-menuW-8;
+  let top=rect.bottom+6;
+  const menuH=_workspacePrefsMenu.offsetHeight||0;
+  if(top+menuH>window.innerHeight-8 && rect.top>menuH+12) top=rect.top-menuH-6;
+  if(top<8) top=8;
+  _workspacePrefsMenu.style.left=left+'px';
+  _workspacePrefsMenu.style.top=top+'px';
+}
+function _buildWorkspacePrefsMenu(){
+  const menu=document.createElement('div');
+  menu.className='workspace-prefs-menu open';
+  menu.setAttribute('role','menu');
+  // The checkbox keeps id="workspaceShowHiddenFiles" so existing call
+  // sites (and the existing test_issue1793_file_tree_cruft_filter test)
+  // can find it the same way as before. Only the parent container moves.
+  const labelTxt = (typeof t==='function' ? t('workspace_show_hidden_files') : 'Show hidden files');
+  const descTxt  = (typeof t==='function' ? t('workspace_show_hidden_files_desc') : 'Include .DS_Store, .git, node_modules, and other hidden / system files in the file tree.');
+  const row=document.createElement('label');
+  row.className='workspace-prefs-item';
+  row.setAttribute('role','menuitemcheckbox');
+  row.innerHTML=
+    '<input type="checkbox" id="workspaceShowHiddenFiles" '+
+    'onchange="toggleWorkspaceHiddenFiles(this.checked)">'+
+    '<span class="workspace-prefs-copy">'+
+      '<span class="workspace-prefs-name">'+esc(labelTxt)+'</span>'+
+      '<span class="workspace-prefs-meta">'+esc(descTxt)+'</span>'+
+    '</span>';
+  const cb=row.querySelector('input');
+  if(cb) cb.checked=!!S.showHiddenWorkspaceFiles;
+  menu.appendChild(row);
+  return menu;
+}
+function toggleWorkspacePrefsMenu(e){
+  if(e&&e.preventDefault) e.preventDefault();
+  if(e&&e.stopPropagation) e.stopPropagation();
+  // Anchor preference: the kebab button. The indicator chip can also open
+  // the same menu (click on "(hidden visible)"), but anchor positioning
+  // always references the kebab so the menu lands in the same place.
+  const anchor=$('btnWorkspacePrefs')||(e&&e.currentTarget)||null;
+  if(_workspacePrefsMenu&&_workspacePrefsAnchor===anchor){ _closeWorkspacePrefsMenu(); return; }
+  _closeWorkspacePrefsMenu();
+  const menu=_buildWorkspacePrefsMenu();
+  document.body.appendChild(menu);
+  _workspacePrefsMenu=menu;
+  _workspacePrefsAnchor=anchor;
+  if(anchor){ anchor.classList.add('active'); anchor.setAttribute('aria-expanded','true'); }
+  _positionWorkspacePrefsMenu(anchor);
+}
+document.addEventListener('click',e=>{
+  if(!_workspacePrefsMenu) return;
+  if(_workspacePrefsMenu.contains(e.target)) return;
+  if(_workspacePrefsAnchor&&_workspacePrefsAnchor.contains(e.target)) return;
+  // Indicator chip is also an opener — clicking it should toggle, not close.
+  const ind=$('workspaceHiddenIndicator');
+  if(ind&&ind.contains(e.target)) return;
+  _closeWorkspacePrefsMenu();
+});
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'&&_workspacePrefsMenu) _closeWorkspacePrefsMenu();
+});
+window.addEventListener('resize',()=>{
+  if(_workspacePrefsMenu&&_workspacePrefsAnchor) _positionWorkspacePrefsMenu(_workspacePrefsAnchor);
+});
+
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',_syncWorkspaceHiddenToggle);
+else _syncWorkspaceHiddenToggle();
+
+function bindWorkspaceHeadingActions(){
+  const heading=$('workspacePanelHeading');
+  if(!heading||heading.dataset.bound==='1')return;
+  heading.dataset.bound='1';
+  const goRoot=()=>{
+    if(S.session&&S.session.workspace) loadDir('.');
+  };
+  heading.onclick=goRoot;
+  heading.onkeydown=(e)=>{
+    if(!(S.session&&S.session.workspace)) return;
+    if(e.key==='Enter'||e.key===' '){
+      e.preventDefault();
+      goRoot();
+    }
+  };
+  heading.oncontextmenu=(e)=>{
+    if(!(S.session&&S.session.workspace)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    _showWorkspaceRootContextMenu(e);
+  };
+  _syncWorkspaceHeadingState();
+}
+
+function _syncWorkspaceHeadingState(){
+  const heading=$('workspacePanelHeading');
+  if(!heading) return;
+  const enabled=!!(S.session&&S.session.workspace);
+  heading.classList.toggle('workspace-panel-heading--enabled',enabled);
+  if(enabled){
+    heading.setAttribute('role','button');
+    heading.setAttribute('tabindex','0');
+    heading.setAttribute('aria-disabled','false');
+    heading.title='Workspace root';
+  } else {
+    heading.removeAttribute('role');
+    heading.removeAttribute('tabindex');
+    heading.setAttribute('aria-disabled','true');
+    heading.title=t('no_workspace');
+  }
+}
+if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',bindWorkspaceHeadingActions);
+else bindWorkspaceHeadingActions();
+
+function _workspaceContextMenuItem(label, onClick, opts={}){
+  const item=document.createElement('div');
+  item.textContent=label;
+  item.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:'+(opts.danger?'var(--error,#e94560)':'var(--text)')+';';
+  item.onmouseenter=()=>item.style.background='var(--hover-bg)';
+  item.onmouseleave=()=>item.style.background='';
+  item.onclick=onClick;
+  return item;
+}
+
+function _copyTextWithFallback(text, successMsg, failurePrefix){
+  const done=()=>showToast(successMsg);
+  const fail=(err)=>showToast(failurePrefix+(err&&err.message?err.message:String(err||'')));
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    return navigator.clipboard.writeText(text).then(done).catch(err=>{
+      const ta=document.createElement('textarea');
+      ta.value=text;
+      ta.style.cssText='position:fixed;left:-9999px;top:-9999px;';
+      document.body.appendChild(ta);
+      ta.select();
+      let copied=false;
+      try{copied=document.execCommand('copy');}catch(_){}
+      ta.remove();
+      if(copied) done(); else fail(err);
+    });
+  }
+  const ta=document.createElement('textarea');
+  ta.value=text;
+  ta.style.cssText='position:fixed;left:-9999px;top:-9999px;';
+  document.body.appendChild(ta);
+  ta.select();
+  let copied=false;
+  try{copied=document.execCommand('copy');}catch(err){ta.remove();fail(err);return Promise.resolve();}
+  ta.remove();
+  if(copied) done(); else fail('clipboard unavailable');
+  return Promise.resolve();
+}
+
+function _showWorkspaceRootContextMenu(e){
+  document.querySelectorAll('.file-ctx-menu').forEach(el=>el.remove());
+  const menu=document.createElement('div');
+  menu.className='file-ctx-menu workspace-root-ctx-menu';
+  menu.style.cssText='position:fixed;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px 0;z-index:9999;min-width:160px;box-shadow:0 4px 16px rgba(0,0,0,.35);';
+  const vw=window.innerWidth,vh=window.innerHeight;
+  menu.style.left=(e.clientX+160>vw?e.clientX-170:e.clientX)+'px';
+  menu.style.top=(e.clientY+80>vh?e.clientY-80:e.clientY)+'px';
+
+  menu.appendChild(_workspaceContextMenuItem(t('reveal_in_finder'),async()=>{
+    menu.remove();
+    try{await api('/api/file/reveal',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:'.'})});}
+    catch(err){showToast(t('reveal_failed')+(err.message||err));}
+  }));
+
+  menu.appendChild(_workspaceContextMenuItem(t('copy_file_path'),async()=>{
+    menu.remove();
+    try{
+      const r=await api('/api/file/path',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:'.'})});
+      await _copyTextWithFallback((r&&r.path)||'.',t('path_copied'),t('path_copy_failed'));
+    }catch(err){showToast(t('path_copy_failed')+(err.message||err));}
+  }));
+
+  document.body.appendChild(menu);
+  const dismiss=()=>{menu.remove();document.removeEventListener('click',dismiss);};
+  setTimeout(()=>document.addEventListener('click',dismiss),0);
+}
+
 // Track expanded directories for tree view
 if(!S._expandedDirs) S._expandedDirs=new Set();
 // Cache of fetched directory contents: path -> entries[]
@@ -5962,11 +6803,12 @@ function renderFileTree(){
   }
   if(emptyEl) emptyEl.style.display='none';
   box.style.display='';
-  if(!S.entries||!S.entries.length){
+  const visibleEntries=_visibleWorkspaceEntries(S.entries);
+  if(!visibleEntries.length){
     if(emptyEl){emptyEl.textContent=t('workspace_empty_dir');emptyEl.style.display='flex';}
     return;
   }
-  _renderTreeItems(box, S.entries, 0);
+  _renderTreeItems(box, visibleEntries, 0);
 }
 
 function _renderTreeItems(container, entries, depth){
@@ -6111,7 +6953,7 @@ function _renderTreeItems(container, entries, depth){
 
     // Render children if directory is expanded
     if(item.type==='dir'&&S._expandedDirs.has(item.path)){
-      const children=S._dirCache[item.path]||[];
+      const children=_visibleWorkspaceEntries(S._dirCache[item.path]||[]);
       if(children.length){
         _renderTreeItems(container, children, depth+1);
       }else{
@@ -6153,7 +6995,7 @@ function _showFileContextMenu(e, item){
   const renameItem=document.createElement('div');
   renameItem.textContent=t('rename_title');
   renameItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
-  renameItem.onmouseenter=()=>renameItem.style.background='var(--hover)';
+  renameItem.onmouseenter=()=>renameItem.style.background='var(--hover-bg)';
   renameItem.onmouseleave=()=>renameItem.style.background='';
   renameItem.onclick=()=>{menu.remove();_inlineRenameFileItem(item);};
   menu.appendChild(renameItem);
@@ -6162,10 +7004,50 @@ function _showFileContextMenu(e, item){
   const revealItem=document.createElement('div');
   revealItem.textContent=t('reveal_in_finder');
   revealItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
-  revealItem.onmouseenter=()=>revealItem.style.background='var(--hover)';
+  revealItem.onmouseenter=()=>revealItem.style.background='var(--hover-bg)';
   revealItem.onmouseleave=()=>revealItem.style.background='';
-  revealItem.onclick=async()=>{menu.remove();try{await api('/api/file/reveal',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:item.path})});}catch(err){showToast(t('reveal_failed')+err.message);}};
+  revealItem.onclick=async()=>{menu.remove();try{await api('/api/file/reveal',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:item.path})});}catch(err){showToast(t('reveal_failed')+(err.message||err));}};
   menu.appendChild(revealItem);
+
+  // Copy file path — resolves the absolute on-disk path on the server (so the
+  // user gets the full /home/.../workspace/foo.py rather than the relative
+  // path the file tree shows) and writes it to the OS clipboard. Useful for
+  // pasting into terminals, editors, or other apps without taking the slower
+  // Reveal-in-Finder round trip.
+  const copyPathItem=document.createElement('div');
+  copyPathItem.textContent=t('copy_file_path');
+  copyPathItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
+  copyPathItem.onmouseenter=()=>copyPathItem.style.background='var(--hover-bg)';
+  copyPathItem.onmouseleave=()=>copyPathItem.style.background='';
+  copyPathItem.onclick=async()=>{
+    menu.remove();
+    try{
+      const r=await api('/api/file/path',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:item.path})});
+      const abs=(r&&r.path)||item.path;
+      try{
+        await navigator.clipboard.writeText(abs);
+        showToast(t('path_copied'));
+      }catch(clipErr){
+        // Fallback for browsers where Clipboard API is gated (older Safari,
+        // non-secure contexts). Use the legacy execCommand path against a
+        // hidden textarea — this is the same pattern boot.js uses for the
+        // "Copy" buttons on code blocks.
+        const ta=document.createElement('textarea');
+        ta.value=abs;
+        ta.style.cssText='position:fixed;left:-9999px;top:-9999px;';
+        document.body.appendChild(ta);
+        ta.select();
+        let copied=false;
+        try{copied=document.execCommand('copy');}catch(_){}
+        ta.remove();
+        if(copied) showToast(t('path_copied'));
+        else showToast(t('path_copy_failed')+(clipErr&&clipErr.message?clipErr.message:String(clipErr)));
+      }
+    }catch(err){
+      showToast(t('path_copy_failed')+(err.message||err));
+    }
+  };
+  menu.appendChild(copyPathItem);
 
   // Divider + Delete
   const sep=document.createElement('hr');
@@ -6174,7 +7056,7 @@ function _showFileContextMenu(e, item){
   const delItem=document.createElement('div');
   delItem.textContent=t('delete_title');
   delItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--error,#e94560);';
-  delItem.onmouseenter=()=>delItem.style.background='var(--hover)';
+  delItem.onmouseenter=()=>delItem.style.background='var(--hover-bg)';
   delItem.onmouseleave=()=>delItem.style.background='';
   delItem.onclick=()=>{menu.remove();if(item.type==='dir')deleteWorkspaceDir(item.path,item.name);else deleteWorkspaceFile(item.path,item.name);};
   menu.appendChild(delItem);
@@ -6186,7 +7068,18 @@ function _showFileContextMenu(e, item){
 
 async function _inlineRenameFileItem(item){
   if(!S.session)return;
-  const newName=await showPromptDialog({message:t('rename_prompt'),defaultValue:item.name,placeholder:item.name,confirmLabel:t('rename_title')});
+  // Pre-fill the input with the current name and select just the stem
+  // (everything before the last '.') so the user can immediately retype the
+  // basename while preserving the extension — matches macOS Finder. For
+  // directories or names with no '.', the helper selects the full value.
+  // `selectStem` also handles dotfiles ('.gitignore') by full-selecting.
+  const newName=await showPromptDialog({
+    message:t('rename_prompt'),
+    value:item.name,
+    confirmLabel:t('rename_title'),
+    selectStem:item.type!=='dir',
+    selectAll:item.type==='dir'
+  });
   if(!newName||newName===item.name)return;
   try{
     await api('/api/file/rename',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:item.path,new_name:newName})});
@@ -6312,7 +7205,22 @@ function renderTray(){ // non-media files use paperclip chip
     tray.appendChild(chip);
   });
 }
-function addFiles(files){for(const f of files){if(!S.pendingFiles.find(p=>p.name===f.name))S.pendingFiles.push(f);}renderTray();}
+function _uploadTooLargeMessage(file){
+  const fileSizeMb=Math.ceil(((file&&file.size)||0)/1024/1024);
+  return t('upload_too_large',MAX_UPLOAD_MB,fileSizeMb);
+}
+function _showUploadTooLarge(file){
+  const message=`${t('upload_failed')}${file&&file.name?file.name:'file'} \u2014 ${_uploadTooLargeMessage(file)}`;
+  if(typeof setStatus==='function')setStatus(`\u274c ${message}`);
+  else if(typeof showToast==='function')showToast(message,5000,'error');
+}
+function addFiles(files){
+  for(const f of files){
+    if(f&&f.size>MAX_UPLOAD_BYTES){_showUploadTooLarge(f);continue;}
+    if(!S.pendingFiles.find(p=>p.name===f.name))S.pendingFiles.push(f);
+  }
+  renderTray();
+}
 async function uploadPendingFiles(){
   if(!S.pendingFiles.length||!S.session)return[];
   const names=[];let failures=0;
@@ -6320,9 +7228,11 @@ async function uploadPendingFiles(){
   barWrap.classList.add('active');bar.style.width='0%';
   const total=S.pendingFiles.length;
   for(let i=0;i<total;i++){
-    const f=S.pendingFiles[i];const fd=new FormData();
-    fd.append('session_id',S.session.session_id);fd.append('file',f,f.name);
+    const f=S.pendingFiles[i];
     try{
+      if(f&&f.size>MAX_UPLOAD_BYTES)throw new Error(_uploadTooLargeMessage(f));
+      const fd=new FormData();
+      fd.append('session_id',S.session.session_id);fd.append('file',f,f.name);
       const isArchive=_ARCHIVE_EXTS.test(f.name);
       const url=new URL(isArchive?'api/upload/extract':'api/upload',document.baseURI||location.href).href;
       const res=await fetch(url,{method:'POST',credentials:'include',body:fd});

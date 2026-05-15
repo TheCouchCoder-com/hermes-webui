@@ -1,9 +1,14 @@
-"""Read-only Hermes Kanban bridge for the WebUI.
+"""Hermes Kanban bridge for the WebUI.
 
-This module exposes a small WebUI-native API under ``/api/kanban/*`` while
-keeping Hermes Agent's ``hermes_cli.kanban_db`` as the only source of truth.
-The first integration is deliberately read-only; write/move semantics can be
-added in later focused PRs.
+This module exposes a full CRUD API under ``/api/kanban/*`` while keeping
+Hermes Agent's ``hermes_cli.kanban_db`` as the only source of truth.
+
+Supported operations:
+- Task CRUD (create, read, patch, bulk update, archive)
+- Multi-board management (list, create, archive, switch)
+- Task dependency links (create, delete)
+- SSE live event stream for real-time updates
+- Comments and worker dispatch integration
 """
 
 from __future__ import annotations
@@ -702,10 +707,12 @@ def _board_meta_dict(meta):
 def _board_counts_for_slug(slug):
     """Per-status task counts for a board, used to populate the board
     switcher with a live "12 tasks" badge. Mirrors the agent dashboard's
-    ``_board_counts`` helper. Best-effort — empty dict if the board's
-    sqlite is missing (which can happen on a freshly-created board before
-    the first task is added)."""
+    ``_board_counts`` helper. Returns an empty dict for boards whose
+    sqlite file has not been materialized yet (freshly-created boards
+    with no tasks)."""
     kb = _kb()
+    if not kb.board_exists(slug):
+        return {}
     try:
         conn = kb.connect(board=slug)
     except Exception:
@@ -738,6 +745,18 @@ def _list_boards_payload(parsed):
         current = kb.get_current_board()
     except Exception:
         current = "default"
+    visible_slugs = {(_board_meta_dict(meta).get("slug")) for meta in boards}
+    default_slug = getattr(kb, "DEFAULT_BOARD", "default")
+    if current not in visible_slugs:
+        # The on-disk active-board pointer can outlive an archived/deleted board
+        # when another CLI/WebUI process removes it. Surface a valid current
+        # board instead of letting the frontend pin every subsequent request to
+        # a ghost slug and fail with an opaque 404.
+        try:
+            kb.clear_current_board()
+        except Exception:
+            pass
+        current = default_slug
     out = []
     for raw_meta in boards:
         meta = _board_meta_dict(raw_meta)
@@ -1053,7 +1072,20 @@ def _handle_events_sse_stream(handler, parsed):
         return True
 
 
-def handle_kanban_get(handler, parsed) -> bool:
+def handle_kanban_get(handler, parsed) -> bool | None:
+    """Dispatch a Kanban GET. Three-valued return:
+
+    - ``False`` — no Kanban path matched; caller should emit a 404
+      (``_kanban_unknown_endpoint``) for genuinely stale-bundle requests.
+    - ``None`` — a path matched and the inner handler already sent a
+      response via ``bad(...)`` / ``j(...)`` (which both return ``None``).
+      The caller MUST NOT emit another response.
+    - ``True`` — a path matched and the inner handler succeeded.
+
+    Treat any falsy-but-not-False return (``0``, ``''``, etc.) as a bug and
+    audit the new return path; the caller uses ``is False`` identity check
+    to distinguish unmatched paths from already-responded paths (#1843).
+    """
     path = parsed.path
     try:
         # Multi-board management endpoints — these do NOT take a board arg
@@ -1103,7 +1135,9 @@ def handle_kanban_get(handler, parsed) -> bool:
         return bad(handler, str(exc), status=409)
 
 
-def handle_kanban_post(handler, parsed, body) -> bool:
+def handle_kanban_post(handler, parsed, body) -> bool | None:
+    """Dispatch a Kanban POST. See ``handle_kanban_get`` for the
+    three-valued ``True | None | False`` contract (#1843)."""
     path = parsed.path
     try:
         # Multi-board management endpoints — `_create_board_payload` and
@@ -1154,7 +1188,9 @@ def handle_kanban_post(handler, parsed, body) -> bool:
     return False
 
 
-def handle_kanban_patch(handler, parsed, body) -> bool:
+def handle_kanban_patch(handler, parsed, body) -> bool | None:
+    """Dispatch a Kanban PATCH. See ``handle_kanban_get`` for the
+    three-valued ``True | None | False`` contract (#1843)."""
     path = parsed.path
     try:
         # /boards/<slug> routes operate on the on-disk board collection
@@ -1190,7 +1226,9 @@ def handle_kanban_patch(handler, parsed, body) -> bool:
     return False
 
 
-def handle_kanban_delete(handler, parsed, body) -> bool:
+def handle_kanban_delete(handler, parsed, body) -> bool | None:
+    """Dispatch a Kanban DELETE. See ``handle_kanban_get`` for the
+    three-valued ``True | None | False`` contract (#1843)."""
     path = parsed.path
     try:
         # Same routing reorder as PATCH: /boards/<slug> path-routed first,

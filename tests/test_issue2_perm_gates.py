@@ -68,7 +68,28 @@ def _isolate(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(users_mod, '_users_cache', None)
     monkeypatch.setattr(auth, '_sessions', {})
     monkeypatch.setattr(auth, 'is_auth_enabled', lambda: True)
+
+    # Settings writes that flow through handle_post (e.g. the admin bot_name
+    # test below) land in the shared test SETTINGS_FILE and leak into later
+    # tests like test_sprint27::test_settings_default_bot_name. Snapshot the
+    # file at setup and restore it on teardown so these write-heavy gating
+    # tests don't poison the rest of the suite.
+    from api import config as _cfg
+    settings_path = getattr(_cfg, 'SETTINGS_FILE', None)
+    snapshot = None
+    if settings_path is not None and settings_path.exists():
+        snapshot = settings_path.read_bytes()
+
     yield
+
+    if settings_path is not None:
+        if snapshot is None:
+            try:
+                settings_path.unlink()
+            except FileNotFoundError:
+                pass
+        else:
+            settings_path.write_bytes(snapshot)
 
 
 def _user(username='alice', role='user', permissions=None,

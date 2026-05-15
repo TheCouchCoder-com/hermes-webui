@@ -59,15 +59,14 @@ class TestLoadDirParallelPrefetch:
         )
 
 
-# ── 2. sessions.js: loadSession idle path overlaps loadDir and highlightCode ─
+# ── 2. sessions.js: loadSession idle path avoids duplicate highlighting ─
 
 
 class TestLoadSessionIdleOverlap:
-    """The idle path in loadSession() must start loadDir() before running
-    highlightCode() so the network request is in-flight during the CPU-bound
-    Prism.js pass."""
+    """The idle path in loadSession() should rely on renderMessages() for the
+    post-render transcript pass instead of running another Prism.js pass."""
 
-    def test_idle_path_starts_loaddir_before_highlightcode(self):
+    def test_idle_path_does_not_repeat_highlight_after_render_messages(self):
         idle_marker = "S.busy=false"
         positions = []
         start = 0
@@ -81,25 +80,22 @@ class TestLoadSessionIdleOverlap:
         found = False
         for pos in positions:
             block = SESSIONS_JS[pos : pos + 600]
-            has_highlight = "highlightCode()" in block
             has_loaddir = "loadDir('.')" in block
-            if has_highlight and has_loaddir:
+            has_render = "renderMessages()" in block
+            if has_loaddir and has_render:
                 found = True
-                loaddir_idx = block.find("loadDir(")
-                highlight_idx = block.find("highlightCode()")
-                assert loaddir_idx < highlight_idx, (
-                    "In the idle path, loadDir() should be started before "
-                    "highlightCode() so the network request is dispatched first."
+                assert "highlightCode()" not in block, (
+                    "The idle path should rely on renderMessages()'s consolidated "
+                    "post-render pass instead of running a second highlight pass."
                 )
                 assert "await" in block and "_dirP" in block, (
-                    "loadDir() result should be stored and awaited after "
-                    "highlightCode() completes."
+                    "loadDir() result should still be stored and awaited."
                 )
                 break
 
         assert found, (
             "Could not find the idle path in loadSession that calls both "
-            "loadDir and highlightCode."
+            "renderMessages and loadDir."
         )
 
 
@@ -427,10 +423,11 @@ class TestMessagePaginationFrontend:
         assert "async function _ensureAllMessagesLoaded" in SESSIONS_JS
 
     def test_scroll_to_top_triggers_loading(self):
-        """Scroll event handler must trigger _loadOlderMessages near top."""
+        """Scroll event handler must trigger _loadOlderMessages near top when opt-in is enabled."""
         UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
 
-        assert "el.scrollTop<80" in UI_JS
+        assert "const olderPrefetchPx=Math.max(600,el.clientHeight*1.5)" in UI_JS
+        assert "_isSessionEndlessScrollEnabled()&&el.scrollTop<olderPrefetchPx" in UI_JS
         assert "_loadOlderMessages" in UI_JS
 
     def test_load_older_indicator_in_render(self):
@@ -589,7 +586,7 @@ class TestScrollPositionPreservation:
         )
 
     def test_resets_scroll_pinned_after_restore(self):
-        """_scrollPinned must be set to false after restoring scroll position."""
+        """_scrollPinned must be false after older-history scroll anchoring."""
         SESSIONS_JS = pathlib.Path(__file__).parent.parent / "static" / "sessions.js"
         src = SESSIONS_JS.read_text(encoding="utf-8")
 
@@ -598,13 +595,12 @@ class TestScrollPositionPreservation:
         fn_body = src[fn_start:fn_end]
 
         assert "_scrollPinned = false" in fn_body, (
-            "renderMessages() calls scrollToBottom() which sets _scrollPinned=true. "
-            "After restoring the user's scroll position we must set _scrollPinned=false "
-            "to prevent the next render from snapping back to the bottom."
+            "Older-history paging must leave the transcript unpinned so the next "
+            "render does not snap back to the newest output."
         )
-        # _scrollPinned must appear after the scrollTop restore
-        restore_idx = fn_body.find("container.scrollTop = newScrollH - prevScrollH")
-        pinned_idx = fn_body.find("_scrollPinned = false")
-        assert restore_idx >= 0 and pinned_idx >= 0 and restore_idx < pinned_idx, (
-            "_scrollPinned = false must appear AFTER the scrollTop restore."
+        target_idx = fn_body.find("container.scrollTop = oldTop + addedHeight")
+        scroll_idx = fn_body.find("requestAnimationFrame(()=>{ _programmaticScroll = false; })")
+        pinned_idx = fn_body.rfind("_scrollPinned = false")
+        assert target_idx >= 0 and scroll_idx >= 0 and pinned_idx >= 0 and target_idx < scroll_idx < pinned_idx, (
+            "_scrollPinned = false must appear AFTER the older-history viewport-preserve scroll."
         )

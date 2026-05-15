@@ -248,8 +248,13 @@ def test_done_handler_guards_setbusy_with_inflight_check(cleanup_test_sessions):
     disable B's Send button.
     """
     src = (REPO_ROOT / "static/messages.js").read_text()
-    # The fix wraps setBusy(false) in a guard
-    assert "INFLIGHT[S.session.session_id]" in src,         "messages.js must guard setBusy(false) with INFLIGHT check for current session"
+    # The fix wraps setBusy(false) in an active-pane ownership guard. Newer
+    # implementations may centralize the guard in a helper rather than repeat the
+    # raw INFLIGHT expression at every terminal event site.
+    assert (
+        "INFLIGHT[S.session.session_id]" in src
+        or "function _setActivePaneIdleIfOwner" in src
+    ), "messages.js must guard setBusy(false) for the current session"
 
 
 def test_refresh_handler_does_not_drop_tool_messages_needed_by_todos(cleanup_test_sessions):
@@ -329,6 +334,19 @@ def test_server_delete_invalidates_index(cleanup_test_sessions):
                 f"{label} session/delete must invalidate SESSION_INDEX_FILE"
             return
     assert False, "session/delete handler not found in server.py or api/routes.py"
+
+
+def test_server_delete_removes_session_bak_snapshot(cleanup_test_sessions):
+    """session/delete must remove sidecar backups so deleted sessions stay deleted."""
+    routes_src = (REPO_ROOT / "api" / "routes.py").read_text()
+    delete_idx = max(
+        routes_src.find("if parsed.path == '/api/session/delete':"),
+        routes_src.find('if parsed.path == "/api/session/delete":'),
+    )
+    assert delete_idx >= 0, "session/delete handler not found in api/routes.py"
+    delete_block = routes_src[delete_idx:delete_idx+1400]
+    assert "with_suffix('.json.bak').unlink" in delete_block or 'with_suffix(".json.bak").unlink' in delete_block, \
+        "session/delete must unlink <sid>.json.bak to avoid later orphan-backup recovery"
 
 # ── R9: Token/tool SSE events write to wrong session after switch ─────────────
 
@@ -686,6 +704,23 @@ def test_messages_js_supports_live_reasoning_and_tool_completion(cleanup_test_se
         "messages.js must listen for live tool completion SSE events"
     assert "function _parseStreamState()" in src, \
         "messages.js must parse live stream state into reasoning + visible answer"
+
+
+def test_messages_js_supports_interim_assistant_events(cleanup_test_sessions):
+    """R18b: messages.js must render live interim assistant commentary when
+    `interim_assistant` SSE events arrive.
+
+    AIAgent emits completed mid-turn commentary through an interim callback.
+    Without a dedicated SSE handler, Codex-style interim status text disappears
+    from the live answer and users only see the final response after tool calls.
+    """
+    src = (REPO_ROOT / "static/messages.js").read_text()
+    assert "source.addEventListener('interim_assistant'" in src or 'source.addEventListener("interim_assistant"' in src, \
+        "messages.js must listen for interim_assistant SSE events"
+    assert "function _resetAssistantSegment()" in src, \
+        "messages.js should share live-segment reset logic between interim assistant updates and tool events"
+    assert "_resetAssistantSegment();" in src, \
+        "messages.js should apply segment reset when tool or interim assistant events require it"
 
 
 def test_ui_js_can_upgrade_thinking_spinner_into_live_reasoning_card(cleanup_test_sessions):

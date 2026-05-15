@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import secrets
+import tempfile
 import time
 
 from api._atomic import atomic_write_json
@@ -17,15 +18,41 @@ from api.config import STATE_DIR, load_settings
 
 logger = logging.getLogger(__name__)
 
+
+# Default session TTL — 30 days. Kept as a module-level constant for backwards
+# compatibility with downstream code and regression tests that import it.
+# At runtime, prefer ``_resolve_session_ttl()`` which honours the env var and
+# settings.json overrides; this constant is the floor / fallback.
+SESSION_TTL = 86400 * 30  # 30 days
+
+
+def _resolve_session_ttl() -> int:
+    """Resolve session TTL from env > settings > default.
+
+    Priority mirrors get_password_hash(): HERMES_WEBUI_SESSION_TTL env var
+    first, then settings.json, falling back to ``SESSION_TTL`` (30 days).
+    Clamped to [60s, 1 year] to prevent runaway cookies or self-lockout.
+    """
+    env_v = os.getenv('HERMES_WEBUI_SESSION_TTL', '').strip()
+    if env_v.isdigit():
+        val = int(env_v)
+        if 60 <= val <= 86400 * 365:
+            return val
+    s = load_settings()
+    v = s.get('session_ttl_seconds')
+    if isinstance(v, int) and 60 <= v <= 86400 * 365:
+        return v
+    return SESSION_TTL
+
+
 # ── Public paths (no auth required) ─────────────────────────────────────────
 PUBLIC_PATHS = frozenset({
-    '/login', '/health', '/favicon.ico',
+    '/login', '/health', '/favicon.ico', '/sw.js',
     '/api/auth/login', '/api/auth/status', '/api/auth/bootstrap',
     '/manifest.json', '/manifest.webmanifest',
 })
 
 COOKIE_NAME = 'hermes_session'
-SESSION_TTL = 86400 * 30  # 30 days
 
 _SESSIONS_FILE = STATE_DIR / '.sessions.json'
 
@@ -98,11 +125,73 @@ _sessions = _load_sessions()
 # ── Login rate limiter ──────────────────────────────────────────────────────
 # Two parallel buckets: per-IP and per-username (issue #2). The per-username
 # bucket prevents an attacker from cycling source IPs to brute-force one
-# account.
-_login_attempts = {}        # ip -> [timestamp, ...]
-_login_attempts_user = {}   # username (lower) -> [timestamp, ...]
+# account. Both buckets persist across restarts (upstream v0.51.29) so an
+# attacker can't dodge the limiter by triggering a process restart.
+_LOGIN_ATTEMPTS_FILE = STATE_DIR / '.login_attempts.json'
+_LOGIN_ATTEMPTS_USER_FILE = STATE_DIR / '.login_attempts_user.json'
 _LOGIN_MAX_ATTEMPTS = 5
 _LOGIN_WINDOW = 60  # seconds
+
+
+def _load_login_attempts_from(path) -> dict[str, list[float]]:
+    """Load persisted login attempts from *path*, pruning expired entries."""
+    try:
+        if path.exists():
+            data = json.loads(path.read_text(encoding='utf-8'))
+            if not isinstance(data, dict):
+                raise ValueError('malformed login-attempts file — expected dict')
+            now = time.time()
+            attempts: dict[str, list[float]] = {}
+            for key, raw_times in data.items():
+                if not isinstance(key, str) or not isinstance(raw_times, list):
+                    continue
+                fresh = [
+                    float(t)
+                    for t in raw_times
+                    if isinstance(t, (int, float)) and now - float(t) < _LOGIN_WINDOW
+                ]
+                if fresh:
+                    attempts[key] = fresh
+            return attempts
+    except Exception as e:
+        logger.debug("Failed to load login attempts file %s, starting fresh: %s", path, e)
+    return {}
+
+
+def _save_login_attempts_to(path, attempts: dict[str, list[float]]) -> None:
+    """Atomically persist login attempts to *path* (0600)."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=path.parent, suffix='.login_attempts.tmp')
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                json.dump(attempts, f)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, path)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    except Exception as e:
+        logger.debug("Failed to persist login attempts to %s: %s", path, e)
+
+
+# Back-compat aliases. Upstream's issue-#1910 tests reference the
+# single-bucket helpers `_load_login_attempts` / `_save_login_attempts`; our
+# fork's _from/_to variants take an explicit path so the IP bucket and the
+# (fork-only) per-username bucket can share the same persistence logic.
+def _load_login_attempts() -> dict[str, list[float]]:
+    return _load_login_attempts_from(_LOGIN_ATTEMPTS_FILE)
+
+
+def _save_login_attempts(attempts: dict[str, list[float]]) -> None:
+    _save_login_attempts_to(_LOGIN_ATTEMPTS_FILE, attempts)
+
+
+_login_attempts = _load_login_attempts_from(_LOGIN_ATTEMPTS_FILE)              # ip -> [timestamp, ...]
+_login_attempts_user = _load_login_attempts_from(_LOGIN_ATTEMPTS_USER_FILE)    # username (lower) -> [timestamp, ...]
 
 
 def _check_login_rate(ip: str, username: str | None = None) -> bool:
@@ -110,13 +199,21 @@ def _check_login_rate(ip: str, username: str | None = None) -> bool:
     Either bucket exhausted (IP or username) blocks the attempt."""
     now = time.time()
     ip_attempts = [t for t in _login_attempts.get(ip, []) if now - t < _LOGIN_WINDOW]
-    _login_attempts[ip] = ip_attempts
+    if ip_attempts:
+        _login_attempts[ip] = ip_attempts
+    else:
+        _login_attempts.pop(ip, None)
+    _save_login_attempts_to(_LOGIN_ATTEMPTS_FILE, _login_attempts)
     if len(ip_attempts) >= _LOGIN_MAX_ATTEMPTS:
         return False
     if username:
         u = username.lower()
         u_attempts = [t for t in _login_attempts_user.get(u, []) if now - t < _LOGIN_WINDOW]
-        _login_attempts_user[u] = u_attempts
+        if u_attempts:
+            _login_attempts_user[u] = u_attempts
+        else:
+            _login_attempts_user.pop(u, None)
+        _save_login_attempts_to(_LOGIN_ATTEMPTS_USER_FILE, _login_attempts_user)
         if len(u_attempts) >= _LOGIN_MAX_ATTEMPTS:
             return False
     return True
@@ -125,8 +222,10 @@ def _check_login_rate(ip: str, username: str | None = None) -> bool:
 def _record_login_attempt(ip: str, username: str | None = None) -> None:
     now = time.time()
     _login_attempts.setdefault(ip, []).append(now)
+    _save_login_attempts_to(_LOGIN_ATTEMPTS_FILE, _login_attempts)
     if username:
         _login_attempts_user.setdefault(username.lower(), []).append(now)
+        _save_login_attempts_to(_LOGIN_ATTEMPTS_USER_FILE, _login_attempts_user)
 
 
 def _signing_key():
@@ -155,9 +254,22 @@ def _hash_password(password):
     Salt is the persisted random signing key, which is secret and unique per
     installation. This keeps the stored hash format a plain hex string
     (no format change to settings.json) while replacing the predictable
-    STATE_DIR-derived salt from the original implementation."""
+    STATE_DIR-derived salt from the original implementation.
+
+    The iteration count is fixed at the OWASP recommendation in production.
+    The test suite overrides it via HERMES_WEBUI_PBKDF2_ITERATIONS to a much
+    smaller value so the ~150 password-hashing tests don't bottleneck CI;
+    the env var is **never** honoured outside conftest-managed test runs."""
     salt = _signing_key()
-    dk = hashlib.pbkdf2_hmac('sha256', password.encode(), salt, 600_000)
+    iters_override = os.getenv('HERMES_WEBUI_PBKDF2_ITERATIONS', '').strip()
+    iters = 600_000
+    if iters_override.isdigit() and os.getenv('HERMES_WEBUI_TEST_FAST_HASH') == '1':
+        # The TEST_FAST_HASH flag is set exclusively by tests/conftest.py, so
+        # honouring the iteration override only when it is present prevents
+        # accidental production exposure even if HERMES_WEBUI_PBKDF2_ITERATIONS
+        # leaks into a real deployment env.
+        iters = max(1000, int(iters_override))
+    dk = hashlib.pbkdf2_hmac('sha256', password.encode(), salt, iters)
     return dk.hex()
 
 
@@ -217,7 +329,7 @@ def create_session(user_id: str | None = None) -> str:
     accepted for backwards compatibility with legacy single-password code
     paths and tests."""
     token = secrets.token_hex(32)
-    _sessions[token] = {'user_id': user_id, 'expiry': time.time() + SESSION_TTL}
+    _sessions[token] = {'user_id': user_id, 'expiry': time.time() + _resolve_session_ttl()}
     _save_sessions(_sessions)
     sig = hmac.new(_signing_key(), token.encode(), hashlib.sha256).hexdigest()[:32]
     return f"{token}.{sig}"
@@ -480,7 +592,7 @@ def set_auth_cookie(handler, cookie_value) -> None:
     cookie[COOKIE_NAME]['httponly'] = True
     cookie[COOKIE_NAME]['samesite'] = 'Lax'
     cookie[COOKIE_NAME]['path'] = '/'
-    cookie[COOKIE_NAME]['max-age'] = str(SESSION_TTL)
+    cookie[COOKIE_NAME]['max-age'] = str(_resolve_session_ttl())
     # Set Secure flag when connection is HTTPS
     if getattr(handler.request, 'getpeercert', None) is not None or handler.headers.get('X-Forwarded-Proto', '') == 'https':
         cookie[COOKIE_NAME]['secure'] = True
