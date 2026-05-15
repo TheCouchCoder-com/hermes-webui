@@ -19,6 +19,7 @@ archive/
 !.env.docker.example
 .claude/
 AGENTS.md
+AGENTS.local.md
 .cursorrules
 .windsurfrules
 .aider*
