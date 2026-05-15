@@ -52,7 +52,28 @@ const _msgEl=document.getElementById('msg');
 if(_msgEl) _msgEl.addEventListener('focus', ()=>{ if('speechSynthesis' in window && speechSynthesis.speaking) speechSynthesis.pause(); });
 if(_msgEl) _msgEl.addEventListener('blur', ()=>{ if('speechSynthesis' in window && speechSynthesis.paused) speechSynthesis.resume(); });
 
+// Guard against concurrent send() calls.  Without this, two rapid sends
+// (e.g. queue drain + user click) can both pass the S.busy check because
+// setBusy(true) is only called after the first await inside send().
+let _sendInProgress = false;
+
 async function send(){
+  // Reject concurrent invocations early — before any await yields control.
+  // If a send is already in-flight (e.g. queue drain), re-queue the message
+  // instead of silently dropping it.
+  if (_sendInProgress) {
+    const _text=$('msg').value.trim();
+    if(_text && S.session && S.session.session_id){
+      queueSessionMessage(S.session.session_id,{text:_text,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',model_provider:S.session&&S.session.model_provider||null,profile:S.activeProfile||'default'});
+      $('msg').value='';autoResize();
+      S.pendingFiles=[];renderTray();
+      updateQueueBadge(S.session.session_id);
+      showToast(`Queued: "${_text.slice(0,40)}${_text.length>40?'…':''}"`,2000);
+    }
+    return;
+  }
+  _sendInProgress = true;
+  try{
   const text=$('msg').value.trim();
   if(!text&&!S.pendingFiles.length)return;
   // Don't send while an inline message edit is active
@@ -337,6 +358,7 @@ async function send(){
   // Open SSE stream and render tokens live
   attachLiveStream(activeSid, streamId, uploadedNames);
 
+  }finally{ _sendInProgress=false; }
 }
 
 const LIVE_STREAMS={};
@@ -1175,7 +1197,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!S.session||S.session.session_id!==activeSid) return;
       let d={};
       try{ d=JSON.parse(e.data||'{}')||{}; }catch(_){ d={}; }
+      if(d.session_id&&d.session_id!==activeSid) return;
       const message=String(d.message||'Context auto-compressed to continue the conversation').trim();
+      if(d.usage&&typeof _syncCtxIndicator==='function'){
+        S.lastUsage={...(S.lastUsage||{}),...d.usage};
+        _syncCtxIndicator(S.lastUsage);
+      }
       if(typeof setCompressionUi==='function'){
         setCompressionUi({
           sessionId:activeSid,
@@ -1195,8 +1222,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const d=JSON.parse(e.data||'{}');
         if((d.session_id||activeSid)!==activeSid) return;
         if(d.usage&&typeof _syncCtxIndicator==='function'){
-          S.lastUsage={...(S.lastUsage||{}),...d.usage};
-          _syncCtxIndicator(S.lastUsage);
+          if(S.session&&S.session.session_id===activeSid){
+            S.lastUsage={...(S.lastUsage||{}),...d.usage};
+            _syncCtxIndicator(S.lastUsage);
+          }
         }
         if(d.estimated===true||d.tps_available!==true||typeof d.tps!=='number'||d.tps<=0){
           if(typeof _setLiveAssistantTps==='function') _setLiveAssistantTps(null);

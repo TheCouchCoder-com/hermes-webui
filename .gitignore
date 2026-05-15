@@ -18,7 +18,12 @@ archive/
 !.env.example
 !.env.docker.example
 .claude/
+<<<<<<< HEAD
 AGENTS.md
+=======
+CLAUDE.md
+AGENTS.local.md
+>>>>>>> v0.51.55
 .cursorrules
 .windsurfrules
 .aider*
