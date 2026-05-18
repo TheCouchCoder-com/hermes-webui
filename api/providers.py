@@ -53,7 +53,7 @@ def _custom_provider_name_matches(provider_id: str, name: object) -> bool:
 _OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key"
 _PROVIDER_QUOTA_TIMEOUT_SECONDS = 3.0
 _ACCOUNT_USAGE_SUBPROCESS_TIMEOUT_SECONDS = 35.0
-_ACCOUNT_USAGE_PROVIDERS = frozenset({"openai-codex", "anthropic"})
+_ACCOUNT_USAGE_PROVIDERS = frozenset({"openai-codex", "anthropic", "opencode-go"})
 
 # Upper bound on simultaneous profile-isolated quota probe subprocesses.
 # Each probe runs a Python child for up to 35 s; capping concurrency prevents
@@ -127,6 +127,7 @@ def _account_usage_preexec_fn() -> None:
 _ACCOUNT_USAGE_SUBPROCESS_CODE = r"""
 import base64
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -340,6 +341,33 @@ def _fetch_codex_account_usage_from_pool():
         return None
 
 
+def _fetch_opencode_go_account_usage():
+    api_key = os.environ.get("OPENCODE_GO_API_KEY")
+    if not api_key:
+        return SimpleNamespace(
+            provider="opencode-go",
+            source="env_check",
+            title="Account limits",
+            plan=None,
+            windows=(),
+            details=(),
+            available=False,
+            unavailable_reason="No OPENCODE_GO_API_KEY configured.",
+            fetched_at=datetime.now(timezone.utc),
+        )
+    return SimpleNamespace(
+        provider="opencode-go",
+        source="usage_api",
+        title="Account limits",
+        plan=None,
+        windows=(),
+        details=(),
+        available=False,
+        unavailable_reason="OpenCode Go does not currently expose a usage API.",
+        fetched_at=datetime.now(timezone.utc),
+    )
+
+
 provider = sys.argv[1]
 api_key = sys.argv[2] or None
 try:
@@ -348,6 +376,10 @@ except Exception:
     snapshot = None
 if str(provider or "").strip().lower() == "openai-codex" and not _snapshot_available(snapshot):
     fallback_snapshot = _fetch_codex_account_usage_from_pool()
+    if _snapshot_available(fallback_snapshot) or snapshot is None:
+        snapshot = fallback_snapshot
+if str(provider or "").strip().lower() == "opencode-go" and not _snapshot_available(snapshot):
+    fallback_snapshot = _fetch_opencode_go_account_usage()
     if _snapshot_available(fallback_snapshot) or snapshot is None:
         snapshot = fallback_snapshot
 print(json.dumps(_snapshot_payload(snapshot)))

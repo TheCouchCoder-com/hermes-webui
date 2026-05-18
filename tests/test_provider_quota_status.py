@@ -735,3 +735,53 @@ def test_account_usage_semaphore_caps_concurrency(monkeypatch, tmp_path):
         assert len(results) == 2, f'expected 2 results, got {len(results)}'
     finally:
         _restore_config(old_cfg, old_mtime)
+
+
+# ── OpenCode Go support tests ─────────────────────────────────────────────────
+
+def test_opencode_go_subprocess_without_api_key(monkeypatch, tmp_path):
+    """When OPENCODE_GO_API_KEY is missing the subprocess returns unavailable."""
+    import api.providers as providers
+    monkeypatch.setattr(profiles, 'get_active_hermes_home', lambda: tmp_path)
+    monkeypatch.setenv('OPENCODE_GO_API_KEY', '')
+    old_cfg, old_mtime = _with_config(model={'provider': 'opencode-go'})
+    try:
+        result = providers._fetch_account_usage_with_profile_context('opencode-go')
+        assert result['provider'] == 'opencode-go'
+        assert not result.get('available')
+        assert 'No OPENCODE_GO_API_KEY' in str(result.get('unavailable_reason', ''))
+    finally:
+        _restore_config(old_cfg, old_mtime)
+
+
+def test_opencode_go_subprocess_with_api_key(monkeypatch, tmp_path):
+    """When OPENCODE_GO_API_KEY is set the subprocess returns unavailable but notes no API."""
+    import api.providers as providers
+    monkeypatch.setattr(profiles, 'get_active_hermes_home', lambda: tmp_path)
+    monkeypatch.setenv('OPENCODE_GO_API_KEY', 'fake-key-123')
+    old_cfg, old_mtime = _with_config(model={'provider': 'opencode-go'})
+    try:
+        result = providers._fetch_account_usage_with_profile_context('opencode-go')
+        assert result['provider'] == 'opencode-go'
+        assert not result.get('available')
+        assert 'does not currently expose a usage API' in str(result.get('unavailable_reason', ''))
+    finally:
+        _restore_config(old_cfg, old_mtime)
+
+
+def test_opencode_go_integration_get_provider_quota(monkeypatch, tmp_path):
+    """get_provider_quota('opencode-go') returns a properly shaped unavailable response."""
+    import api.providers as providers
+    monkeypatch.setattr(profiles, 'get_active_hermes_home', lambda: tmp_path)
+    monkeypatch.setenv('OPENCODE_GO_API_KEY', '')
+    old_cfg, old_mtime = _with_config(model={'provider': 'opencode-go'})
+    try:
+        quota = providers.get_provider_quota('opencode-go')
+        assert quota['provider'] == 'opencode-go'
+        assert not quota.get('available')
+        assert 'source' in quota
+        assert 'fetched_at' in quota
+        assert 'windows' in quota
+        assert 'details' in quota
+    finally:
+        _restore_config(old_cfg, old_mtime)
