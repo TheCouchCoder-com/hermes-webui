@@ -1,7 +1,9 @@
 name: Sync Upstream
 
 # Walk forward through nesquena/hermes-webui tags one stage at a time.
-# - Mondays 06:00 UTC, plus manual dispatch.
+# - Runs daily 06:00 UTC, plus manual dispatch. Daily cadence paired with
+#   the daily Claude conflict-resolution routine keeps the fork close to
+#   upstream; weekly was too slow given upstream's ~3-tag/week pace.
 # - Picks the next un-merged upstream `v*` tag and merges it into a
 #   sync branch.
 # - If the merge applies cleanly AND tests pass, opens a ready-for-review
@@ -13,7 +15,7 @@ name: Sync Upstream
 
 on:
   schedule:
-    - cron: '0 6 * * 1'
+    - cron: '0 6 * * *'
   workflow_dispatch:
     inputs:
       target_tag:
