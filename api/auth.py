@@ -179,7 +179,6 @@ def _save_login_attempts_to(path, attempts: dict[str, list[float]]) -> None:
         logger.debug("Failed to persist login attempts to %s: %s", path, e)
 
 
-<<<<<<< HEAD
 # Back-compat aliases. Upstream's issue-#1910 tests reference the
 # single-bucket helpers `_load_login_attempts` / `_save_login_attempts`; our
 # fork's _from/_to variants take an explicit path so the IP bucket and the
@@ -194,69 +193,44 @@ def _save_login_attempts(attempts: dict[str, list[float]]) -> None:
 
 _login_attempts = _load_login_attempts_from(_LOGIN_ATTEMPTS_FILE)              # ip -> [timestamp, ...]
 _login_attempts_user = _load_login_attempts_from(_LOGIN_ATTEMPTS_USER_FILE)    # username (lower) -> [timestamp, ...]
-
-
-def _check_login_rate(ip: str, username: str | None = None) -> bool:
-    """Return True if the request is allowed to attempt login.
-    Either bucket exhausted (IP or username) blocks the attempt."""
-    now = time.time()
-    ip_attempts = [t for t in _login_attempts.get(ip, []) if now - t < _LOGIN_WINDOW]
-    if ip_attempts:
-        _login_attempts[ip] = ip_attempts
-    else:
-        _login_attempts.pop(ip, None)
-    _save_login_attempts_to(_LOGIN_ATTEMPTS_FILE, _login_attempts)
-    if len(ip_attempts) >= _LOGIN_MAX_ATTEMPTS:
-        return False
-    if username:
-        u = username.lower()
-        u_attempts = [t for t in _login_attempts_user.get(u, []) if now - t < _LOGIN_WINDOW]
-        if u_attempts:
-            _login_attempts_user[u] = u_attempts
-        else:
-            _login_attempts_user.pop(u, None)
-        _save_login_attempts_to(_LOGIN_ATTEMPTS_USER_FILE, _login_attempts_user)
-        if len(u_attempts) >= _LOGIN_MAX_ATTEMPTS:
-            return False
-    return True
-
-
-def _record_login_attempt(ip: str, username: str | None = None) -> None:
-    now = time.time()
-    _login_attempts.setdefault(ip, []).append(now)
-    _save_login_attempts_to(_LOGIN_ATTEMPTS_FILE, _login_attempts)
-    if username:
-        _login_attempts_user.setdefault(username.lower(), []).append(now)
-        _save_login_attempts_to(_LOGIN_ATTEMPTS_USER_FILE, _login_attempts_user)
-=======
-_login_attempts = _load_login_attempts()  # ip -> [timestamp, ...]
 _LOGIN_ATTEMPTS_LOCK = threading.Lock()
 
 
-def _check_login_rate(ip: str) -> bool:
-    """Return True if the IP is allowed to attempt login (thread-safe)."""
+def _check_login_rate(ip: str, username: str | None = None) -> bool:
+    """Return True if the request is allowed to attempt login (thread-safe).
+    Either bucket exhausted (IP or username) blocks the attempt."""
     with _LOGIN_ATTEMPTS_LOCK:
         now = time.time()
-        attempts = _login_attempts.get(ip, [])
-        # Prune old attempts
-        attempts = [t for t in attempts if now - t < _LOGIN_WINDOW]
-        if attempts:
-            _login_attempts[ip] = attempts
+        ip_attempts = [t for t in _login_attempts.get(ip, []) if now - t < _LOGIN_WINDOW]
+        if ip_attempts:
+            _login_attempts[ip] = ip_attempts
         else:
             _login_attempts.pop(ip, None)
-        _save_login_attempts(_login_attempts)
-        return len(attempts) < _LOGIN_MAX_ATTEMPTS
+        _save_login_attempts_to(_LOGIN_ATTEMPTS_FILE, _login_attempts)
+        if len(ip_attempts) >= _LOGIN_MAX_ATTEMPTS:
+            return False
+        if username:
+            u = username.lower()
+            u_attempts = [t for t in _login_attempts_user.get(u, []) if now - t < _LOGIN_WINDOW]
+            if u_attempts:
+                _login_attempts_user[u] = u_attempts
+            else:
+                _login_attempts_user.pop(u, None)
+            _save_login_attempts_to(_LOGIN_ATTEMPTS_USER_FILE, _login_attempts_user)
+            if len(u_attempts) >= _LOGIN_MAX_ATTEMPTS:
+                return False
+        return True
 
 
-def _record_login_attempt(ip: str) -> None:
+def _record_login_attempt(ip: str, username: str | None = None) -> None:
     """Record a login attempt for rate limiting (thread-safe)."""
     with _LOGIN_ATTEMPTS_LOCK:
         now = time.time()
-        attempts = _login_attempts.get(ip, [])
-        attempts.append(now)
-        _login_attempts[ip] = attempts
-        _save_login_attempts(_login_attempts)
->>>>>>> v0.51.57
+        _login_attempts.setdefault(ip, []).append(now)
+        _save_login_attempts_to(_LOGIN_ATTEMPTS_FILE, _login_attempts)
+        if username:
+            _login_attempts_user.setdefault(username.lower(), []).append(now)
+            _save_login_attempts_to(_LOGIN_ATTEMPTS_USER_FILE, _login_attempts_user)
 
 
 def _load_key(filename: str) -> bytes:
@@ -304,30 +278,23 @@ def _hash_password(password, *, salt: bytes | None = None) -> str:
     (no format change to settings.json) while replacing the predictable
     STATE_DIR-derived salt from the original implementation.
 
-<<<<<<< HEAD
     The iteration count is fixed at the OWASP recommendation in production.
     The test suite overrides it via HERMES_WEBUI_PBKDF2_ITERATIONS to a much
     smaller value so the ~150 password-hashing tests don't bottleneck CI;
-    the env var is **never** honoured outside conftest-managed test runs."""
-    salt = _signing_key()
+    the env var is **never** honoured outside conftest-managed test runs.
+
+    The *salt* parameter exists solely to support transparent migration of
+    password hashes computed with a different key (the legacy `.signing_key`
+    vs. `.pbkdf2_key` upstream introduced). Normal callers should never pass
+    it. Default stays on `.signing_key` to preserve existing fork installs.
+    """
+    if salt is None:
+        salt = _signing_key()
     iters_override = os.getenv('HERMES_WEBUI_PBKDF2_ITERATIONS', '').strip()
     iters = 600_000
     if iters_override.isdigit() and os.getenv('HERMES_WEBUI_TEST_FAST_HASH') == '1':
-        # The TEST_FAST_HASH flag is set exclusively by tests/conftest.py, so
-        # honouring the iteration override only when it is present prevents
-        # accidental production exposure even if HERMES_WEBUI_PBKDF2_ITERATIONS
-        # leaks into a real deployment env.
         iters = max(1000, int(iters_override))
     dk = hashlib.pbkdf2_hmac('sha256', password.encode(), salt, iters)
-=======
-    The *salt* parameter exists solely to support transparent migration
-    of password hashes that were computed with a different key (e.g. the
-    old `.signing_key`). Normal callers should never pass it.
-    """
-    if salt is None:
-        salt = _pbkdf2_key()
-    dk = hashlib.pbkdf2_hmac('sha256', password.encode(), salt, 600_000)
->>>>>>> v0.51.57
     return dk.hex()
 
 
@@ -393,21 +360,16 @@ def is_auth_enabled() -> bool:
         return False
 
 
-<<<<<<< HEAD
-def verify_password(plain) -> bool:
+def verify_password(plain: str) -> bool:
     """Verify a plaintext password against the legacy single-shared-password
     hash. Used only by the migration path in api.startup; new logins go
-    through verify_user_credentials. Removed in commit 9 of issue #2."""
-=======
-def verify_password(plain: str) -> bool:
-    """Verify a plaintext password against the stored hash.
+    through verify_user_credentials. Removed in commit 9 of issue #2.
 
-    Supports transparent migration of password hashes that were computed
-    with the old `.signing_key` salt.  When the two keys differ and the
-    legacy-salted hash matches, the password is transparently re-hashed
-    with the current `.pbkdf2_key` and persisted to settings.json.
+    Also supports transparent migration of hashes computed with a different
+    key (legacy `.signing_key` vs. `.pbkdf2_key`): if the keys differ and
+    the legacy-salted hash matches, the password is transparently re-hashed
+    with the default salt and persisted to settings.json.
     """
->>>>>>> v0.51.57
     expected = get_password_hash()
     if not expected:
         return False
@@ -483,15 +445,6 @@ def _session_record_for_cookie(cookie_value):
         return None
     _prune_expired_sessions()
     token, sig = cookie_value.rsplit('.', 1)
-<<<<<<< HEAD
-    expected_sig = hmac.new(_signing_key(), token.encode(), hashlib.sha256).hexdigest()[:32]
-    if not hmac.compare_digest(sig, expected_sig):
-        return None
-    entry = _sessions.get(token)
-    if entry is None:
-        return None
-    if time.time() > _session_expiry(entry):
-=======
     full_sig = hmac.new(_signing_key(), token.encode(), hashlib.sha256).hexdigest()
     # Accept both new (64-char) and legacy (32-char truncated) signatures so
     # existing sessions survive the upgrade without a forced global logout.
@@ -500,10 +453,11 @@ def _session_record_for_cookie(cookie_value):
         len(sig) == 32 and hmac.compare_digest(sig, full_sig[:32])
     )
     if not valid:
-        return False
-    expiry = _sessions.get(token)
-    if not expiry or time.time() > expiry:
->>>>>>> v0.51.57
+        return None
+    entry = _sessions.get(token)
+    if entry is None:
+        return None
+    if time.time() > _session_expiry(entry):
         _sessions.pop(token, None)
         return None
     return (token, entry)
