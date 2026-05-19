@@ -171,7 +171,12 @@ jobs:
           # gap), the create call fails with "label not found" and aborts the PR.
           # Applying the label as a separate edit step after the PR exists is the
           # documented workaround.
+          #
+          # `--repo` is pinned on every gh call: once `upstream` is added as a git
+          # remote (above), gh's auto-detection prefers it over `origin`, which
+          # would target `nesquena/hermes-webui` and fail (no write access).
           gh label create sync-upstream \
+            --repo "$GITHUB_REPOSITORY" \
             --description 'PRs from .github/workflows/sync-upstream.yml' \
             --color 5319E7 \
             --force
@@ -191,6 +196,7 @@ jobs:
           } > /tmp/pr-body.md
 
           PR_URL=$(gh pr create \
+            --repo "$GITHUB_REPOSITORY" \
             --base master \
             --head "$PR_BRANCH" \
             --title "$TITLE" \
@@ -198,4 +204,4 @@ jobs:
             $DRAFT_FLAG)
 
           echo "Created: $PR_URL"
-          gh pr edit "$PR_URL" --add-label sync-upstream
+          gh pr edit "$PR_URL" --repo "$GITHUB_REPOSITORY" --add-label sync-upstream
