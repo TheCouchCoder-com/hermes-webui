@@ -14,6 +14,26 @@
 
 ### Fixed
 
+- **PR #2210** by @Jordan-SkyLF — MCP Tools list in Settings → System no longer renders an unbounded inventory that makes the settings panel scroll-trapping. Added a toolbar (result-count summary, page-size 5/10/20/50/all, search input), bounded scroll area with consistent height, paginated rendering, and focused regression coverage for the large-inventory case. Existing WebUI-only/runtime-only contract preserved (no MCP server probing, no agent-side changes). Visual before/after evidence shipped under `docs/pr-media/2210/`.
+
+- **PR #2213** by @franksong2702 (fixes #2152) — Literal `<think>`/`</think>` discussions in normal assistant prose are no longer stripped from saved messages and re-renders. The old server cleanup and stored-message render regexes stripped the first closed thinking-looking block anywhere in the content. PR aligns saved/static paths with the existing streaming rule: provider reasoning wrappers (`<think>...</think>`, MiniMax `<|channel>thought...<channel|>`, Gemma 4 `<|turn|>thinking...<turn|>`) are stripped only when they lead the response (i.e. the wrapper is the first non-whitespace content).
+
+- **PR #2149** by @starship-s — `/api/session` loads no longer pay the cost of full external CLI session discovery when opening an ordinary WebUI-native chat. Caches CLI/external session scans briefly, skips CLI metadata lookup for ordinary WebUI-native session loads, and reuses a single in-memory ID snapshot during session-index pruning. Messaging, read-only, external-agent, and CLI-marked sidecars still take the CLI metadata path; CLI-only sessions still use the existing fallback. Stage-351 maintainer fix renamed the existing `_needs_cli_session_metadata()` gate to the broader `_session_requires_cli_metadata_lookup()` from this PR — strictly more inclusive (now also covers `read_only=True` sidecars, `session_source` markers, and source_tag/raw_source/platform metadata so legacy-imported sidecars still get the slow path when they need it).
+
+### Added
+
+- **PR #2207** by @Jordan-SkyLF (fixes #1579) — Update banner now shows target-aware "What's new?" links: WebUI updates link to the WebUI comparison, Agent updates link to the Agent comparison. Agent-only and WebUI-only update states no longer show a misleading cross-target comparison action. Opt-in settings toggle enables human-readable LLM-generated update summaries for each target's diff; users can still open the original diff from the summary. Cached/generated-summary button states persist across refreshes. Extended update-banner regression coverage for the diff-link and summary flows. Visual evidence: `docs/images/update-banner-whats-new-{before,after}.png` + summary on/off variants.
+
+- **PR #2206** by @vcavichini — Cron list now shows a 🤖 emoji badge for jobs running in agent mode (`no_agent=false`). Cron detail view shows the configured provider/model next to the Mode badge, falling back to "default" when neither is explicitly set for agent-mode crons. UI-only change.
+
+- **PR #2212** by @dobby-d-elf — Tunes the Activity sweep animation introduced in PR #2203 (stage-350) — softer color stops, less aggressive contrast, smoother fade. CSS-only follow-up.
+
+## [v0.51.57] — 2026-05-13 — Release AG (stage-350 — 7-PR medium-risk batch — auth trilogy + cancel-status with conflict resolution + Ollama label guard + provider precedence + Activity animation + Opus dedup tightening)
+
+### Fixed
+
+- **Issue #2152** — Literal discussions of reasoning tags such as `<think>` and `</think>` no longer disappear from saved or re-rendered assistant messages. WebUI now treats `<think>...</think>`, MiniMax `<|channel>thought...<channel|>`, and Gemma 4 `<|turn|>thinking...<turn|>` blocks as hidden reasoning metadata only when the wrapper is the first non-whitespace content in the response; provider wrappers with leading whitespace still strip as before.
+
 - **PR #2191** by @lucasrc (auth refactor 1/3) — Thread-safe login rate limiter (new `_LOGIN_ATTEMPTS_LOCK`) + PBKDF2 key separation (new `_pbkdf2_key()` reading `.pbkdf2_key` separately from `_signing_key()` reading `.signing_key` — previously both shared `.signing_key`, a key-reuse anti-pattern across HMAC and PBKDF2 primitives) + transparent migration in `verify_password()` that re-salts legacy hashes with the new key on next successful login. 241-line regression suite covering the lock + migration paths. Split from earlier #2167 per maintainer review request.
 
 - **PR #2192** by @lucasrc (auth refactor 2/3, depends on #2191) — Invalidate password-hash cache when password changes via the Settings panel. The PR #2191 cache lives for the process lifetime, but `save_settings({'_set_password': ...})` could mutate `settings.json.password_hash` without telling the auth module — leaving the cache stale and verifying against the old password until restart. Now `save_settings()` calls `_invalidate_password_hash_cache()` on both `_set_password` and `_clear_password` paths. 52-line regression suite + `verify_password()` simplified to rely on the new hook instead of doing the invalidation itself.
@@ -45,6 +65,8 @@
 - **PR #2202** by @Jordan-SkyLF — Early session titles on chat start. Pre-fix, new conversations sat as "Untitled" until later title generation completed. Now `/api/chat/start` derives a provisional title from the first user prompt and returns it in the response, so the sidebar and topbar sync immediately. Later SSE title refinements replace the provisional via one guarded helper (only when the current title is still known-default/provisional). Manual/custom user titles are protected via exact-normalized-match detection, so user-renamed prefix titles are never treated as automatic placeholders. 167-line regression suite in `tests/test_early_session_title.py` covering default/eager/manual title behavior, chat-start response shape, JS wiring, and manual-prefix protection.
 
 ### Fixed
+
+- MCP Tools in Settings → System now uses a bounded scroll region with 5-item default pages, a per-page selector up to 40 tools, and a visible result summary, so large MCP tool inventories no longer make the settings panel balloon indefinitely.
 
 - **PR #2201** by @MrFant — Multi-turn conversations with thinking-mode providers (MiMo/Xiaomi, DeepSeek, Kimi/Moonshot) no longer 400 with `Param Incorrect: reasoning_content must be passed back`. WebUI's `_sanitize_messages_for_api()` strips fields not in `_API_SAFE_MSG_KEYS` before sending conversation history to the LLM; `reasoning_content` was missing from the whitelist, so when history was replayed on the second turn, the assistant message with `tool_calls` arrived without `reasoning_content` and providers enforcing thinking-mode echo-back rejected it. One-line fix: adds `'reasoning_content'` to `_API_SAFE_MSG_KEYS`. CLI was unaffected because `run_agent.py` has its own `_copy_reasoning_content_for_api()` that doesn't go through this filter.
 
