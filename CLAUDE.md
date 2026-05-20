@@ -140,16 +140,42 @@ etc.) tells Claude what to keep. Apply the playbook; validate with
 `static/login.js`, `static/panels.js`, `static/ui.js`,
 `static/index.html`, `static/boot.js`, `server.py`.
 
+**Tier 2b — `tests/**` with mandatory green-suite gate.** Test-file
+conflicts are usually additive (both sides added unrelated test
+classes/functions to the same file). Auto-resolve rule: **union-both,
+keeping all test classes and functions from both sides**. Do not edit
+test bodies; only remove the conflict markers.
+
+After resolving, validation is **mandatory and stricter than other
+tiers** — a green resolution is not enough; the resulting suite must
+also be green:
+
+1. Run `pytest <conflicted-test-file> -v` and confirm every test passes.
+2. Run the full suite: `pytest tests/ -q --timeout=60`.
+3. **If any test fails — including upstream-added tests that fail
+   against our fork — escalate to Tier 3.** Do not delete, skip, or
+   "fix" failing upstream tests on your own; a fork-vs-upstream test
+   failure usually means upstream tests a feature we deliberately
+   rejected in an earlier sync (see PR #22 / v0.51.59: upstream's
+   `TestUpdateCompareSource` tests assert the single-banner redesign
+   that PR #21 explicitly discarded). That judgment call is the
+   maintainer's, not the babysitter's.
+
+When escalating from Tier 2b, the PR comment must list the failing
+test names and link to the prior sync merge commit that rejected the
+related production code, so the maintainer has the context to decide
+whether to skip the test, port the feature, or drop the test.
+
 **Tier 3 — always escalate.** Files where being wrong is
 shipping-breaking, security-breaking, or self-corrupting. Never
 auto-resolve. Open a PR comment summarizing the conflict and pinging the
 maintainers.
 
 Files: `CLAUDE.md` (load-bearing meta-config — corrupting this corrupts
-all future sync runs), `tests/**`, `.github/workflows/**`, `Dockerfile`,
+all future sync runs), `.github/workflows/**`, `Dockerfile`,
 `docker-compose*.yml`, `requirements*.txt`, `setup.py`, `pyproject.toml`,
 `.env*`, anything under `secrets/` or matching `*key*`/`*token*`, and
-**any file not explicitly named in Tier 1 or Tier 2**.
+**any file not explicitly named in Tier 1, Tier 2, or Tier 2b**.
 
 ### Validation after a sync merge
 
