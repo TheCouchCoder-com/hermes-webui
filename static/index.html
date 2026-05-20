@@ -941,13 +941,6 @@
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-                <input type="checkbox" id="settingsAlwaysNewChat" style="width:15px;height:15px;accent-color:var(--accent)">
-                <span data-i18n="settings_label_always_new_chat">Always start a new chat</span>
-              </label>
-              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_always_new_chat">When enabled, the WebUI opens on an empty chat (instead of restoring your last session) every time you load the page. Deep-links (?session=…) and in-flight streams still resume.</div>
-            </div>
-            <div class="settings-field">
-              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
                 <input type="checkbox" id="settingsSessionJumpButtons" style="width:15px;height:15px;accent-color:var(--accent)">
                 <span data-i18n="settings_label_session_jump_buttons">Show session jump buttons</span>
               </label>
@@ -981,6 +974,13 @@
             <div class="settings-field">
               <label for="settingsLanguage" data-i18n="settings_label_language">Language</label>
               <select id="settingsLanguage" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"></select>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsAlwaysNewChat" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_always_new_chat">Always start a new chat</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_always_new_chat">When enabled, the WebUI opens on an empty chat (instead of restoring your last session) every time you load the page. Deep-links (?session=…) and in-flight streams still resume.</div>
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
