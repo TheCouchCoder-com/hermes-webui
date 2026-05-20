@@ -1512,6 +1512,35 @@ function applyBotName(){
   const urlSession=(typeof _sessionIdFromLocation==='function')?_sessionIdFromLocation():null;
   const savedLocal=localStorage.getItem('hermes-webui-session');
   const saved=urlSession||savedLocal;
+  // "Always start new chat" setting: skip localStorage session restore
+  // when enabled, unless there's a deep-link URL session or an in-flight
+  // stream that needs to resume.
+  if(saved && !urlSession && localStorage.getItem('hermes-webui-always-new-chat')==='true'){
+    try{
+      if(savedLocal && await _savedSessionShouldStaySidebarOnly(savedLocal)){
+        // In-flight stream — keep session in sidebar, show empty chat.
+        S.session=null; S.messages=[]; S.activeStreamId=null; S.busy=false;
+        S._bootReady=true;
+        syncTopbar();syncWorkspacePanelState();
+        $('emptyState').style.display='';
+        await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();
+        return;
+      }
+    }catch(_){}
+    // No in-flight stream — skip restoration entirely.
+    // Don't clear localStorage['hermes-webui-session']; turning the
+    // setting off later should still restore the last session.
+    S._bootReady=true;
+    syncTopbar();
+    const _freshPanelPref=localStorage.getItem('hermes-webui-workspace-panel-pref')==='open'
+      || localStorage.getItem('hermes-webui-workspace-panel')==='open';
+    if(_freshPanelPref) _workspacePanelMode='browse';
+    syncWorkspacePanelState();
+    $('emptyState').style.display='';
+    await renderSessionList();
+    if(typeof startGatewaySSE==='function') startGatewaySSE();
+    return;
+  }
   if(saved){
     try{
       if(!urlSession&&savedLocal&&await _savedSessionShouldStaySidebarOnly(savedLocal)){

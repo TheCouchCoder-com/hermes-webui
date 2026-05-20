@@ -5248,6 +5248,15 @@ async function loadSettingsPanel(){
         else if(!open&&_workspacePanelMode!=='closed') toggleWorkspacePanel(false);
       };
     }
+    // "Always start new chat" toggle (localStorage-backed).
+    // Uses key hermes-webui-always-new-chat; default false (preserve existing behavior).
+    const alwaysNewCb=$('settingsAlwaysNewChat');
+    if(alwaysNewCb){
+      alwaysNewCb.checked=localStorage.getItem('hermes-webui-always-new-chat')==='true';
+      alwaysNewCb.onchange=function(){
+        localStorage.setItem('hermes-webui-always-new-chat',this.checked?'true':'false');
+      };
+    }
     const endlessScrollCb=$('settingsSessionEndlessScroll');
     if(endlessScrollCb){
       endlessScrollCb.checked=!!settings.session_endless_scroll;
