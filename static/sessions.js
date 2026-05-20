@@ -2875,12 +2875,14 @@ function renderSessionListFromCache(){
         titleRow.appendChild(dot);
       }
     }
+    const density=(window._sidebarDensity==='detailed'?'detailed':'compact');
+    const showLineageMetadata=density==='detailed';
     const lineageKey=_sidebarLineageKeyForRow(s);
-    const segmentCount=_sessionSegmentCount(s);
-    const lineageSegments=_lineageSegmentsForRender(s,lineageKey);
-    const needsLineageReport=_lineageReportNeedsFetch(s,lineageKey,segmentCount);
-    const lineageReportKey=_lineageReportCacheKey(s,lineageKey);
-    const canExpandLineageSegments=Boolean(lineageKey&&segmentCount>1&&(lineageSegments.length>0||needsLineageReport||_lineageReportInflight.has(lineageReportKey)));
+    const segmentCount=showLineageMetadata?_sessionSegmentCount(s):0;
+    const lineageSegments=showLineageMetadata?_lineageSegmentsForRender(s,lineageKey):[];
+    const needsLineageReport=showLineageMetadata?_lineageReportNeedsFetch(s,lineageKey,segmentCount):false;
+    const lineageReportKey=showLineageMetadata?_lineageReportCacheKey(s,lineageKey):null;
+    const canExpandLineageSegments=showLineageMetadata&&Boolean(lineageKey&&segmentCount>1&&(lineageSegments.length>0||needsLineageReport||_lineageReportInflight.has(lineageReportKey)));
     const lineageSegmentsExpanded=canExpandLineageSegments&&_expandedLineageKeys.has(lineageKey);
     if(segmentCount>0){
       const segmentCountEl=document.createElement('span');
@@ -2929,7 +2931,6 @@ function renderSessionListFromCache(){
     }
     titleRow.appendChild(ts);
     sessionText.appendChild(titleRow);
-    const density=(window._sidebarDensity==='detailed'?'detailed':'compact');
     if(density==='detailed'){
       const metaBits=[];
       const msgCount=typeof s.message_count==='number'?s.message_count:0;

@@ -14,6 +14,7 @@ import re
 import subprocess
 import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -26,7 +27,8 @@ except ImportError:
     _AGENT_DIR = None
 
 _update_cache = {'webui': None, 'agent': None, 'checked_at': 0}
-_summary_cache = {}
+_SUMMARY_CACHE_MAX = 16
+_summary_cache: OrderedDict = OrderedDict()
 _cache_lock = threading.Lock()
 _check_in_progress = False
 _apply_lock = threading.Lock()   # prevents concurrent stash/pull/pop on same repo
@@ -498,6 +500,8 @@ def summarize_update_payload(updates: dict, llm_callback=None, *, target: str | 
     if use_cache:
         with _cache_lock:
             cached = _summary_cache.get(cache_key)
+            if cached:
+                _summary_cache.move_to_end(cache_key)
         if cached:
             result = dict(cached)
             result['cached'] = True
@@ -526,6 +530,8 @@ def summarize_update_payload(updates: dict, llm_callback=None, *, target: str | 
     }
     if use_cache:
         with _cache_lock:
+            if len(_summary_cache) >= _SUMMARY_CACHE_MAX and cache_key not in _summary_cache:
+                _summary_cache.popitem(last=False)
             _summary_cache[cache_key] = dict(result)
     return result
 
