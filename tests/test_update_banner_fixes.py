@@ -19,6 +19,18 @@ import time
 import sys
 import os
 
+import pytest
+
+# Skip reason for tests of the upstream v0.51.59 update-banner redesign
+# (multi-target compare URLs + single banner with WhatsNewLinks container).
+# Our fork explicitly rejected that redesign in PR #21 when syncing v0.51.58.
+# Keeping the test bodies in place (rather than deleting them) so the next
+# upstream sync sees this region as already resolved and doesn't re-conflict.
+_FORK_REJECTED_SINGLE_BANNER = (
+    "fork rejected upstream's single-banner / multi-target-compare redesign "
+    "(see PR #21 / v0.51.58 sync) — skipping the corresponding upstream tests"
+)
+
 REPO = pathlib.Path(__file__).parent.parent
 
 
@@ -618,9 +630,6 @@ class TestSequentialUpdateRestartCoordination:
         )
 
 
-<<<<<<< HEAD
-=======
-
 class TestUpdateCompareSource:
     def test_simulated_update_check_payload_includes_both_safe_compare_urls(self):
         src = read('api/routes.py')
@@ -629,11 +638,13 @@ class TestUpdateCompareSource:
         assert '"repo_url": "https://github.com/NousResearch/hermes-agent"' in src
         assert '"compare_url": "https://github.com/NousResearch/hermes-agent/compare/aaa0001...bbb0002"' in src
 
+    @pytest.mark.skip(reason=_FORK_REJECTED_SINGLE_BANNER)
     def test_update_banner_html_uses_multi_target_links_container(self):
         src = read('static/index.html')
         assert 'id="updateWhatsNewLinks"' in src
         assert 'id="updateWhatsNew"' not in src
 
+    @pytest.mark.skip(reason=_FORK_REJECTED_SINGLE_BANNER)
     def test_update_banner_frontend_uses_data_driven_compare_helpers(self):
         src = read('static/ui.js')
         assert 'function _isSafeUpdateCompareUrl(url)' in src
@@ -648,6 +659,7 @@ class TestUpdateCompareSource:
         assert "data.webui.repo_url" not in src
         assert "$('updateWhatsNew')" not in src
 
+    @pytest.mark.skip(reason=_FORK_REJECTED_SINGLE_BANNER)
     def test_update_banner_clears_stale_links_when_no_updates_remain(self):
         src = read('static/ui.js')
         start = src.find('function _showUpdateBanner(data)')
@@ -697,6 +709,7 @@ class TestWhatsNewSummaryToggle:
         assert 'window._whatsNewSummaryEnabled' in boot
         assert 'whats_new_summary_enabled' in boot
 
+    @pytest.mark.skip(reason=_FORK_REJECTED_SINGLE_BANNER)
     def test_update_banner_summary_flow_keeps_diff_links_after_summary(self):
         src = read('static/ui.js')
         assert 'function _renderUpdateSummaryPanel' in src
@@ -857,7 +870,6 @@ class TestWhatsNewSummaryToggle:
         assert webui_again['summary'] == webui['summary']
 
 
->>>>>>> v0.51.59
 # ── Regression: force button reset on retry ──────────────────────────────────
 
 class TestForceButtonResetOnRetry:
