@@ -771,6 +771,114 @@ class TestWhatsNewSummaryToggle:
         assert 'Worth knowing' in result['summary']
         assert '- The settings panel is easier to understand.' in result['summary']
 
+    def test_update_summary_deduplicates_notice_items_from_worth_knowing(self):
+        from api.updates import summarize_update_payload
+
+        payload = {
+            'webui': {'behind': 2, 'current_sha': 'abc', 'latest_sha': 'def', 'compare_url': 'https://example.test/webui'},
+        }
+        result = summarize_update_payload(
+            payload,
+            llm_callback=lambda _system, _prompt: 'The settings panel is easier to understand. Update prompts are clearer.',
+            use_cache=False,
+        )
+        notice_items = result['summary_sections'][0]['items']
+        worth_section = next((section for section in result['summary_sections'] if section['title'] == 'Worth knowing'), None)
+
+        assert notice_items == [
+            'The settings panel is easier to understand.',
+            'Update prompts are clearer.',
+        ]
+        assert worth_section is None
+        assert 'Worth knowing' not in result['summary']
+        assert 'This summary covers WebUI' not in result['summary']
+
+    def test_update_summary_deduplicates_repeated_agent_summary_bullets(self):
+        from api.updates import summarize_update_payload
+
+        duplicate_menu_item = (
+            'The `hermes tools` menus should open noticeably faster, especially when checking available tools or auth state.'
+        )
+        duplicate_quality_item = (
+            'These updates are small quality-of-life improvements focused on smoother messaging and less waiting in the CLI.'
+        )
+        result = summarize_update_payload(
+            {
+                'agent': {
+                    'behind': 2,
+                    'current_sha': 'abc',
+                    'latest_sha': 'def',
+                    'compare_url': 'https://example.test/agent',
+                },
+            },
+            llm_callback=lambda _system, _prompt: '\n'.join(
+                [
+                    'Slack thread commands now also work with `!cmd`, giving you an easier fallback when slash commands are awkward or unavailable.',
+                    duplicate_menu_item,
+                    duplicate_quality_item,
+                    duplicate_menu_item,
+                    duplicate_quality_item,
+                ]
+            ),
+            use_cache=False,
+        )
+        sections = {section['title']: section['items'] for section in result['summary_sections']}
+
+        assert duplicate_menu_item in sections["What you'll notice"]
+        assert duplicate_quality_item in sections["What you'll notice"]
+        assert 'Worth knowing' not in sections
+        assert result['summary'].count(duplicate_menu_item) == 1
+        assert result['summary'].count(duplicate_quality_item) == 1
+
+    def test_update_summary_many_updates_caps_commit_input_and_discloses_scope(self, monkeypatch):
+        import api.updates as upd
+
+        subjects = [f'Commit subject {idx}' for idx in range(1, 25)]
+        monkeypatch.setattr(
+            upd,
+            '_commit_subjects_for_update_with_limit',
+            lambda _info, *, limit=24: (subjects[:limit], True),
+        )
+        prompts = []
+
+        def fake_llm(_system, prompt):
+            prompts.append(prompt)
+            return '\n'.join([
+                'Several user-facing fixes are ready.',
+                'Settings and update messaging should be easier to understand.',
+                'The update flow should feel safer and clearer.',
+            ])
+
+        result = upd.summarize_update_payload(
+            {
+                'webui': {
+                    'behind': 57,
+                    'current_sha': 'abc',
+                    'latest_sha': 'def',
+                    'compare_url': 'https://example.test/webui',
+                }
+            },
+            target='webui',
+            llm_callback=fake_llm,
+            use_cache=False,
+        )
+
+        assert len(subjects) == 24
+        assert prompts
+        assert 'Showing latest 24 of 57 commit subjects; summarize trends, not every commit.' in prompts[0]
+        assert 'Commit subject 24' in prompts[0]
+        assert 'Commit subject 25' not in prompts[0]
+        sections = {section['title']: section['items'] for section in result['summary_sections']}
+        assert sections["What you'll notice"] == [
+            'Several user-facing fixes are ready.',
+            'Settings and update messaging should be easier to understand.',
+            'The update flow should feel safer and clearer.',
+        ]
+        assert sections['Worth knowing'] == [
+            'WebUI has 57 updates; this summary uses the latest 24 commit subjects, with the full comparison still available in the diff link.'
+        ]
+        assert result['targets'][0]['commits_truncated'] is True
+
     def test_update_summary_cache_reuses_same_update_summary(self):
         import api.updates as upd
 

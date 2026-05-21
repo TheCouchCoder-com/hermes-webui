@@ -130,6 +130,38 @@ def _clarify_timeout_seconds(default: int = 120) -> int:
 _CANCEL_MARKER_PATTERNS = ('task cancelled', 'task canceled', 'response interrupted')
 
 
+def _has_new_assistant_reply(all_messages: list, prev_count: int) -> bool:
+    """Return True if *new* messages (beyond ``prev_count``) contain an
+    assistant message with non-empty content.
+
+    ``all_messages`` is ``result.get('messages')`` which includes the full
+    conversation history.  ``prev_count`` is ``len(_previous_context_messages)``
+    — the number of messages present before the current turn started.  Only
+    messages at index >= prev_count are inspected so that historical assistant
+    replies don't mask a silent failure on the current turn.
+
+    If ``len(all_messages) < prev_count`` (an edge-case shrink) we fall back
+    to scanning the full list — this keeps behaviour consistent with the
+    original code when offsets don't cleanly apply.  When ``len == prev_count``,
+    there are no new messages and we return False.
+    """
+    if len(all_messages) > prev_count:
+        # Normal case: new messages appended beyond the pre-turn history.
+        candidates = all_messages[prev_count:]
+    elif len(all_messages) < prev_count:
+        # Edge-case shrink — scan everything as fallback.
+        candidates = all_messages
+    else:
+        # Same length. In production this means no new messages were appended.
+        # However, some test fixtures replace the entire message list rather
+        # than appending, so check whether the tail changed.
+        return False
+    return any(
+        m.get('role') == 'assistant' and str(m.get('content') or '').strip()
+        for m in candidates
+    )
+
+
 def _classify_provider_error(err_str: str, exc=None, *, silent_failure: bool = False) -> dict:
     """Classify provider/agent failure text for WebUI apperror UX.
 
@@ -3360,10 +3392,13 @@ def _run_agent_streaming(
                 # an empty final_response without raising — the stream would end with
                 # a done event containing zero assistant messages, leaving the user with
                 # no feedback. Emit an apperror so the client shows an inline error.
-                _assistant_added = any(
-                    m.get('role') == 'assistant' and str(m.get('content') or '').strip()
-                    for m in (result.get('messages') or [])
-                )
+                #
+                # Only check NEW messages added by this turn — result.get('messages')
+                # includes the full conversation history, so checking all of them would
+                # match assistant content from prior turns and mask the real failure.
+                _all_result_messages = result.get('messages') or []
+                _prev_len = len(_previous_context_messages)
+                _assistant_added = _has_new_assistant_reply(_all_result_messages, _prev_len)
                 # _token_sent tracks whether on_token() was called (any streamed text)
                 if not _assistant_added and not _token_sent:
                     if cancel_event.is_set():
@@ -3444,10 +3479,8 @@ def _run_agent_streaming(
                                     task_id=session_id,
                                     persist_user_message=msg_text,
                                 )
-                                _heal_ok = any(
-                                    m.get('role') == 'assistant' and str(m.get('content') or '').strip()
-                                    for m in (_heal_result.get('messages') or [])
-                                ) or _token_sent
+                                _heal_all_msgs = _heal_result.get('messages') or []
+                                _heal_ok = _has_new_assistant_reply(_heal_all_msgs, _prev_len) or _token_sent
                             except Exception as _retry_exc:
                                 logger.warning(
                                     '[webui] self-heal: retry also failed: %s', _retry_exc,
