@@ -317,22 +317,31 @@ def _repo_path_for_update_target(target: str):
 
 def _commit_subjects_for_update(info: dict, *, limit: int = 24) -> list[str]:
     """Return commit subjects for an update range, if the local git refs exist."""
+    subjects, _truncated = _commit_subjects_for_update_with_limit(info, limit=limit)
+    return subjects
+
+
+def _commit_subjects_for_update_with_limit(info: dict, *, limit: int = 24) -> tuple[list[str], bool]:
+    """Return recent commit subjects plus whether the local list was capped."""
     if not isinstance(info, dict):
-        return []
+        return [], False
     target = info.get('name')
     if target not in ('webui', 'agent'):
         target = 'webui' if info.get('repo_url', '').endswith('hermes-webui') else target
     path = _repo_path_for_update_target(target)
     if path is None or not (Path(path) / '.git').exists():
-        return []
+        return [], False
     current = str(info.get('current_sha') or '').strip()
     latest = str(info.get('latest_sha') or '').strip()
     if not (current and latest):
-        return []
-    out, ok = _run_git(['log', '--format=%s', f'{current}..{latest}', f'-n{limit}'], path, timeout=5)
+        return [], False
+    probe_limit = max(1, int(limit)) + 1
+    out, ok = _run_git(['log', '--format=%s', f'{current}..{latest}', f'-n{probe_limit}'], path, timeout=5)
     if not ok or not out:
-        return []
-    return [line.strip() for line in out.splitlines() if line.strip()]
+        return [], False
+    subjects = [line.strip() for line in out.splitlines() if line.strip()]
+    truncated = len(subjects) > limit
+    return subjects[:limit], truncated
 
 
 def _summary_cache_key(updates: dict, details: list[dict]) -> str:
@@ -392,13 +401,25 @@ def _fallback_update_bullets(details: list[dict]) -> list[str]:
         commits = item.get('commits') or []
         if commits:
             highlights = '; '.join(commits[:3])
-            bullets.append(f"{label} has {behind} update(s), including: {highlights}.")
+            qualifier = 'recent updates' if item.get('commits_truncated') else 'updates'
+            bullets.append(f"{label} has {behind} update(s), including {qualifier}: {highlights}.")
         else:
             bullets.append(f"{label} has {behind} update(s) available.")
     return bullets or ['Updates are available.']
 
 
 def _worth_knowing_bullets(details: list[dict]) -> list[str]:
+    items = []
+    truncated = [item for item in details if item.get('commits_truncated') and item.get('commits_limit')]
+    for item in truncated[:2]:
+        label = item.get('label') or item.get('name') or 'Hermes'
+        behind = item.get('behind') or 0
+        limit = item.get('commits_limit') or len(item.get('commits') or [])
+        items.append(
+            f"{label} has {behind} updates; this summary uses the latest {limit} commit subjects, with the full comparison still available in the diff link."
+        )
+    if items:
+        return items
     targets = [
         f"{item.get('label') or item.get('name') or 'Hermes'} ({item.get('behind') or 0} update{'s' if (item.get('behind') or 0) != 1 else ''})"
         for item in details
@@ -406,30 +427,38 @@ def _worth_knowing_bullets(details: list[dict]) -> list[str]:
     ]
     if len(targets) > 1:
         return ['This summary combines updates from ' + ' and '.join(targets) + '.']
-    if targets:
-        return ['This summary covers ' + targets[0] + '.']
-    return ['No update details were available to summarize.']
+    return []
 
 
 def _format_update_summary_sections(summary_text: str, details: list[dict]) -> tuple[list[dict], str]:
     bullets = _summary_bullets_from_text(summary_text, fallback_items=_fallback_update_bullets(details))
     if len(bullets) > 1:
         notice_items = bullets[:3]
-        worth_items = bullets[3:] or bullets[1:]
+        worth_items = bullets[3:]
     else:
         notice_items = bullets
         worth_items = []
-    worth_items = worth_items[:2] or _worth_knowing_bullets(details)
+    notice_keys = {item.lower() for item in notice_items}
+    worth_items = [item for item in worth_items if item.lower() not in notice_keys]
+    if not worth_items:
+        worth_items = [
+            item for item in _worth_knowing_bullets(details)
+            if item.lower() not in notice_keys
+        ]
+    worth_items = worth_items[:2]
     sections = [
         {
             'title': "What you'll notice",
             'items': notice_items,
         },
-        {
-            'title': 'Worth knowing',
-            'items': worth_items,
-        },
     ]
+    if worth_items:
+        sections.append(
+            {
+                'title': 'Worth knowing',
+                'items': worth_items,
+            }
+        )
     lines = []
     for section in sections:
         lines.append(section['title'])
@@ -460,6 +489,10 @@ def _update_summary_prompt(details: list[dict]) -> tuple[str, str]:
         user_lines.append(f"{item['label']}: {item['behind']} commit(s) behind")
         commits = item.get('commits') or []
         if commits:
+            if item.get('commits_truncated'):
+                user_lines.append(
+                    f"- Showing latest {len(commits)} of {item['behind']} commit subjects; summarize trends, not every commit."
+                )
             user_lines.extend(f"- {subject}" for subject in commits)
         else:
             user_lines.append("- No local commit subjects available; summarize only the update count.")
@@ -486,14 +519,19 @@ def summarize_update_payload(updates: dict, llm_callback=None, *, target: str | 
         info = updates.get(key)
         if not isinstance(info, dict) or int(info.get('behind') or 0) <= 0:
             continue
+        commit_limit = 24
+        commits, commits_truncated = _commit_subjects_for_update_with_limit({'name': key, **info}, limit=commit_limit)
+        behind = int(info.get('behind') or 0)
         item = {
             'name': key,
             'label': label,
-            'behind': int(info.get('behind') or 0),
+            'behind': behind,
             'current_sha': info.get('current_sha'),
             'latest_sha': info.get('latest_sha'),
             'compare_url': info.get('compare_url'),
-            'commits': _commit_subjects_for_update({'name': key, **info}),
+            'commits': commits,
+            'commits_limit': commit_limit,
+            'commits_truncated': bool(commits_truncated or (commits and behind > len(commits))),
         }
         details.append(item)
     cache_key = _summary_cache_key(updates, details)
