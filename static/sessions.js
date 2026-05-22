@@ -310,6 +310,9 @@ function _purgeStaleInflightEntries() {
     }
   }
   for (const sid of Object.keys(INFLIGHT)) {
+    if (typeof _sendInProgress !== 'undefined' && _sendInProgress && sid === _sendInProgressSid) {
+      continue;
+    }
     if (!sessionsById.has(sid)) {
       // Session is absent from _allSessions — it was deleted / archived /
       // filtered and can never stream again, so drop the entry.
@@ -474,11 +477,22 @@ async function newSession(flash, options={}){
     try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
     _setActiveSessionUrl(S.session.session_id);
     _setSessionViewedCount(S.session.session_id, S.session.message_count || 0);
-    // Sync chat-header dropdown to the session's model so the UI reflects
-    // the default model the server actually used (#872).
-    if(S.session.model && S.session.model!==$('modelSelect').value && typeof _applyModelToDropdown==='function'){
-      _applyModelToDropdown(S.session.model,$('modelSelect'),S.session.model_provider||null);
-      if(typeof syncModelChip==='function') syncModelChip();
+    // Sync chat-header dropdown to the session's model/provider so the UI reflects
+    // the default route the server actually used (#872). Compare provider state too:
+    // duplicate model ids can exist under several providers, and a stale persisted
+    // picker selection with the same model id should not mask the new session's
+    // configured default provider.
+    const modelSel=$('modelSelect');
+    if(S.session.model && modelSel && typeof _applyModelToDropdown==='function'){
+      const currentModelState=(typeof _modelStateForSelect==='function')
+        ? _modelStateForSelect(modelSel,modelSel.value)
+        : {model:modelSel.value,model_provider:null};
+      const sessionProvider=S.session.model_provider||null;
+      const currentProvider=currentModelState.model_provider||null;
+      if(S.session.model!==modelSel.value || sessionProvider !== currentProvider){
+        _applyModelToDropdown(S.session.model,modelSel,sessionProvider);
+        if(typeof syncModelChip==='function') syncModelChip();
+      }
     }
     // Reset per-session visual state: a fresh chat is idle even if another
     // conversation is still streaming in the background.
@@ -2112,6 +2126,16 @@ let _sessionEventsSSE = null;
 let _sessionEventsRefreshTimer = 0;
 let _sessionEventsReconnectTimer = 0;
 let _sessionEventsNeedsRefreshOnOpen = false;
+let _sessionEventsReconnectAttempt = 0;
+const _sessionEventsReconnectBaseMs = 5000;
+const _sessionEventsReconnectMaxMs = 30000;
+
+function _sessionEventsReconnectDelayMs(){
+  const attempt = Math.max(0, Number(_sessionEventsReconnectAttempt || 0));
+  const base = Math.min(_sessionEventsReconnectMaxMs, _sessionEventsReconnectBaseMs * Math.pow(2, attempt));
+  const jitter = Math.floor(Math.random() * Math.max(1, Math.floor(base * 0.35)));
+  return Math.min(_sessionEventsReconnectMaxMs, Math.floor(base * 0.75) + jitter);
+}
 let _sessionListRefreshInFlight = false;
 let _sessionListRefreshPendingReason = '';
 
@@ -2233,6 +2257,7 @@ function ensureSessionEventsSSE(){
     // Same-origin relative URL preserves subpath mounts and normal WebUI cookies.
     _sessionEventsSSE = new EventSource('api/sessions/events');
     _sessionEventsSSE.onopen = () => {
+      _sessionEventsReconnectAttempt = 0;
       if(!_sessionEventsNeedsRefreshOnOpen) return;
       _sessionEventsNeedsRefreshOnOpen = false;
       void refreshSessionList('reconnect');
@@ -2244,10 +2269,12 @@ function ensureSessionEventsSSE(){
       _sessionEventsNeedsRefreshOnOpen = true;
       _closeSessionEventsSSE();
       if(_sessionEventsReconnectTimer) return;
+      const delayMs = _sessionEventsReconnectDelayMs();
+      _sessionEventsReconnectAttempt = Math.min(_sessionEventsReconnectAttempt + 1, 6);
       _sessionEventsReconnectTimer = setTimeout(() => {
         _sessionEventsReconnectTimer = 0;
         ensureSessionEventsSSE();
-      }, 5000);
+      }, delayMs);
     };
   }catch(e){
     _closeSessionEventsSSE();
@@ -2905,6 +2932,22 @@ function _markSessionListPointerUp(){
   if(_pendingSessionListPayload) _schedulePendingSessionListApply();
 }
 
+let _sessionVirtualResyncRaf = 0;
+function _resyncSessionVirtualWindowAfterRender(list, expectedScrollTop, virtualWindow){
+  if(!list||!virtualWindow||!virtualWindow.virtualized) return;
+  expectedScrollTop=Number(expectedScrollTop)||0;
+  if(expectedScrollTop<=0) return;
+  if(_sessionVirtualResyncRaf) cancelAnimationFrame(_sessionVirtualResyncRaf);
+  _sessionVirtualResyncRaf=requestAnimationFrame(()=>{
+    _sessionVirtualResyncRaf=0;
+    if(_renamingSid) return;
+    const actualScrollTop=Number(list.scrollTop)||0;
+    const tolerance=Math.max(2, Number(virtualWindow.itemHeight||SESSION_VIRTUAL_ROW_HEIGHT)/2);
+    if(Math.abs(actualScrollTop-expectedScrollTop)<=tolerance) return;
+    renderSessionListFromCache();
+  });
+}
+
 function renderSessionListFromCache(){
   // Don't re-render while user is actively renaming a session (would destroy the input)
   if(_renamingSid) return;
@@ -3187,6 +3230,7 @@ function renderSessionListFromCache(){
     // scrollTop drops to 0 — producing a "scroll keeps jumping back" feel
     // when the list scrolls naturally. Fixed for #1669 follow-up.
     list.scrollTop=listScrollTopBeforeRender;
+    _resyncSessionVirtualWindowAfterRender(list, listScrollTopBeforeRender, virtualWindow);
   }
   // Select mode toggle button (only when NOT in select mode)
   if(!_sessionSelectMode){

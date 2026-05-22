@@ -347,7 +347,7 @@
   :root[data-skin="geist-contrast"] .tool-card,
   :root[data-skin="geist-contrast"] .msg-body pre,
   :root[data-skin="geist-contrast"] .preview-md pre,
-  :root[data-skin="geist-contrast"] .composer-box{background:var(--surface)!important;border-color:var(--border)!important;box-shadow:none!important;}
+  :root[data-skin="geist-contrast"] .composer-box{background:var(--surface)!important;border:none!important;box-shadow:none!important;}
   :root[data-skin="geist-contrast"] .session-item,
   :root[data-skin="geist-contrast"] .nav-tab,
   :root[data-skin="geist-contrast"] .rail-btn,
@@ -440,10 +440,10 @@
   :root[data-skin="geist-contrast"] button.send-btn:disabled{background:var(--surface-subtle)!important;border-color:var(--border)!important;color:var(--muted)!important;opacity:1!important;}
   :root.dark[data-skin="geist-contrast"] button.send-btn:disabled svg,
   :root.dark[data-skin="geist-contrast"] button.send-btn:disabled [data-lucide]{color:var(--muted)!important;stroke:var(--muted)!important;}
+  :root[data-skin="geist-contrast"] .composer-box:focus-within{border-color:transparent!important;box-shadow:0 0 0 3px var(--focus-ring)!important;outline:none!important;}
   :root[data-skin="geist-contrast"] input:focus,
   :root[data-skin="geist-contrast"] textarea:focus,
-  :root[data-skin="geist-contrast"] select:focus,
-  :root[data-skin="geist-contrast"] .composer-box:focus-within,
+  :root[data-skin="geist-contrast"] select:focus{border-color:var(--accent)!important;box-shadow:none!important;outline:none!important;}
   :root[data-skin="geist-contrast"] .app-dialog-input:focus,
   :root[data-skin="geist-contrast"] .sidebar-search input:focus{border-color:var(--accent)!important;box-shadow:0 0 0 3px var(--focus-ring)!important;outline:none!important;}
   :root[data-skin="geist-contrast"] .logo,
@@ -463,6 +463,12 @@
   :root[data-skin="geist-contrast"] .sidebar-date-header.pinned{color:var(--accent-text)!important;}
   :root[data-skin="geist-contrast"]::-webkit-scrollbar-thumb{background:var(--border2)!important;}
   :root[data-skin="geist-contrast"] ::selection{background:var(--accent-bg-strong);color:var(--strong);}
+  /* ── Geist Contrast: composer fixes ── */
+  /* Light mode: override white user-bubble-text so textarea text is black */
+  :root[data-skin="geist-contrast"]:not(.dark){--user-bubble-text:#111111;}
+  /* Remove scrollbar from textarea */
+  :root[data-skin="geist-contrast"] textarea#msg{scrollbar-width:none;overflow-y:auto;}
+  :root[data-skin="geist-contrast"] textarea#msg::-webkit-scrollbar{display:none;}
 
   /* #594: app-dialog light mode overrides — base styles use hardcoded dark gradients */
   :root:not(.dark) .app-dialog{
