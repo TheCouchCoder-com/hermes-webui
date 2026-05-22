@@ -12,6 +12,20 @@
 
 ## [Unreleased]
 
+## [v0.51.74] — 2026-05-16 — Release AX (stage-367 — 4-PR safe-lane batch — #2362 table-cell spacing + #2363 run-state-consistency RFC + #2365 custom_providers list-format + #2367 settings sidebar i18n)
+
+### Added
+
+- **PR #2363** by @franksong2702 (refs #2361, refs #1925) — Adds `docs/rfcs/webui-run-state-consistency-contract.md` as a documentation companion to the #1925 runtime-boundary RFC. Documents the shared coherence contract across visible transcript, model context, pending turn metadata, live stream, run journal, compression handoff, browser timeline cache, and sidebar metadata. Complementary to #1925: that RFC says where execution ownership should move, this one says what must stay coherent across the current and future state layers.
+
+### Fixed
+
+- **PR #2362** by @franksong2702 (fixes #2360) — Markdown table rows no longer become too tall when cell text is wrapped in paragraph tags by the renderer. Adds a table-specific CSS reset for `.msg-body td p` and `.msg-body th p` so the global `margin-bottom: 10px` rule on `.msg-body p` doesn't add unwanted vertical space inside table cells. Especially visible on narrow viewports such as iPad Safari/Chrome.
+
+- **PR #2365** by @mccxj (fixes #1106) — `get_available_models()` now handles YAML-list format `custom_providers.models` entries in addition to dict format. Pre-fix, declaring models as a list (`[m1, m2]`) or list-of-dicts (`[{id: m1, label: ...}]`) in `config.yaml` silently discarded every model from that provider in the picker dropdown because the code only recognized dict shape (`{model_id: {}}`). Now supports all three YAML shapes consistently with existing provider-config and live-models-fallback handlers.
+
+- **PR #2367** by @mccxj — Settings sidebar menu items (Conversation, Appearance, Preferences, Plugins, System) now respect locale selection. Pre-fix these were hardcoded English; only Providers had `data-i18n`. Adds `data-i18n` attributes plus the missing `settings_tab_plugins` key. **Stage-367 maintainer fix applied inline**: the PR only added the new key to English, breaking 5 locale-parity tests. Added `settings_tab_plugins` translations to all 10 non-English locales (it/ja/ru/es/de/zh/zh-TW/pt/ko/fr).
+
 ## [v0.51.73] — 2026-05-16 — Release AW (stage-366 — 1-PR safe-lane batch — #2357 compression reference card anchoring fix)
 
 ### Fixed
