@@ -2348,6 +2348,15 @@ def invalidate_credential_pool_cache(provider_id: str):
     with _available_models_cache_lock:
         _CREDENTIAL_POOL_CACHE.pop(provider_id, None)
         _CREDENTIAL_POOL_CACHE.pop(_resolve_provider_alias(provider_id), None)
+    try:
+        # api.providers imports from api.config; keep this lazy to avoid
+        # import-cycle/module-initialization issues.
+        from api.providers import invalidate_account_usage_status_cache
+
+        invalidate_account_usage_status_cache(provider_id)
+        invalidate_account_usage_status_cache(_resolve_provider_alias(provider_id))
+    except Exception:
+        logger.debug("Failed to invalidate account usage status cache", exc_info=True)
 
 
 def invalidate_provider_models_cache(provider_id: str):
@@ -3917,6 +3926,7 @@ _SETTINGS_DEFAULTS = {
     "send_key": "enter",  # 'enter' or 'ctrl+enter'
     "show_token_usage": False,  # show input/output token badge below assistant messages
     "show_tps": False,  # show tokens-per-second chip in assistant message headers
+    "fade_text_effect": False,  # animate newly streamed words with a lightweight fade-in effect
     "show_cli_sessions": False,  # merge CLI sessions from state.db into the sidebar
     "sync_to_insights": False,  # mirror WebUI token usage to state.db for /insights
     "check_for_updates": True,  # check if webui/agent repos are behind upstream
@@ -4046,6 +4056,7 @@ _SETTINGS_BOOL_KEYS = {
     "onboarding_completed",
     "show_token_usage",
     "show_tps",
+    "fade_text_effect",
     "show_cli_sessions",
     "sync_to_insights",
     "check_for_updates",

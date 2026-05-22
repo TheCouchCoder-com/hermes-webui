@@ -3608,7 +3608,8 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/provider/quota":
         query = parse_qs(parsed.query)
         provider_id = (query.get("provider", [""])[0] or None)
-        return j(handler, get_provider_quota(provider_id))
+        refresh = (query.get("refresh", [""])[0] or "").strip().lower() in {"1", "true", "yes", "on"}
+        return j(handler, get_provider_quota(provider_id, refresh=refresh))
 
     if parsed.path == "/api/settings":
         settings = load_settings()
