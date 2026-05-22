@@ -14,6 +14,12 @@
 ## [Unreleased]
 
 
+## [v0.51.102] — 2026-05-21 — Release BZ (stage-395 — 1-PR follow-on — capped CLI sidebar candidate window now keyed on last-activity not start time)
+
+### Fixed
+
+- **PR #2662** by @Michaelyklam (closes #2656) — Capped CLI/agent sidebar scans now order the candidate CTE by `COALESCE(MAX(messages.timestamp), s.started_at)` instead of `s.started_at` alone. Long-lived CLI sessions that were resumed days later (old `started_at`, recent message activity) stay visible in the candidate window instead of falling outside the 8×limit oversample. Closes the regression I filed against v0.51.99's #2647 sidebar candidate-window narrowing. New regression test creates an old session with a recent message timestamp and asserts it surfaces at the top.
+
 ## [v0.51.101] — 2026-05-20 — Release BY (stage-394 — 2-PR deep-review batch — workspace Git backend + sidebar tab visibility toggle)
 
 ### Added
