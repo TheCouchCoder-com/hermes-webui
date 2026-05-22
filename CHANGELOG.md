@@ -14,6 +14,25 @@
 ## [Unreleased]
 
 
+## [v0.51.101] — 2026-05-20 — Release BY (stage-394 — 2-PR deep-review batch — workspace Git backend + sidebar tab visibility toggle)
+
+### Added
+
+- **PR #2625** by @stocky789 — Add backend Git operations for the workspace panel. New `api/workspace_git.py` module exposes read-only ops (`/api/git/status`, `/api/git/branches`, `/api/git/diff`, `/api/git/commit-message[-selected]`) unconditionally and mutating ops (`stage`, `unstage`, `discard`, `commit`, `commit-selected`, `checkout`, `stash-checkout`, `pull`, `push`) only when `HERMES_WEBUI_WORKSPACE_GIT_DESTRUCTIVE=1` is set in the environment — default OFF so existing deployments are unaffected. All subprocess calls use `["git", *args]` with `shell=False`, all branch/ref names go through `git check-ref-format --branch` validation before flowing to `git switch -c`, and `subprocess.env` is scrubbed of `GIT_DIR`/`GIT_WORK_TREE`/`GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM`/`GIT_CONFIG_COUNT`/`GIT_CONFIG_PARAMETERS` plus the full `GIT_CONFIG_KEY_*`/`GIT_CONFIG_VALUE_*` namespace before every invocation. `GIT_INDEX_FILE` is intentionally preserved to drive selected-file commits through a private temporary index. Paths are bound to the workspace root via `safe_resolve_ws()` + `Path.relative_to()` enforcement (rejects `..` traversal and symlinked escapes); active-stream gate prevents mutations during a running agent turn. Documented in `docs/workspace-git.md` with the full trust model (hooks-as-RCE warning, default-allowed vs gated lists, env-scrub enumeration). Frontend UI ships in a follow-up PR.
+- **PR #2636** by @FrancescoFarinola — Per-tab sidebar visibility toggle in Settings → Appearance. Power users can hide unused rail tabs (Tasks, Kanban, Skills, Memory, Spaces, Profiles, Todos, Insights, Logs) while keeping Chat and Settings always reachable. Settings is per-profile so each profile can have its own hidden-tabs preference; an inline `<script>` in `<head>` applies `nav-tab-hidden` from `localStorage` before first paint so toggled-off tabs don't flash visible on reload. Default off — no tabs are hidden out of the box; existing deployments are unaffected. Chips use `role="switch"` + `aria-checked` for clear screen-reader narration, and the container has `role="group"` + `aria-labelledby` pointing at its label. Backend validator strips `chat` and `settings` from `hidden_tabs` at save time as a belt-and-suspenders against tampered POSTs. Profile switch reconciliation: `_refreshProfileSwitchBackground` re-fetches `/api/settings` and re-applies `hidden_tabs` after a profile change so the new profile's preference takes effect immediately.
+
+### Maintainer additions during stage
+
+- `_refreshProfileSwitchBackground` profile-switch reconciliation for #2636 (Profile A's hidden-tabs no longer bleeds into Profile B until Settings is opened).
+- `role="switch"` + `aria-checked` chip a11y for #2636 (was `aria-pressed` — confusing polarity for users where chip-off looks like the off state).
+- Server-side `hidden_tabs` validator strip of `chat`/`settings` for #2636.
+- CSS contrast fix for #2636 — `color: #1a1a1a` + `font-weight: 600` on filled chips (was `color: var(--bg-page)` which resolved to white in dark theme and was barely readable on the gold accent).
+- 3 new regression tests for the #2636 maintainer additions (profile-switch wiring, chat/settings server-side strip, a11y switch role).
+
+### UX approval
+
+PR #2636 went through the full multi-viewport screenshot gate (390 mobile, 1280 laptop, 1440 desktop, 1920 wide; both light and dark themes; default-on and 3-off mixed states; rail-effect proof showing hidden tabs collapse cleanly). Approved via Telegram for merge.
+
 ## [v0.51.100] — 2026-05-20 — Release BX (stage-393 — 3-PR deep-review batch — lazy journal recovery retry + faster profile-switch + cross-tab session list SSE sync)
 
 ### Fixed
