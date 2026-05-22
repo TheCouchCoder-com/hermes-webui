@@ -469,10 +469,13 @@ Production data and real cron jobs are never touched. Current snapshot:
 - CDN resources pinned with SRI integrity hashes
 
 ### Themes
-- 7 built-in themes: Dark (default), Light, Slate, Solarized Dark, Monokai, Nord, OLED
-- Switch via Settings panel dropdown (instant live preview) or `/theme` command
+- Appearance is split into two axes: Theme (`system`, `dark`, `light`) and Skin
+  (`default`, `ares`, `mono`, `slate`, `poseidon`, `sisyphus`, `charizard`,
+  `sienna`, `catppuccin`, `nous`)
+- Switch via Settings -> Appearance (instant live preview) or `/theme <theme-or-skin>`
 - Persists across reloads (server-side in settings.json + localStorage for flicker-free loading)
-- Custom themes: define a `:root[data-theme="name"]` CSS block and it works — see [THEMES.md](THEMES.md)
+- Skins use `data-skin` plus CSS variables; dark mode resolves through the
+  `.dark` class, not a `data-theme` custom-theme axis — see [THEMES.md](THEMES.md)
 
 ### Settings and configuration
 - **Hermes Control Center** (sidebar launcher button) -- Conversation tab (export/import/clear), Preferences tab (model, send key, theme, language, all toggles), System tab (version, password)
@@ -558,6 +561,8 @@ State lives outside the repo at `~/.hermes/webui/` by default
 - `CHANGELOG.md` -- release notes per sprint
 - `SPRINTS.md` -- forward sprint plan with CLI + Claude parity targets
 - `THEMES.md` -- theme system documentation, custom theme guide
+- `docs/CONTRACTS.md` -- project contract/RFC/design index for contributors and agents
+- `docs/UIUX-GUIDE.md` -- UI/UX principles sourced from existing design docs and visual inventories
 - `docs/docker.md` -- Docker compose setup, common failures, and bind-mount migration
 - `docs/supervisor.md` -- launchd, systemd, supervisord, runit, and s6 process-supervisor setup
 - `docs/onboarding.md` -- first-run wizard, provider setup, local model server Base URLs, and safe re-runs

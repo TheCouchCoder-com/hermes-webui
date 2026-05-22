@@ -25,8 +25,11 @@ runtime boundary instead of remaining scattered through the main WebUI request
 process.
 
 This document is intentionally a reviewable spec and migration gate. It should be
-accepted before any implementation PR changes the streaming hot path, introduces a
-runner process, or moves a new approval / clarify / queue / goal control path.
+accepted before any implementation PR for this adapter direction changes the
+streaming hot path, introduces a runner process, or moves a new approval /
+clarify / queue / goal control path. Narrow current-path bug fixes that do not
+introduce a new runtime boundary can still proceed under the WebUI run-state
+consistency contract and the relevant issue scope.
 
 ## Problem
 

@@ -12,6 +12,25 @@
 
 ## [Unreleased]
 
+## [v0.51.89] — 2026-05-18 — Release BM (stage-382 — 6-PR full sweep batch — runtime adapter approval/clarify seam + SOUL.md memory panel + #1855 resolve_model_provider fast-path + PWA sidebar spinner fix + /model active-provider preference + contributor contract docs index)
+
+### Changed
+
+- **PR #2496** by @Michaelyklam (refs #1925) — Route approval and clarify responses through the default-off `RuntimeAdapter.respond_approval(...)` / `respond_clarify(...)` seam when `HERMES_WEBUI_RUNTIME_ADAPTER=legacy-journal` is enabled. The default `legacy-direct` path still uses the existing callback helpers directly, legacy no-id responses keep their historical `ok: true` shape, and stale explicit approval ids are now bounded as not-active instead of falling back to the oldest queued command. No approval queue, clarify queue, callback registry, runner, sidecar, queue/goal migration, or cached-agent state is introduced.
+
+### Added
+
+- **PR #2500** by @mccxj — Surface `SOUL.md` (the agent's third-person voice/persona profile, stored at `HERMES_HOME/SOUL.md` alongside `config.yaml` / `.env`) as a third section in the Memory panel next to MEMORY.md (notes) and USER.md (profile). `GET /api/memory` now returns `soul`, `soul_path`, and `soul_mtime`; `POST /api/memory/write` accepts `section="soul"` writing to `HERMES_HOME/SOUL.md` (not inside `memories/`). Redaction still applies, i18n labels (`agent_soul` / `no_soul_yet`) added across all 11 locales, new `sparkles` Lucide icon for the section header.
+
+### Fixed
+
+- **PR #2499** by @franksong2702 — Keep server-idle session rows from inheriting stale local streaming fields during sidebar optimistic merging, so PWA/browser caches cannot keep a completed session's spinner alive after `/api/sessions` reports no active stream or pending user message.
+- **PR #2501** (closes #1855) — Short-circuit the `resolve_model_provider` stage in `POST /api/chat/start` (and sibling chat-handler call sites) when the request already carries an explicit `(model, model_provider)` pair and the model isn't `@provider:model`-qualified. The new fast path in `_resolve_compatible_session_model_state()` returns the inputs verbatim without calling `get_available_models()` — that catalog rebuild can do network I/O (custom OpenAI-compat `/models`, OpenRouter `/models`, LM Studio probes, credential-pool refresh) under an RLock thundering-herd guard and was observed wedging a single request for 115 seconds in a production-grade local deployment. The recurrence captured via the PR #1911 stage diagnostics confirmed the wedge sat entirely in `resolve_model_provider` while every other stage completed in <5 ms. Users behind default-60s reverse proxies (nginx / Apache / Caddy / Cloudflare) were seeing a `502 Proxy Error` while the WebUI eventually completed the run anyway, creating a duplicate-send risk if the user retried in the browser. The slow path is preserved for the inputs that genuinely need it: bare/un-qualified models without a stored `model_provider` (cross-provider repair), `@provider:model`-qualified strings (active-provider validation per #1253), and empty models (default-model lookup). 14 new regression tests in `tests/test_issue1855_resolve_model_provider_fast_path.py` cover both directions — fast-path skips, slow-path still fires — including a static check that the short-circuit precedes the catalog call in source order.
+
+### Documentation
+
+- **PR #2503** by @franksong2702 (refs #2502) — Add `docs/CONTRACTS.md` as a public contributor-facing routing index that points UI/UX, runtime/state, and onboarding/setup changes to the relevant public docs (DESIGN.md, AGENTS.md, RFCs, troubleshooting) before contributors edit code or open PRs. Also adds `docs/UIUX-GUIDE.md` synthesizing the calm-developer-console UI/UX principles from DESIGN.md / README.md / THEMES.md / `docs/ui-ux/` into one contributor guide, refreshes the README and THEMES.md skin lists to cover all ten built-in skins (`catppuccin` + `nous`), and tightens the AGENTS.md / CONTRIBUTING.md contribution-style notes for state-layer and evidence requirements. Docs-only — no runtime or maintainer-policy changes.
+
 ## [v0.51.88] — 2026-05-18 — Release BL (stage-381 — 3-PR security + UX + lineage batch — session-bound CSRF tokens for unsafe browser requests + quoted-reply selected-text composer append + compression-continuation sidebar collapse)
 
 ### Security

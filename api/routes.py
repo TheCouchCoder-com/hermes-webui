@@ -1486,11 +1486,31 @@ def _resolve_compatible_session_model_state(
     the wrong backend and fail. Normalize only obvious cross-provider mismatches.
     When a model has an explicit provider context, keep the model string itself
     in its picker/API shape and carry the provider as separate state.
+
+    Fast path (#1855): when the caller supplies both a model and an explicit
+    ``model_provider`` AND the model is not itself ``@provider:model``-qualified,
+    we can return the inputs verbatim without calling ``get_available_models()``.
+    The slow path below would arrive at the same answer via
+    ``if requested_provider and not explicit_provider: return model, requested_provider, False``
+    after paying the full catalog-build cost. Avoiding the catalog here keeps
+    ``POST /api/chat/start`` snappy even when the model catalog is cold and the
+    rebuild has to make network calls (custom OpenAI-compat endpoints,
+    OpenRouter ``/models``, LM Studio ``/models``, credential pool refresh) —
+    those used to wedge the handler for >100s and trigger 502s on default-60s
+    reverse proxies, even though the WebUI itself eventually responded.
     """
-    catalog = get_available_models()
-    default_model = str(catalog.get("default_model") or DEFAULT_MODEL or "").strip()
     model = str(model_id or "").strip()
     requested_provider = _clean_session_model_provider(model_provider)
+    if model and requested_provider:
+        # Only safe when the model itself does not carry an ``@provider:model``
+        # qualifier — qualified strings require the catalog to decide whether
+        # the qualifier matches the active provider (see slow path below).
+        bare_model, explicit_provider = _split_provider_qualified_model(model)
+        if not explicit_provider:
+            return model, requested_provider, False
+
+    catalog = get_available_models()
+    default_model = str(catalog.get("default_model") or DEFAULT_MODEL or "").strip()
     if not model:
         return default_model, requested_provider, bool(default_model)
 
@@ -7782,11 +7802,14 @@ def _handle_memory_read(handler):
     try:
         from api.profiles import get_active_hermes_home
 
-        mem_dir = get_active_hermes_home() / "memories"
+        home = get_active_hermes_home()
+        mem_dir = home / "memories"
     except ImportError:
-        mem_dir = Path.home() / ".hermes" / "memories"
+        home = Path.home() / ".hermes"
+        mem_dir = home / "memories"
     mem_file = mem_dir / "MEMORY.md"
     user_file = mem_dir / "USER.md"
+    soul_file = home / "SOUL.md"
     memory = (
         mem_file.read_text(encoding="utf-8", errors="replace")
         if mem_file.exists()
@@ -7797,15 +7820,23 @@ def _handle_memory_read(handler):
         if user_file.exists()
         else ""
     )
+    soul = (
+        soul_file.read_text(encoding="utf-8", errors="replace")
+        if soul_file.exists()
+        else ""
+    )
     return j(
         handler,
         {
             "memory": _redact_text(memory),
             "user": _redact_text(user),
+            "soul": _redact_text(soul),
             "memory_path": str(mem_file),
             "user_path": str(user_file),
+            "soul_path": str(soul_file),
             "memory_mtime": mem_file.stat().st_mtime if mem_file.exists() else None,
             "user_mtime": user_file.stat().st_mtime if user_file.exists() else None,
+            "soul_mtime": soul_file.stat().st_mtime if soul_file.exists() else None,
         },
     )
 
@@ -9011,18 +9042,16 @@ def _handle_workspace_reorder(handler, body):
     return j(handler, {"ok": True, "workspaces": reordered})
 
 
-def _handle_approval_respond(handler, body):
-    sid = body.get("session_id", "")
-    if not sid:
-        return bad(handler, "session_id is required")
-    choice = body.get("choice", "deny")
-    if choice not in ("once", "session", "always", "deny"):
-        return bad(handler, f"Invalid choice: {choice}")
-    approval_id = body.get("approval_id", "")
+def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
+    """Resolve an approval through the existing callback path.
 
-    # Pop the targeted entry from the pending queue by approval_id.
-    # Falls back to popping the first entry for backward-compat with old clients.
+    Slice 3b keeps the RuntimeAdapter as a protocol translator: it delegates to
+    this legacy helper rather than owning approval queues or callback state.
+    """
+    # Pop the targeted entry from the pending queue by approval_id. Old clients
+    # that omit approval_id still resolve the oldest entry for compatibility.
     pending = None
+    found_target = False
     with _lock:
         queue = _pending.get(sid)
         if isinstance(queue, list):
@@ -9031,17 +9060,23 @@ def _handle_approval_respond(handler, body):
                 for i, entry in enumerate(queue):
                     if entry.get("approval_id") == approval_id:
                         pending = queue.pop(i)
+                        found_target = True
                         break
                 else:
-                    # approval_id not found -- fall back to oldest entry.
-                    pending = queue.pop(0) if queue else None
+                    # A stale explicit id must not accidentally approve the
+                    # oldest queued command; duplicate/stale responses are
+                    # bounded as not-active by the adapter route.
+                    pending = None
             else:
                 pending = queue.pop(0) if queue else None
+                found_target = pending is not None
             if not queue:
                 _pending.pop(sid, None)
         elif queue:
             # Legacy single-dict value.
-            pending = _pending.pop(sid, None)
+            if not approval_id or queue.get("approval_id") == approval_id:
+                pending = _pending.pop(sid, None)
+                found_target = pending is not None
         # Notify SSE subscribers of the new head (or empty state) so the UI
         # surfaces any trailing approvals that were queued behind this one
         # without waiting for the next submit_pending. Without this, a parallel
@@ -9066,8 +9101,43 @@ def _handle_approval_respond(handler, body):
     # Unblock the agent thread waiting in the gateway approval queue.
     # This is the primary signal when streaming is active — the agent
     # thread is parked in entry.event.wait() and needs to be woken up.
-    resolve_gateway_approval(sid, choice, resolve_all=False)
-    return j(handler, {"ok": True, "choice": choice})
+    gateway_resolved = 0
+    if found_target or not approval_id:
+        gateway_resolved = resolve_gateway_approval(sid, choice, resolve_all=False) or 0
+    # Keep the historical no-id response path truthy for old clients/tests while
+    # making stale explicit ids bounded as not-active for Slice 3b.
+    return bool(pending) or bool(gateway_resolved) or not bool(approval_id)
+
+
+def _handle_approval_respond(handler, body):
+    sid = body.get("session_id", "")
+    if not sid:
+        return bad(handler, "session_id is required")
+    choice = body.get("choice", "deny")
+    if choice not in ("once", "session", "always", "deny"):
+        return bad(handler, f"Invalid choice: {choice}")
+    approval_id = body.get("approval_id", "")
+
+    from api.runtime_adapter import LegacyJournalRuntimeAdapter, runtime_adapter_enabled
+
+    if runtime_adapter_enabled():
+        adapter = LegacyJournalRuntimeAdapter(approval_delegate=_resolve_approval_legacy)
+        ok = adapter.respond_approval(sid, approval_id, choice).accepted
+    else:
+        ok = _resolve_approval_legacy(sid, approval_id, choice)
+    return j(handler, {"ok": ok, "choice": choice})
+
+
+def _resolve_clarify_legacy(sid: str, clarify_id: str, response: str) -> bool:
+    """Resolve clarify through the existing callback path without new state."""
+    # The legacy clarify queue is FIFO and does not yet expose stable ids to the
+    # browser, so clarify_id is accepted by the adapter contract but not used to
+    # create a parallel callback registry in the WebUI process.
+    resolved = resolve_clarify(sid, response, resolve_all=False)
+    # Preserve the historical no-id response shape for old clients/tests: a
+    # plain /api/clarify/respond call returns ok even when no pending prompt is
+    # active. Explicit stale ids remain bounded as not-active under the adapter.
+    return bool(resolved) or not bool(clarify_id)
 
 
 def _handle_clarify_respond(handler, body):
@@ -9082,8 +9152,16 @@ def _handle_clarify_respond(handler, body):
     response = str(response or "").strip()
     if not response:
         return bad(handler, "response is required")
-    resolve_clarify(sid, response, resolve_all=False)
-    return j(handler, {"ok": True, "response": response})
+    clarify_id = body.get("clarify_id", "")
+
+    from api.runtime_adapter import LegacyJournalRuntimeAdapter, runtime_adapter_enabled
+
+    if runtime_adapter_enabled():
+        adapter = LegacyJournalRuntimeAdapter(clarify_delegate=_resolve_clarify_legacy)
+        ok = adapter.respond_clarify(sid, clarify_id, response).accepted
+    else:
+        ok = _resolve_clarify_legacy(sid, clarify_id, response)
+    return j(handler, {"ok": ok, "response": response})
 
 
 class _ManualCompressionMemoryHandler:
@@ -10282,17 +10360,21 @@ def _handle_memory_write(handler, body):
     try:
         from api.profiles import get_active_hermes_home
 
-        mem_dir = get_active_hermes_home() / "memories"
+        home = get_active_hermes_home()
+        mem_dir = home / "memories"
     except ImportError:
-        mem_dir = Path.home() / ".hermes" / "memories"
+        home = Path.home() / ".hermes"
+        mem_dir = home / "memories"
     mem_dir.mkdir(parents=True, exist_ok=True)
     section = body["section"]
     if section == "memory":
         target = mem_dir / "MEMORY.md"
     elif section == "user":
         target = mem_dir / "USER.md"
+    elif section == "soul":
+        target = home / "SOUL.md"
     else:
-        return bad(handler, 'section must be "memory" or "user"')
+        return bad(handler, 'section must be "memory", "user", or "soul"')
     target.write_text(body["content"], encoding="utf-8")
     return j(handler, {"ok": True, "section": section, "path": str(target)})
 

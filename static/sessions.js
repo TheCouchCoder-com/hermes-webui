@@ -256,6 +256,10 @@ function _isSessionEffectivelyStreaming(s) {
   return Boolean(s && (s.is_streaming || _isSessionLocallyStreaming(s)));
 }
 
+function _isServerIdleSessionRow(s) {
+  return Boolean(s && s.session_id && !s.is_streaming && !s.active_stream_id && !s.pending_user_message);
+}
+
 function _reconcileActiveSessionIdleStateFromList(serverRows) {
   if (!S || !S.session || !S.session.session_id) return false;
   if (typeof _sendInProgress !== 'undefined' && _sendInProgress) return false;
@@ -263,8 +267,7 @@ function _reconcileActiveSessionIdleStateFromList(serverRows) {
   const sid=S.session.session_id;
   const serverRow=serverRows.find(s=>s&&s.session_id===sid);
   if (!serverRow) return false;
-  const serverRowIsIdle=!serverRow.is_streaming&&!serverRow.active_stream_id&&!serverRow.pending_user_message;
-  if (!serverRowIsIdle) return false;
+  if (!_isServerIdleSessionRow(serverRow)) return false;
   let changed=false;
   if (S.busy) { S.busy=false; changed=true; }
   if (S.activeStreamId) { S.activeStreamId=null; changed=true; }
@@ -277,6 +280,8 @@ function _reconcileActiveSessionIdleStateFromList(serverRows) {
     S.session.active_stream_id=null;
     S.session.pending_user_message=null;
   }
+  _sessionStreamingById.set(sid, false);
+  _forgetObservedStreamingSession(sid);
   if (changed&&typeof updateSendBtn==='function') updateSendBtn();
   return changed;
 }
@@ -1865,6 +1870,7 @@ function _mergeOptimisticFirstTurnSessions(fetchedSessions){
     const idx=bySid.has(sid)?bySid.get(sid):-1;
     if(idx>=0){
       const fetched=merged[idx]||{};
+      const fetchedIsServerIdle=_isServerIdleSessionRow(fetched);
       const localCount=Number(local.message_count||0);
       const fetchedCount=Number(fetched.message_count||0);
       const localTs=Number(local.last_message_at||local.updated_at||0);
@@ -1875,10 +1881,10 @@ function _mergeOptimisticFirstTurnSessions(fetchedSessions){
         message_count:Math.max(localCount,fetchedCount),
         last_message_at:Math.max(localTs,fetchedTs),
         updated_at:Math.max(Number(local.updated_at||0),Number(fetched.updated_at||0),localTs,fetchedTs),
-        active_stream_id:fetched.active_stream_id||local.active_stream_id||null,
-        pending_user_message:fetched.pending_user_message||local.pending_user_message||null,
-        pending_started_at:fetched.pending_started_at||local.pending_started_at||null,
-        is_streaming:Boolean(fetched.is_streaming||local.is_streaming||_isSessionLocallyStreaming(local)),
+        active_stream_id:fetchedIsServerIdle?null:(fetched.active_stream_id||local.active_stream_id||null),
+        pending_user_message:fetchedIsServerIdle?null:(fetched.pending_user_message||local.pending_user_message||null),
+        pending_started_at:fetchedIsServerIdle?null:(fetched.pending_started_at||local.pending_started_at||null),
+        is_streaming:fetchedIsServerIdle?false:Boolean(fetched.is_streaming||local.is_streaming||_isSessionLocallyStreaming(local)),
       };
     }else{
       merged.push({...local,is_streaming:true});

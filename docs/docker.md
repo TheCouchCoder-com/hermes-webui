@@ -42,7 +42,14 @@ docker compose up -d
 open http://localhost:8787
 ```
 
-That's it. Your existing `~/.hermes` directory is mounted, your `~/workspace` is browsable, and the WebUI auto-detects your UID/GID from the mounted volume.
+That's it for a real personal Docker install. Your existing `~/.hermes`
+directory is mounted, your `~/workspace` is browsable, and the WebUI
+auto-detects your UID/GID from the mounted volume.
+
+For troubleshooting, reinstall, or onboarding reproduction trials, do not mount
+your real `~/.hermes` unless you intentionally want to test real state. Use an
+isolated Hermes home and follow
+[`docs/onboarding-agent-checklist.md`](onboarding-agent-checklist.md) instead.
 
 ## What goes wrong (and how to fix it)
 
