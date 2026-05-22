@@ -15,6 +15,7 @@ import re
 import shutil
 import sys
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -42,6 +43,24 @@ _tls = threading.local()
 _SKILL_HOME_MODULES = ("tools.skills_tool", "tools.skill_manager_tool")
 
 
+def snapshot_skill_home_modules() -> dict[str, dict[str, object]]:
+    """Snapshot imported skill-module path globals before a temporary patch."""
+    snapshot: dict[str, dict[str, object]] = {}
+    for module_name in _SKILL_HOME_MODULES:
+        module = sys.modules.get(module_name)
+        if module is None:
+            snapshot[module_name] = {"module_present": False}
+            continue
+        snapshot[module_name] = {
+            "module_present": True,
+            "has_HERMES_HOME": hasattr(module, "HERMES_HOME"),
+            "HERMES_HOME": getattr(module, "HERMES_HOME", None),
+            "has_SKILLS_DIR": hasattr(module, "SKILLS_DIR"),
+            "SKILLS_DIR": getattr(module, "SKILLS_DIR", None),
+        }
+    return snapshot
+
+
 def patch_skill_home_modules(home: Path) -> None:
     """Patch imported skill modules that cache HERMES_HOME at import time."""
     for module_name in _SKILL_HOME_MODULES:
@@ -53,6 +72,37 @@ def patch_skill_home_modules(home: Path) -> None:
             module.SKILLS_DIR = home / "skills"
         except AttributeError:
             logger.debug("Failed to patch %s module", module_name)
+
+
+def restore_skill_home_modules(snapshot: dict[str, dict[str, object]]) -> None:
+    """Restore skill-module globals captured by snapshot_skill_home_modules()."""
+    for module_name, values in snapshot.items():
+        module = sys.modules.get(module_name)
+        if not values.get("module_present"):
+            if module is not None:
+                sys.modules.pop(module_name, None)
+                parent_name, _, child_name = module_name.rpartition(".")
+                parent = sys.modules.get(parent_name)
+                if parent is not None:
+                    try:
+                        delattr(parent, child_name)
+                    except AttributeError:
+                        pass
+            continue
+        if module is None:
+            continue
+        for attr in ("HERMES_HOME", "SKILLS_DIR"):
+            has_attr = bool(values.get(f"has_{attr}"))
+            try:
+                if has_attr:
+                    setattr(module, attr, values.get(attr))
+                else:
+                    try:
+                        delattr(module, attr)
+                    except AttributeError:
+                        pass
+            except AttributeError:
+                logger.debug("Failed to restore %s.%s", module_name, attr)
 
 
 def _unwrap_profile_home_to_base(home: Path) -> Path:
@@ -623,6 +673,82 @@ def get_profile_runtime_env(home: Path) -> dict[str, str]:
             logger.debug("Failed to read runtime env from %s", env_path)
 
     return env
+
+
+@contextmanager
+def profile_env_for_background_worker(
+    session,
+    purpose: str = "background worker",
+    logger_override: Optional[logging.Logger] = None,
+):
+    """Temporarily route detached worker config reads through a profile.
+
+    Background WebUI workers run outside the request/streaming thread that
+    established the profile-scoped environment.  Workers that read agent config,
+    runtime provider settings, or skill paths must temporarily apply the
+    session/request profile env or they can fall back to the server-default
+    profile. Pass either a session-like object with `.profile` or a profile name.
+    """
+    log = logger_override or logger
+    raw_profile = session if isinstance(session, str) else getattr(session, "profile", "")
+    profile = str(raw_profile or "").strip()
+    if not profile or profile == "default":
+        yield
+        return
+
+    try:
+        # Lazy import avoids a module-load cycle: streaming imports this helper.
+        from api.streaming import _ENV_LOCK
+
+        profile_home_path = Path(get_hermes_home_for_profile(profile))
+        runtime_env = get_profile_runtime_env(profile_home_path)
+    except Exception:
+        log.debug(
+            "Failed to resolve profile env for %s profile %s; falling back to current env",
+            purpose,
+            profile,
+            exc_info=True,
+        )
+        yield
+        return
+
+    env_keys = set(runtime_env.keys()) | {"HERMES_HOME"}
+    # Stage-360 maintainer fix: narrow the _ENV_LOCK critical section to just
+    # the env mutation (and the env restoration). Pre-fix, this held _ENV_LOCK
+    # for the entire `yield` duration — i.e. the whole background worker's
+    # runtime (title generation, compression, update summary). That caused
+    # _ENV_LOCK to be held for many seconds, blocking ALL other sessions and
+    # surfacing as the QA `test_third_message_completes` timeout. The fix
+    # mirrors the narrow-lock pattern in _run_agent_streaming: acquire briefly
+    # to set env, run worker without holding the lock, reacquire to restore.
+    # See also QA `test_finally_restores_env_with_lock`.
+    skill_home_snapshot = None
+    old_env = {}
+    try:
+        with _ENV_LOCK:
+            old_env = {key: os.environ.get(key) for key in env_keys}
+            skill_home_snapshot = snapshot_skill_home_modules()
+            os.environ.update(runtime_env)
+            os.environ["HERMES_HOME"] = str(profile_home_path)
+            try:
+                patch_skill_home_modules(profile_home_path)
+            except Exception:
+                log.debug(
+                    "Failed to patch skill modules for %s profile %s",
+                    purpose,
+                    profile,
+                    exc_info=True,
+                )
+        yield
+    finally:
+        with _ENV_LOCK:
+            for key, old_value in old_env.items():
+                if old_value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = old_value
+            if skill_home_snapshot is not None:
+                restore_skill_home_modules(skill_home_snapshot)
 
 
 def _set_hermes_home(home: Path):

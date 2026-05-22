@@ -481,6 +481,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     clearInflightState(activeSid);
     _clearActivePaneInflightIfOwner();
   }
+  function _isMarkerOnlyAssistantMessage(m){
+    if(!m||m.role!=='assistant') return false;
+    const text=String(typeof msgContent==='function'?msgContent(m):(m.content||''));
+    return typeof _isPreservedCompressionTaskListMarkerOnlyText==='function'
+      && _isPreservedCompressionTaskListMarkerOnlyText(text);
+  }
+  function _replaceMarkerOnlyAssistantWithStreamError(messages){
+    if(!Array.isArray(messages)) return false;
+    const msg=[...messages].reverse().find(m=>m&&m.role==='assistant');
+    if(!_isMarkerOnlyAssistantMessage(msg)) return false;
+    msg.content='**Error:** No response received after context compression. Please retry.';
+    msg.provider_details='The only assistant text returned for this turn was the internal preserved-task-list compression marker, so the WebUI replaced it with an explicit error instead of rendering the marker as a model response.';
+    return true;
+  }
   function _setActivePaneIdleIfOwner(){
     if(_isActiveSession()||!S.session||!INFLIGHT[S.session.session_id]){
       setBusy(false);
@@ -1358,6 +1372,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             localStorage.setItem('hermes-webui-session',S.session.session_id);
             if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
           }
+          const _markerOnlyAssistantError=_replaceMarkerOnlyAssistantWithStreamError(S.messages);
           if(
             window._compressionUi&&window._compressionUi.automatic&&
             window._compressionUi.sessionId===activeSid&&
@@ -1429,6 +1444,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           S.busy=false;
           // No-reply guard (#373): if agent returned nothing, show inline error
           if(!S.messages.some(m=>m.role==='assistant'&&String(m.content||'').trim())&&!assistantText){removeThinking();S.messages.push({role:'assistant',content:'**No response received.** Check your API key and model selection.'});}
+          if(_markerOnlyAssistantError&&typeof showToast==='function') showToast('No response received after context compression. Please retry.',5000,'error');
           if(isSessionViewed) _markSessionViewed(completedSid, completedSession.message_count ?? S.messages.length);
           syncTopbar();renderMessages({preserveScroll:true});
           if(shouldFollowOnDone&&typeof scrollToBottom==='function') scrollToBottom();
@@ -1713,6 +1729,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           localStorage.setItem('hermes-webui-session',S.session.session_id);
           if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
         }
+        const _markerOnlyAssistantError=_replaceMarkerOnlyAssistantWithStreamError(S.messages);
+        if(_markerOnlyAssistantError&&typeof showToast==='function') showToast('No response received after context compression. Please retry.',5000,'error');
         const hasMessageToolMetadata=S.messages.some(m=>{
           if(!m||m.role!=='assistant') return false;
           // Recognize both the standard `tool_calls` (used by completed assistant

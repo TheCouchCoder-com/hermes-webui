@@ -12,6 +12,16 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **PR #2279** by @franksong2702 (closes #2262 + refs #2168) — WebUI stream completion recovery gaps closed for both `notify_on_complete` background tasks and the preserved-task-list compression marker UI. Pre-fix, completions held in the agent process registry were never drained by the WebUI gateway session because the gateway session platform was unset. The fix routes the completion queue by process session key before injecting any notification into a WebUI turn. Separately, the preserved-task-list compression marker — an internal sentinel — was sometimes the only assistant text rendered after a context compression turn timed out, leaving a confusing "preserved tasks" message with no actual response. The frontend now suppresses the marker when it's the only assistant content and the run state is terminal.
+
+- **PR #2299** by @starship-s — Background workers (title generation, manual session compression, update-summary generation) now correctly inherit profile-scoped configuration when a profile-scoped chat triggers them. Pre-fix, those workers read default-profile configuration instead of the session/request profile, so auxiliary model routing silently used the wrong configured model or failed provider resolution entirely. The fix threads the active profile context through `_run_background_title_update`, `_run_background_title_refresh`, and the manual compression and update-summary helpers, with regression tests covering all three paths.
+
+- **PR #2306** by @dobby-d-elf (follow-up to v0.51.66) — Workspace panel header polish + test cleanup. Single close button on the workspace panel (was double in some states), tooltip now reads "Close" (was inconsistent label), `.close-preview` opacity removed so the X button matches other panel icon styling. Companion test cleanup removes ~293 lines of stale assertions in `test_issue781.py`, `test_sprint41.py`, `test_sprint44.py`, and `test_workspace_panel_session_list.py` that tested behavior either no longer present after #2238 or covered redundantly by other test files.
+
+## [v0.51.66] — 2026-05-15 — Release AP (stage-359 — 17-PR safe-lane batch — Docker fixes + UI polish + compression snapshot improvements + i18n parity + profile validation)
+
 ### Added
 
 - **PR #2287** by @mslovy (refs #2284) — Upload size limit is now runtime-configurable via the `HERMES_WEBUI_MAX_UPLOAD_MB` environment variable. Previously the effective 20 MB cap was hard-coded across multiple layers. Server-side upload limit moves to runtime config; browser-side preflight check stays aligned with the effective backend limit; archive extraction guard continues to scale with the same configured cap. New `_env_mb_bytes()` helper in `api/config.py` parses `HERMES_WEBUI_MAX_UPLOAD_MB`.
@@ -57,6 +67,12 @@
 - **PR #2099** by @dobby-d-elf — Adds an opt-in `Settings → Preferences → Fade text effect` toggle (off by default). When enabled, newly streamed output tokens are revealed through an adaptive playout buffer and animated with an opacity-only fade similar to ChatGPT and other frontier LLM apps. Fade locked per stream to avoid mid-stream toggle rewind; reduced-motion users get non-animated text; live cursor hidden while fade is active; custom renderer on `streaming-markdown` parser wraps only newly-appended words; animated spans replace themselves with plain text on `animationend` (event-delegated, no listener leakage); unsafe streamed `href`/`src` values blocked via allowlist regex (rejects `javascript:`, `data:`, `vbscript:`). 200-350ms fade duration scaling with playback speed, 16ms word stagger, 320ms done-drain cap, 160 wps visual cap. Default-off means existing users see no change. 293-line regression test pinning the contract.
 
 - **PR #2165** by @starship-s — Pooled OpenAI Codex quota status surfaced in the Providers panel. Collapsed view shows "Best of N" pool summary (available / exhausted / failed / checked counts); expandable per-credential rows. Concurrent probing capped at `min(_CODEX_POOL_MAX_WORKERS=6, len(probe_items))`. Exhausted credentials NOT re-probed during cooldown. Manual refresh = "probe now", but transient `None` probe results are NOT cached (preserves last-known-good warm snapshot); only known-exhausted snapshot objects are cached. JWT decode (`_decode_jwt_claims_unverified`) is documented as classification-only (Codex OAuth JWT vs raw OpenAI API key), explicitly NOT for authorization. Per-row plan labels only shown when verified account-limit data is available. 32-test regression suite + 11-locale i18n parity assertion.
+
+### Fixed
+
+- WebUI agent turns now inherit `HERMES_SESSION_PLATFORM=webui` and drain matching `notify_on_complete` background-process completions into the next model input. Completion events are filtered by the process session key before delivery, so another tab/session's background process output remains queued for its owner instead of being injected into the wrong conversation.
+
+- Marker-only preserved-task-list compression sentinels no longer render as standalone assistant responses after stream recovery or timeout paths. If the frontend receives only that internal marker as assistant content, it replaces it with an explicit "No response received after context compression" error and shows an error toast.
 
 ## [v0.51.64] — 2026-05-14 — Release AN (stage-357 — 3-PR small batch — docker_init k8s whoami fallback + PWA manifest session routes (closes #2226) + aux title test coverage)
 
