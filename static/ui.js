@@ -1970,6 +1970,46 @@ function _formatActiveElapsedTimer(seconds){
   const s=total%60;
   return`${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
 }
+const _COMPRESSION_ELAPSED_MAX_SECONDS=5*60;
+let _compressionElapsedTimer=null;
+function _compressionElapsedStartedAt(state){const n=Number(state&&state.startedAt);return Number.isFinite(n)&&n>0?n:null;}
+function _compressionElapsedLabel(state){
+  const started=_compressionElapsedStartedAt(state);
+  if(!started)return'';
+  const elapsed=Math.max(0,(Date.now()/1000)-started);
+  if(elapsed>=_COMPRESSION_ELAPSED_MAX_SECONDS)return '5+ min';
+  return _formatActiveElapsedTimer(elapsed);
+}
+function _compressionElapsedExpired(state){const started=_compressionElapsedStartedAt(state);return !!(started&&((Date.now()/1000)-started)>=_COMPRESSION_ELAPSED_MAX_SECONDS);}
+function _compressionLiveCardNode(){return document.querySelector('[data-live-compression-card="1"][data-compression-started-at]');}
+function _compressionLiveCardState(){
+  const node=_compressionLiveCardNode();
+  const started=Number(node&&node.getAttribute('data-compression-started-at'));
+  if(!node||!S.session||!Number.isFinite(started)||started<=0)return null;
+  return {sessionId:S.session.session_id,phase:'running',automatic:true,message:node.getAttribute('data-compression-message')||'Auto-compressing context...',startedAt:started};
+}
+function _updateCompressionElapsedCards(state){
+  if(!state)return false;
+  const preview=_autoCompressionPreviewText(state), detail=_autoCompressionDetailText(state);
+  let updated=false;
+  document.querySelectorAll('.tool-card-compress-auto.tool-card-compress-running').forEach(card=>{
+    const previewEl=card.querySelector('.tool-card-preview');
+    const detailEl=card.querySelector('.tool-card-result pre');
+    if(previewEl) previewEl.textContent=preview;
+    if(detailEl) detailEl.textContent=detail;
+    updated=true;
+  });
+  return updated;
+}
+function _updateCompressionElapsedTimer(){
+  const state=_compressionStateForCurrentSession()||_compressionLiveCardState();
+  if(state&&state.automatic&&state.phase==='running'){
+    _updateCompressionElapsedCards(state);
+    if(_compressionElapsedExpired(state)) _clearCompressionElapsedTimer();
+  }else _clearCompressionElapsedTimer();
+}
+function _startCompressionElapsedTimer(){if(!_compressionElapsedTimer)_compressionElapsedTimer=setInterval(_updateCompressionElapsedTimer,1000);}
+function _clearCompressionElapsedTimer(){if(_compressionElapsedTimer){clearInterval(_compressionElapsedTimer);_compressionElapsedTimer=null;}}
 let _activityElapsedTimer=null;
 let _activityElapsedTimerGroup=null;
 function _activityElapsedStartedAt(group){
@@ -4704,6 +4744,7 @@ function isCompressionUiRunning(){
 }
 function clearCompressionUi(){
   window._compressionUi=null;
+  _clearCompressionElapsedTimer();
   _setCompressionSessionLock(null);
   renderCompressionUi();
 }
@@ -4712,8 +4753,14 @@ function setCompressionUi(state){
     clearCompressionUi();
     return;
   }
-  window._compressionUi={...state};
-  if(state.sessionId) _setCompressionSessionLock(state.sessionId);
+  const nextState={...state};
+  if(nextState.automatic&&nextState.phase==='running'&&!_compressionElapsedStartedAt(nextState)){
+    nextState.startedAt=Date.now()/1000;
+  }
+  window._compressionUi=nextState;
+  if(nextState.sessionId) _setCompressionSessionLock(nextState.sessionId);
+  if(nextState.automatic&&nextState.phase==='running') _startCompressionElapsedTimer();
+  else _clearCompressionElapsedTimer();
   renderCompressionUi();
 }
 function _compressionCardsHtml(state){
@@ -4779,21 +4826,36 @@ function _compressionCardsHtml(state){
     </div>
     ${referenceHtml}`;
 }
-function _autoCompressionCardsHtml(state){
+function _autoCompressionBaseDetail(state){
   const fallback='Context auto-compressed to continue the conversation';
   const running=state&&state.phase==='running';
-  const detail=running
+  return running
     ? (String(state.message||'Auto-compressing context...').trim()||'Auto-compressing context...')
-    : (String(state.message||fallback).trim()||fallback);
-  const preview=running
-    ? detail
-    : (String(state.summary?.headline||detail).trim()||detail);
+    : (String(state&&state.message||fallback).trim()||fallback);
+}
+function _autoCompressionPreviewText(state){
+  const running=state&&state.phase==='running';
+  const detail=_autoCompressionBaseDetail(state);
+  if(!running) return (String(state&&state.summary?.headline||detail).trim()||detail);
+  const elapsedLabel=_compressionElapsedLabel(state);
+  return [detail, elapsedLabel].filter(Boolean).join(' · ');
+}
+function _autoCompressionDetailText(state){
+  const running=state&&state.phase==='running';
+  const base=_autoCompressionBaseDetail(state);
+  const elapsedLabel=running?_compressionElapsedLabel(state):'';
+  return elapsedLabel?`Elapsed: ${elapsedLabel}`:base;
+}
+function _autoCompressionCardsHtml(state){
+  const running=state&&state.phase==='running';
+  const preview=_autoCompressionPreviewText(state);
+  const cardDetail=_autoCompressionDetailText(state);
   return `
     <div class="tool-card-row compression-card-row" data-compression-card="1">
       ${_compressionStatusCardHtml({
         statusLabel: t('auto_compress_label'),
         previewText: preview,
-        detail,
+        detail: cardDetail,
         icon: running ? '<span class="tool-card-running-dot"></span>' : li('check',13),
         open: running,
         variantClass: running
@@ -4823,6 +4885,12 @@ function appendLiveCompressionCard(state){
   const node=_compressionCardsNode(state);
   if(!node) return false;
   node.setAttribute('data-live-compression-card','1');
+  if(state.automatic&&state.phase==='running'){
+    const started=_compressionElapsedStartedAt(state)||Date.now()/1000;
+    node.setAttribute('data-compression-started-at',String(started));
+    node.setAttribute('data-compression-message',String(state.message||'Auto-compressing context...'));
+    _startCompressionElapsedTimer();
+  }
   const existing=inner.querySelector('[data-live-compression-card="1"]');
   if(existing) existing.replaceWith(node);
   else inner.appendChild(node);

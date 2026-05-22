@@ -50,6 +50,40 @@ from api.turn_journal import append_turn_journal_event_for_stream
 # (api/profiles.py:715).
 _ENV_LOCK = threading.Lock()
 
+_KEYLESS_CUSTOM_API_KEY = "dummy-key"
+
+
+def _resolve_custom_provider_runtime_overrides(
+    resolved_provider: str | None,
+    resolved_api_key: str | None,
+    resolved_base_url: str | None,
+) -> tuple[str | None, str | None, str | None]:
+    """Return provider/key/base_url overrides for ``custom:*`` endpoints.
+
+    Hermes Agent treats named custom providers as routing hints around an
+    OpenAI-compatible base URL.  Local OpenAI-compatible servers often run
+    without authentication, so a missing key should not fail before the first
+    request; pass a harmless placeholder to the SDK and let the endpoint accept
+    it or return its own auth error.
+    """
+    if not (isinstance(resolved_provider, str) and resolved_provider.startswith("custom:")):
+        return resolved_provider, resolved_api_key, resolved_base_url
+
+    _cp_key, _cp_base = resolve_custom_provider_connection(resolved_provider)
+    if not resolved_api_key and _cp_key:
+        resolved_api_key = _cp_key
+    if not resolved_base_url and _cp_base:
+        resolved_base_url = _cp_base
+    if resolved_base_url:
+        # Route through the generic custom OpenAI-compatible client once the
+        # named provider has supplied the concrete endpoint. Keeping the
+        # provider as custom:<slug> would make Agent init synthesize invalid
+        # env-var hints like CUSTOM:SOMETHING-8000_API_KEY on keyless setups.
+        resolved_provider = "custom"
+        if not resolved_api_key:
+            resolved_api_key = _KEYLESS_CUSTOM_API_KEY
+    return resolved_provider, resolved_api_key, resolved_base_url
+
 
 def _prewarm_skill_tool_modules():
     """Import tools.skills_tool and tools.skill_manager_tool outside any lock.
@@ -3467,12 +3501,9 @@ def _run_agent_streaming(
             # Named custom providers (custom:slug) may not be resolvable by
             # hermes_cli.runtime_provider directly. Fall back to config.yaml
             # custom_providers[] so WebUI can pass explicit creds/base_url.
-            if isinstance(resolved_provider, str) and resolved_provider.startswith("custom:"):
-                _cp_key, _cp_base = resolve_custom_provider_connection(resolved_provider)
-                if not resolved_api_key and _cp_key:
-                    resolved_api_key = _cp_key
-                if not resolved_base_url and _cp_base:
-                    resolved_base_url = _cp_base
+            resolved_provider, resolved_api_key, resolved_base_url = _resolve_custom_provider_runtime_overrides(
+                resolved_provider, resolved_api_key, resolved_base_url
+            )
 
             # Read per-profile config at call time (not module-level snapshot)
             from api.config import get_config as _get_config
@@ -4090,12 +4121,9 @@ def _run_agent_streaming(
                                 resolved_provider = _heal_rt.get('provider')
                             if not resolved_base_url:
                                 resolved_base_url = _heal_rt.get('base_url')
-                            if isinstance(resolved_provider, str) and resolved_provider.startswith('custom:'):
-                                _cp_key, _cp_base = resolve_custom_provider_connection(resolved_provider)
-                                if not resolved_api_key and _cp_key:
-                                    resolved_api_key = _cp_key
-                                if not resolved_base_url and _cp_base:
-                                    resolved_base_url = _cp_base
+                            resolved_provider, resolved_api_key, resolved_base_url = _resolve_custom_provider_runtime_overrides(
+                                resolved_provider, resolved_api_key, resolved_base_url
+                            )
                             # Rebuild agent kwargs and create a fresh agent
                             _agent_kwargs['api_key'] = resolved_api_key
                             _agent_kwargs['base_url'] = resolved_base_url
@@ -4894,12 +4922,9 @@ def _run_agent_streaming(
                         resolved_provider = _heal_rt.get('provider')
                     if not resolved_base_url:
                         resolved_base_url = _heal_rt.get('base_url')
-                    if isinstance(resolved_provider, str) and resolved_provider.startswith('custom:'):
-                        _cp_key, _cp_base = resolve_custom_provider_connection(resolved_provider)
-                        if not resolved_api_key and _cp_key:
-                            resolved_api_key = _cp_key
-                        if not resolved_base_url and _cp_base:
-                            resolved_base_url = _cp_base
+                    resolved_provider, resolved_api_key, resolved_base_url = _resolve_custom_provider_runtime_overrides(
+                        resolved_provider, resolved_api_key, resolved_base_url
+                    )
                     # Build a fresh agent with the new credentials
                     _heal_kwargs = dict(_agent_kwargs) if '_agent_kwargs' in dir() else {}
                     _heal_kwargs['api_key'] = resolved_api_key
