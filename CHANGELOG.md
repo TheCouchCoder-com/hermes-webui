@@ -14,6 +14,14 @@
 ## [Unreleased]
 
 
+## [v0.51.106] — 2026-05-21 — Release CD (stage-399 — 3-PR batch — restamped state.db replay dedupe + context_messages dedupe so agent doesn't see duplicates + empty _partial bloat fix)
+
+### Fixed
+
+- **PR #2686** by @ai-ag2026 — Prevent `/api/session` display merges from appending restamped `state.db` replay rows after the sidecar tail when those rows are already visible in the sidecar. Compressed sessions previously could appear to end on an old user prompt even though the assistant answer was persisted earlier in the transcript. The fix deduplicates by visible role+content even when timestamps drift (coarse sidecar seconds vs newer state.db floats), preserves the sidecar assistant tail across compaction-card variants and tool-metadata drift, and handles workspace-prefix user prompt variants. Regression test covers the full surface.
+- **PR #2705** by @AlexeyDsov — Deduplicate replayed context messages before they reach the agent so the model no longer sees the same conversation row twice. The UI-side fix shipped in v0.51.96's #2620 corrected the display transcript but the agent still received duplicates in its context (no on-disk duplication — only at runtime in the model-facing context). Starting from the 2nd turn in any session, duplicates would cause the agent to repeat itself or list items twice. The new dedup pass runs at the WebUI/agent boundary so the runtime context is canonical regardless of upstream replay shape.
+- **PR #2704** by @wirtsi — Prevent unbounded `_partial` message accumulation in session files. Two interacting bugs in `cancel_stream()` and `_message_identity()` produced multi-GB session JSON growth: (1) the `_partial_already_present` dedup check was gated on `if _stripped:`, but reasoning-only cancellations have empty stripped text so every cancel inserted a new identical empty `_partial` entry; (2) `_message_identity()` returned `None` for empty `_partial` messages so the merge layer had no way to spot the duplicate. The fix tightens both paths and adds a regression test that replays the cancel-cycle to assert bounded growth. Closes the OOM crash class reported against long-running reasoning-heavy sessions.
+
 ## [v0.51.105] — 2026-05-21 — Release CC (stage-398 — 4-PR batch — hide suggestions preference + Docker agent version from copied source + runner-local adapter selection + configurable pinned session limit)
 
 ### Added
