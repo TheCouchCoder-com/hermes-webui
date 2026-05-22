@@ -140,17 +140,16 @@ def _has_new_assistant_reply(all_messages: list, prev_count: int) -> bool:
     messages at index >= prev_count are inspected so that historical assistant
     replies don't mask a silent failure on the current turn.
 
-    If ``len(all_messages) < prev_count`` (an edge-case shrink) we fall back
-    to scanning the full list — this keeps behaviour consistent with the
-    original code when offsets don't cleanly apply.  When ``len == prev_count``,
-    there are no new messages and we return False.
+    If ``len(all_messages) < prev_count`` (an edge-case shrink), there is no
+    reliable new-message slice to inspect. Treat that as "no new assistant
+    reply" so stale historical assistant replies cannot mask a silent failure.
+    When ``len == prev_count``, there are no new messages and we return False.
     """
     if len(all_messages) > prev_count:
         # Normal case: new messages appended beyond the pre-turn history.
         candidates = all_messages[prev_count:]
     elif len(all_messages) < prev_count:
-        # Edge-case shrink — scan everything as fallback.
-        candidates = all_messages
+        return False
     else:
         # Same length. In production this means no new messages were appended.
         # However, some test fixtures replace the entire message list rather
@@ -1588,6 +1587,98 @@ def _run_background_title_refresh(session_id: str, user_text: str, assistant_tex
         logger.debug("Background title refresh failed for session %s", session_id, exc_info=True)
 
 
+def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
+    """Persist old_sid as a read-only pre-compression snapshot.
+
+    Context compression rotates the active WebUI session id from old_sid to the
+    agent's new continuation id. The old JSON must remain on disk for lineage
+    traversal, but it should not continue to appear as an active sidebar row.
+    """
+    old_path = SESSION_DIR / f'{old_sid}.json'
+    if not old_path.exists():
+        return
+    try:
+        existing_text = old_path.read_text(encoding='utf-8')
+        try:
+            existing = json.loads(existing_text)
+            existing_msgs = len(existing.get('messages') or [])
+            existing_snapshot = bool(existing.get('pre_compression_snapshot'))
+        except (json.JSONDecodeError, ValueError):
+            # Treat corrupt/malformed old JSON as missing history and rewrite it
+            # from the in-memory pre-compression messages below. That is safer
+            # than leaving an unreadable recovery snapshot behind.
+            existing_msgs = -1
+            existing_snapshot = False
+        if len(s.messages) <= existing_msgs and existing_snapshot:
+            return
+        if len(s.messages) > existing_msgs:
+            # In-memory messages are newer than the file; save the full old
+            # snapshot from the current session object while preserving its
+            # pre-existing parent_session_id lineage.
+            saved_sid = s.session_id
+            saved_snapshot = bool(getattr(s, 'pre_compression_snapshot', False))
+            s.session_id = old_sid
+            s.pre_compression_snapshot = True
+            # Stage-359 / PR #2295: clear runtime stream-state fields on the
+            # archived snapshot so the sidebar does not reopen the parent as
+            # a permanently-running session while the child already holds the
+            # completed answer. The continuation session's live state is
+            # restored from saved_* locals in the finally block.
+            saved_active_stream_id = getattr(s, 'active_stream_id', None)
+            saved_pending_user_message = getattr(s, 'pending_user_message', None)
+            saved_pending_attachments = list(getattr(s, 'pending_attachments', []) or [])
+            saved_pending_started_at = getattr(s, 'pending_started_at', None)
+            s.active_stream_id = None
+            s.pending_user_message = None
+            s.pending_attachments = []
+            s.pending_started_at = None
+            try:
+                # skip_index=False so the snapshot appears in _index.json with
+                # the pre_compression_snapshot marker. The sidebar projection
+                # (#2285) reads that marker to hide the snapshot from active
+                # rows while keeping the JSON discoverable for lineage traversal.
+                s.save(touch_updated_at=False, skip_index=False)
+                logger.info(
+                    "Preserved pre-compression session %s (%d messages) to disk",
+                    old_sid, len(s.messages),
+                )
+            finally:
+                s.session_id = saved_sid
+                s.pre_compression_snapshot = saved_snapshot
+                s.active_stream_id = saved_active_stream_id
+                s.pending_user_message = saved_pending_user_message
+                s.pending_attachments = saved_pending_attachments
+                s.pending_started_at = saved_pending_started_at
+            return
+        # Existing file is already at least as complete as memory; stamp only
+        # the snapshot marker so index/sidebar projection can hide it without
+        # rewriting a shorter messages array over a fuller transcript.
+        from api.models import Session
+        snapshot = Session.load(old_sid)
+        if snapshot:
+            snapshot.pre_compression_snapshot = True
+            # Stage-359 Opus SHOULD-FIX: clear runtime fields on the loaded
+            # snapshot too. If the disk snapshot was last persisted while the
+            # parent was live, it could carry a stale active_stream_id /
+            # pending_* over to disk. The sidebar projection filters snapshot
+            # rows so this is latent today, but the contract should match the
+            # primary branch above so future readers can trust snapshot files
+            # to never contain live runtime state.
+            snapshot.active_stream_id = None
+            snapshot.pending_user_message = None
+            snapshot.pending_attachments = []
+            snapshot.pending_started_at = None
+            snapshot.save(touch_updated_at=False, skip_index=False)
+            logger.info(
+                "Marked pre-compression session %s as sidebar-hidden snapshot",
+                old_sid,
+            )
+    except OSError:
+        logger.debug("Could not read old session file before preservation")
+    except Exception:
+        logger.debug("Failed to preserve pre-compression session file", exc_info=True)
+
+
 def _maybe_schedule_title_refresh(session, put_event, agent):
     """Check if the session is due for an adaptive title refresh and schedule it."""
     refresh_interval = _get_title_refresh_interval()
@@ -1860,6 +1951,37 @@ def _drop_checkpointed_current_user_from_context(messages, msg_text):
     if current_user_key and _message_identity(history[-1]) == current_user_key:
         return history[:-1]
     return history
+
+
+def _save_pre_compression_snapshot(session, old_session_id):
+    """Persist the archived pre-compression session without live turn state.
+
+    During context compression the same ``Session`` object is reused for the new
+    continuation id.  Before the final continuation save clears
+    ``active_stream_id`` and ``pending_*``, we also preserve an old-id snapshot so
+    the full pre-compression transcript remains recoverable.  That archived
+    parent must not keep the current stream bookkeeping, otherwise the sidebar can
+    reopen the parent as a permanently running session while the child already
+    contains the completed answer.
+    """
+    saved_sid = session.session_id
+    saved_active_stream_id = getattr(session, 'active_stream_id', None)
+    saved_pending_user_message = getattr(session, 'pending_user_message', None)
+    saved_pending_attachments = list(getattr(session, 'pending_attachments', []) or [])
+    saved_pending_started_at = getattr(session, 'pending_started_at', None)
+    session.session_id = old_session_id
+    session.active_stream_id = None
+    session.pending_user_message = None
+    session.pending_attachments = []
+    session.pending_started_at = None
+    try:
+        session.save(touch_updated_at=False, skip_index=True)
+    finally:
+        session.session_id = saved_sid
+        session.active_stream_id = saved_active_stream_id
+        session.pending_user_message = saved_pending_user_message
+        session.pending_attachments = saved_pending_attachments
+        session.pending_started_at = saved_pending_started_at
 
 
 def _stream_writeback_is_current(session, stream_id):
@@ -3600,8 +3722,6 @@ def _run_agent_streaming(
                 if _agent_sid and _agent_sid != session_id:
                     old_sid = session_id
                     new_sid = _agent_sid
-                    old_path = SESSION_DIR / f'{old_sid}.json'
-                    new_path = SESSION_DIR / f'{new_sid}.json'
                     s.session_id = new_sid
                     # Carry profile identity across the compression boundary.
                     # Without this, s.profile stays None on the continuation
@@ -3632,39 +3752,7 @@ def _run_agent_streaming(
                     # compression removes messages from the model's context.  Skip
                     # the write when the file already contains up-to-date data
                     # (i.e. it was just saved by a checkpoint).
-                    if old_path.exists():
-                        try:
-                            existing_text = old_path.read_text(encoding='utf-8')
-                            try:
-                                existing = json.loads(existing_text)
-                                existing_msgs = len(existing.get('messages') or [])
-                            except (json.JSONDecodeError, ValueError):
-                                existing_msgs = -1
-                            if len(s.messages) > existing_msgs:
-                                # In-memory messages are newer than the file — save.
-                                # Preserve s.parent_session_id as-is (do NOT clear it):
-                                # the OLD session's parent_session_id is its own
-                                # pre-existing lineage (e.g. a /branch fork's
-                                # parent_session_id back to the original).  We must
-                                # not overwrite that with None on disk.  Stage-353
-                                # Opus SHOULD-FIX: previous code cleared parent
-                                # before save then restored after — but the on-disk
-                                # copy persisted with parent=None, breaking
-                                # fork-of-fork lineage traversal.  (#2227 + #2223)
-                                saved_sid = s.session_id
-                                s.session_id = old_sid
-                                try:
-                                    s.save(touch_updated_at=False, skip_index=True)
-                                    logger.info(
-                                        "Preserved pre-compression session %s (%d messages) to disk",
-                                        old_sid, len(s.messages),
-                                    )
-                                except Exception:
-                                    logger.debug("Failed to preserve pre-compression session file", exc_info=True)
-                                finally:
-                                    s.session_id = saved_sid
-                        except OSError:
-                            logger.debug("Could not read old session file before preservation")
+                    _preserve_pre_compression_snapshot(s, old_sid)
                     # Always link the continuation session to its immediate predecessor
                     # (the preserved snapshot).  This OVERRIDES any prior
                     # parent_session_id because the new continuation IS the next link

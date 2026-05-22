@@ -55,6 +55,36 @@ PROJECTS_FILE = STATE_DIR / "projects.json"
 logger = logging.getLogger(__name__)
 
 
+def _env_mb_bytes(name: str, default_mb: int) -> int:
+    """Parse an optional megabyte environment variable into bytes.
+
+    Accepts values like ``200``, ``200MB``, or ``200MiB``. Invalid or
+    non-positive values fall back to the provided default.
+    """
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default_mb * 1024 * 1024
+    m = re.match(r"^(\d+)\s*(?:m|mb|mib)?$", raw, re.IGNORECASE)
+    if not m:
+        logger.warning(
+            "Invalid %s=%r; expected a positive integer in MB. Falling back to %sMB.",
+            name,
+            raw,
+            default_mb,
+        )
+        return default_mb * 1024 * 1024
+    value_mb = int(m.group(1))
+    if value_mb <= 0:
+        logger.warning(
+            "Invalid %s=%r; expected a value greater than zero. Falling back to %sMB.",
+            name,
+            raw,
+            default_mb,
+        )
+        return default_mb * 1024 * 1024
+    return value_mb * 1024 * 1024
+
+
 # ── Hermes agent directory discovery ─────────────────────────────────────────
 def _discover_agent_dir() -> Path:
     """
@@ -485,7 +515,7 @@ def verify_hermes_imports() -> tuple:
 
 # ── Limits ───────────────────────────────────────────────────────────────────
 MAX_FILE_BYTES = 200_000
-MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+MAX_UPLOAD_BYTES = _env_mb_bytes("HERMES_WEBUI_MAX_UPLOAD_MB", 20)
 
 # ── File type maps ───────────────────────────────────────────────────────────
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico", ".bmp"}
@@ -3960,6 +3990,8 @@ _SETTINGS_SKIN_VALUES = {
     "poseidon",
     "sisyphus",
     "charizard",
+    "sienna",
+    "nous",
 }
 _SETTINGS_LEGACY_THEME_MAP = {
     # Legacy full themes now map onto the closest supported theme + accent skin pair.

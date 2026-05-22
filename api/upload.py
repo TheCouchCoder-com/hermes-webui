@@ -12,6 +12,8 @@ from api.helpers import j, bad
 from api.models import get_session
 from api.workspace import safe_resolve_ws
 
+_MAX_EXTRACTED_BYTES = 10 * MAX_UPLOAD_BYTES
+
 
 def parse_multipart(rfile, content_type, content_length) -> tuple:
     import re as _re, email.parser as _ep
@@ -94,11 +96,6 @@ def handle_upload(handler):
     except Exception:
         print('[webui] upload error: ' + _tb.format_exc(), flush=True)
         return j(handler, {'error': 'Upload failed'}, status=500)
-
-
-# Maximum total extracted bytes — guards against zip/tar bombs.
-# Set to 10x the upload limit; a legitimate archive rarely exceeds 3-4x.
-_MAX_EXTRACTED_BYTES = 10 * 20 * 1024 * 1024  # 200 MB
 
 
 def extract_archive(file_bytes: bytes, filename: str, workspace: Path):

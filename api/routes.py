@@ -3439,7 +3439,11 @@ def handle_get(handler, parsed) -> bool:
             version_token = quote(WEBUI_VERSION, safe="")
             from api.extensions import inject_extension_tags
 
-            html = _INDEX_HTML_PATH.read_text(encoding="utf-8").replace("__WEBUI_VERSION__", version_token)
+            html = (
+                _INDEX_HTML_PATH.read_text(encoding="utf-8")
+                .replace("__WEBUI_VERSION__", version_token)
+                .replace("__MAX_UPLOAD_BYTES__", str(MAX_UPLOAD_BYTES))
+            )
             return t(
                 handler,
                 inject_extension_tags(html),

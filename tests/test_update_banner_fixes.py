@@ -874,6 +874,32 @@ class TestWhatsNewSummaryToggle:
             'The full diff is still available from the update banner.',
         ]
 
+    def test_update_summary_keeps_unknown_prefixed_bullets_as_notice(self):
+        from api.updates import summarize_update_payload
+
+        result = summarize_update_payload(
+            {'webui': {'behind': 3, 'current_sha': 'abc', 'latest_sha': 'def', 'compare_url': 'https://example.test/webui'}},
+            llm_callback=lambda _system, _prompt: '\n'.join(
+                [
+                    'Notice: The settings panel loads faster.',
+                    'Caveat: Restart once after applying the update.',
+                    'Action required: Reopen the update banner if the summary was already cached.',
+                    'Worth knowing: The full diff is still available from the update banner.',
+                ]
+            ),
+            use_cache=False,
+        )
+        sections = {section['title']: section['items'] for section in result['summary_sections']}
+
+        assert sections["What you'll notice"] == [
+            'The settings panel loads faster.',
+            'Caveat: Restart once after applying the update.',
+            'Action required: Reopen the update banner if the summary was already cached.',
+        ]
+        assert sections['Worth knowing'] == [
+            'The full diff is still available from the update banner.',
+        ]
+
     def test_update_summary_panel_is_scrollable_for_long_summaries(self):
         style = read('static/style.css')
 
