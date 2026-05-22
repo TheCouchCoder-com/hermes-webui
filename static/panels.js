@@ -5800,7 +5800,7 @@ async function loadProvidersPanel(){
   try{
     const data=await api('/api/providers');
     const quota=await _fetchProviderQuotaStatus(false).catch(e=>({ok:false,status:'unavailable',quota:null,message:e.message||t('provider_quota_unavailable'),client_fetched_at:new Date().toISOString()}));
-    const providers=(data.providers||[]).filter(p=>p.configurable||p.is_oauth);
+    const providers=(data.providers||[]).filter(p=>p.configurable||p.is_oauth||p.is_custom);
     list.innerHTML='';
     _providerCardEls.clear();
     const quotaCard=_buildProviderQuotaCard(quota);
@@ -6127,48 +6127,59 @@ function _buildProviderCard(p){
     return card;
   }
 
-  const field=document.createElement('div');
-  field.className='provider-card-field';
-  const label=document.createElement('label');
-  label.className='provider-card-label';
-  label.textContent=t('providers_status_api_key');
-  field.appendChild(label);
+  let input=null;
+  let saveBtn=null;
+  if(p.configurable){
+    const field=document.createElement('div');
+    field.className='provider-card-field';
+    const label=document.createElement('label');
+    label.className='provider-card-label';
+    label.textContent=t('providers_status_api_key');
+    field.appendChild(label);
 
-  const row=document.createElement('div');
-  row.className='provider-card-row';
-  const input=document.createElement('input');
-  input.type='password';
-  input.className='provider-card-input';
-  input.placeholder=p.has_key?t('providers_key_placeholder_replace'):t('providers_key_placeholder_new');
-  input.autocomplete='off';
-  const toggleBtn=document.createElement('button');
-  toggleBtn.type='button';
-  toggleBtn.className='provider-card-btn provider-card-btn-ghost';
-  toggleBtn.textContent='Show';
-  toggleBtn.onclick=()=>{
-    const revealed=input.type==='text';
-    input.type=revealed?'password':'text';
-    toggleBtn.textContent=revealed?'Show':'Hide';
-  };
-  const saveBtn=document.createElement('button');
-  saveBtn.type='button';
-  saveBtn.className='provider-card-btn provider-card-btn-primary';
-  saveBtn.textContent=t('providers_save');
-  saveBtn.onclick=()=>_saveProviderKey(p.id);
-  saveBtn.disabled=true;
-  row.appendChild(input);
-  row.appendChild(toggleBtn);
-  row.appendChild(saveBtn);
-  if(p.has_key){
-    const removeBtn=document.createElement('button');
-    removeBtn.type='button';
-    removeBtn.className='provider-card-btn provider-card-btn-danger';
-    removeBtn.textContent=t('providers_remove');
-    removeBtn.onclick=()=>_removeProviderKey(p.id);
-    row.appendChild(removeBtn);
+    const row=document.createElement('div');
+    row.className='provider-card-row';
+    input=document.createElement('input');
+    input.type='password';
+    input.className='provider-card-input';
+    input.placeholder=p.has_key?t('providers_key_placeholder_replace'):t('providers_key_placeholder_new');
+    input.autocomplete='off';
+    const toggleBtn=document.createElement('button');
+    toggleBtn.type='button';
+    toggleBtn.className='provider-card-btn provider-card-btn-ghost';
+    toggleBtn.textContent='Show';
+    toggleBtn.onclick=()=>{
+      const revealed=input.type==='text';
+      input.type=revealed?'password':'text';
+      toggleBtn.textContent=revealed?'Show':'Hide';
+    };
+    saveBtn=document.createElement('button');
+    saveBtn.type='button';
+    saveBtn.className='provider-card-btn provider-card-btn-primary';
+    saveBtn.textContent=t('providers_save');
+    saveBtn.onclick=()=>_saveProviderKey(p.id);
+    saveBtn.disabled=true;
+    row.appendChild(input);
+    row.appendChild(toggleBtn);
+    row.appendChild(saveBtn);
+    if(p.has_key){
+      const removeBtn=document.createElement('button');
+      removeBtn.type='button';
+      removeBtn.className='provider-card-btn provider-card-btn-danger';
+      removeBtn.textContent=t('providers_remove');
+      removeBtn.onclick=()=>_removeProviderKey(p.id);
+      row.appendChild(removeBtn);
+    }
+    field.appendChild(row);
+    body.appendChild(field);
+  }else{
+    const hint=document.createElement('div');
+    hint.className='provider-card-hint';
+    hint.textContent=p.is_custom
+      ? 'Custom provider loaded from config.yaml / hermes model. Edit it from the CLI or config file.'
+      : 'Provider is managed outside the WebUI.';
+    body.appendChild(hint);
   }
-  field.appendChild(row);
-  body.appendChild(field);
 
   // Model list — show when provider has known models
   if(modelCount>0){
@@ -6222,8 +6233,10 @@ function _buildProviderCard(p){
   body.appendChild(refreshRow);
   card.appendChild(body);
 
-  _providerCardEls.set(p.id,{card,input,saveBtn,hasKey:p.has_key});
-  input.addEventListener('input',()=>{saveBtn.disabled=!input.value.trim();});
+  if(input&&saveBtn){
+    _providerCardEls.set(p.id,{card,input,saveBtn,hasKey:p.has_key});
+    input.addEventListener('input',()=>{saveBtn.disabled=!input.value.trim();});
+  }
   header.addEventListener('click',e=>{
     // Don't toggle when clicking inside body (defensive; body isn't inside header)
     if(e.target.closest('.provider-card-body')) return;

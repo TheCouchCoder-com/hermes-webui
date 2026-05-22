@@ -14,6 +14,16 @@
 ## [Unreleased]
 
 
+## [v0.51.97] — 2026-05-20 — Release BU (stage-390 — 2-PR batch — startup session-index rebuild + config-managed custom-provider cards)
+
+### Fixed
+
+- **PR #2642** by @dso2ng — Rebuild the WebUI session index during startup recovery when `_index.json` is missing, even when no `.bak` session restore occurs. Previously the rebuild only ran after a `.bak` restore path, leaving large state directories on a repeated full-scan `/api/sessions` fallback after an index loss. Startup recovery now unconditionally calls `_write_session_index()` when no `_index.json` is present on disk, restoring the O(1) sidebar read path.
+
+### Added
+
+- **PR #2634** by @Michaelyklam (closes #2632) — Show `custom_providers` entries created by `hermes model` (CLI) in Settings → Providers as read-only config-managed provider cards, including their configured models and key status, instead of filtering them out because they are not WebUI-editable API-key providers. The new card variant displays configured models, key-env status (set/unset), and a "config-managed" badge that links to the CLI as the canonical edit surface.
+
 ## [v0.51.96] — 2026-05-20 — Release BT (stage-389 — 8-PR batch — IPv6 dashboard link normalization + configured title-generation provider routing + sidebar pinned-session 3-cap + external-refresh sidecar count preference + Hermes overview docs relocation + legacy dedup timestamp granularity + custom provider /models endpoint error surfacing + RuntimeAdapter Slice 4c harness gate RFC)
 
 ### Fixed
