@@ -1406,15 +1406,16 @@ function applyBotName(){
     // localStorage into 'dark'/'default' BEFORE this code runs, so a truly
     // empty (new-browser) state is indistinguishable from a user who chose
     // the defaults.  To avoid blocking server→client sync on first visit we
-    // only let localStorage override the server when it carries a NON-DEFAULT
-    // skin or a non-dark/light theme value (i.e. the user explicitly picked
-    // something).  When localStorage is at the defaults, the server wins.
+    // only let localStorage override the server when it carries an explicit
+    // user-selectable theme value or a NON-DEFAULT skin.  That keeps the
+    // server in charge for empty first-visit state while preserving explicit
+    // light/dark/system choices after a failed autosave.
     const srvAppearance=_normalizeAppearance(s.theme,s.skin);
     const lsTheme=(localStorage.getItem('hermes-theme')||'').trim().toLowerCase();
     const lsSkin=(localStorage.getItem('hermes-skin')||'').trim().toLowerCase();
     const lsAppearance=_normalizeAppearance(lsTheme||null,lsSkin||null);
     const lsHasExplicitSkin=lsSkin&&lsSkin!=='default';
-    const lsHasExplicitTheme=lsTheme&&lsTheme==='system';
+    const lsHasExplicitTheme=lsTheme&&['system','light','dark'].includes(lsTheme);
     const theme=lsHasExplicitTheme?lsAppearance.theme:srvAppearance.theme;
     const skin=lsHasExplicitSkin?lsAppearance.skin:srvAppearance.skin;
     localStorage.setItem('hermes-theme',theme);

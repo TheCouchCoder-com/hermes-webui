@@ -296,7 +296,7 @@ def test_parse_multipart_binary_file():
 # ──────────────────────────────────────────────
 
 def test_upload_text_file(cleanup_test_sessions):
-    """Upload a text file to a session workspace, verify it appears in /api/list."""
+    """Upload a text file to the attachment inbox, not the workspace root."""
     sid, ws = make_session_tracked(cleanup_test_sessions)
 
     result, status = post_multipart("/api/upload", {"session_id": sid}, {
@@ -306,12 +306,30 @@ def test_upload_text_file(cleanup_test_sessions):
     assert "filename" in result
     assert result["size"] == len(b"sprint1 test content")
 
-    # Verify file appears in listing
+    uploaded_path = pathlib.Path(result["path"])
+    assert uploaded_path.exists()
+    assert uploaded_path.read_bytes() == b"sprint1 test content"
+    assert uploaded_path.parent.name == sid
+
+    # Verify ordinary chat uploads no longer clutter the workspace listing.
     listing = get(f"/api/list?session_id={sid}&path=.")
     names = [e["name"] for e in listing["entries"]]
-    assert result["filename"] in names, f"{result['filename']} not in {names}"
-    # Cleanup the uploaded file
-    post("/api/file/delete", {"session_id": sid, "path": result["filename"]})
+    assert result["filename"] not in names, f"{result['filename']} unexpectedly in {names}"
+    # Cleanup the uploaded file from the attachment inbox.
+    uploaded_path.unlink(missing_ok=True)
+
+
+def test_upload_respects_attachment_dir_env(monkeypatch, tmp_path):
+    """HERMES_WEBUI_ATTACHMENT_DIR routes chat uploads to a per-session inbox."""
+    from api.upload import _upload_destination
+
+    inbox = tmp_path / "attachment-inbox"
+    monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(inbox))
+
+    dest = _upload_destination("session-123", "notes.md")
+
+    assert dest == inbox.resolve() / "session-123" / "notes.md"
+    assert dest.parent.exists()
 
 
 def test_upload_too_large(cleanup_test_sessions):

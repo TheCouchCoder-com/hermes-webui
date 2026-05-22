@@ -12,6 +12,20 @@
 
 ## [Unreleased]
 
+### Added
+
+- **PR #2319** by @Michaelyklam — Chat file uploads now land in a session-scoped attachment inbox instead of cluttering the active workspace root. By default uploads are stored under `~/.hermes/webui/attachments/<session_id>/`; operators can override the root with `HERMES_WEBUI_ATTACHMENT_DIR`, and the agent still receives the absolute uploaded file path for context. Archive extraction stays workspace-scoped (it's an explicit workspace operation). README updated to document the new default location. **Stage-361 maintainer fix applied inline**: Opus advisor caught that `_build_native_multimodal_message` at `api/streaming.py:787` required uploads to be under `workspace_root`, which would have silently dropped every image upload for vision-capable models once the inbox moved outside the workspace. The fix adds `_attachment_root()` (from `api/upload.py`) as a second allowed location, with 3 regression tests covering the new code path AND verifying the original workspace + cross-root rejection paths still work.
+
+### Fixed
+
+- **PR #2315** by @Michaelyklam (closes #2305, refs #749) — WebUI profile creation now seeds bundled profile skills for newly-created non-cloned profiles, matching the CLI's `hermes profile create` behaviour. Pre-fix, creating a profile via Settings → New Profile (without checking "Clone from active profile") left the profile's `skills/` directory empty, which was inconsistent with CLI-created profiles that get the full bundled-skills overlay. The fix calls `seed_profile_skills(profile_path, quiet=True)` after `profile_path.mkdir()` when `clone_from is None`. Cloned profiles still inherit skills from their source — they don't get a second bundled-skills overlay. Seed failures (e.g. `hermes_cli` unavailable in Docker fallback) are logged as warnings, not fatal — profile creation still succeeds.
+
+- **PR #2317** by @Michaelyklam (refs #2312 follow-up #2) — Appearance boot reconciliation now treats explicit `light`, `dark`, and `system` localStorage theme values as user selections when a prior Settings autosave failed. Pre-fix, the predicate `lsHasExplicitTheme = lsTheme === 'system'` only treated 'system' as explicit, so a user who picked `light` on a server defaulted to `dark` (or vice versa) with a failed autosave still reverted to the server default on refresh. Now broadened to `['system','light','dark'].includes(lsTheme)`. Skin handling was already correct (`lsSkin !== 'default'`). Closes follow-up item #2 from the v0.51.66 review (#2312).
+
+- **PR #2318** by @Michaelyklam (closes #2307) — Mobile/Android backgrounded tabs no longer show a permanent `**Error:** Connection lost` banner when the backend stream is still alive and able to replay buffered events. Pre-fix, the SSE error finalization fired regardless of page visibility state, so any tab discarded by the mobile OS (battery saver, tab compression, brief switch to another app) showed a permanent error even though the stream could be re-attached on visibility return. The fix defers inline stream error rendering while `document.visibilityState === 'hidden'` or `document.wasDiscarded === true`, then on visibility return polls `/api/chat/stream/status?stream_id=...`. If the stream is still active, reattaches with a fresh `EventSource`. If not, falls back to the settled-session restore path. If both paths fail, falls back to the original error rendering. Behaviour on desktop and on tabs that ARE visible is unchanged.
+
+## [v0.51.67] — 2026-05-15 — Release AQ (stage-360 — 3-PR streaming-lane batch — #2279 stream completion recovery + #2299 profile-scoped aux routing + #2306 workspace panel polish — with _ENV_LOCK narrow-lock architectural fix)
+
 ### Fixed
 
 - **PR #2279** by @franksong2702 (closes #2262 + refs #2168) — WebUI stream completion recovery gaps closed for both `notify_on_complete` background tasks and the preserved-task-list compression marker UI. Pre-fix, completions held in the agent process registry were never drained by the WebUI gateway session because the gateway session platform was unset. The fix routes the completion queue by process session key before injecting any notification into a WebUI turn. Separately, the preserved-task-list compression marker — an internal sentinel — was sometimes the only assistant text rendered after a context compression turn timed out, leaving a confusing "preserved tasks" message with no actual response. The frontend now suppresses the marker when it's the only assistant content and the run state is terminal.
@@ -24,6 +38,7 @@
 
 ### Added
 
+
 - **PR #2287** by @mslovy (refs #2284) — Upload size limit is now runtime-configurable via the `HERMES_WEBUI_MAX_UPLOAD_MB` environment variable. Previously the effective 20 MB cap was hard-coded across multiple layers. Server-side upload limit moves to runtime config; browser-side preflight check stays aligned with the effective backend limit; archive extraction guard continues to scale with the same configured cap. New `_env_mb_bytes()` helper in `api/config.py` parses `HERMES_WEBUI_MAX_UPLOAD_MB`.
 
 - **PR #2291** by @linuxid10t — New "Nous Research" skin option in the Settings → Appearance picker, inspired by [nousresearch.com](https://nousresearch.com). Monospace typography, steel blue (#4682B4) accent, cool gray text, sharp 1-2px corners, thin dashed borders, technical aesthetic.
@@ -33,6 +48,7 @@
 - **PR #2303** by @franksong2702 (fixes #2246) — New per-turn assistant question jump button in the assistant message footer. Allows quick navigation back to the user question that started a long answer. Desktop-only, hidden during live streaming.
 
 ### Fixed
+
 
 - **PR #2275** by @ai-ag2026 — CLI/messaging continuation sessions (sessions stitched from a `parent_session_id` chain) now return their full transcript instead of an empty list. Pre-fix, `get_cli_session_messages()` called `_is_continuation_session()` while walking the parent chain, but `api/models.py` didn't import that helper. The exception was swallowed by `except Exception: return []`, so valid external sessions could fall through silently. Adds regression coverage that a stitched continuation chain returns a non-empty transcript.
 

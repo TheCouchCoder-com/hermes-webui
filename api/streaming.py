@@ -773,6 +773,20 @@ def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachme
 
     parts = [{'type': 'text', 'text': workspace_ctx + msg_text}]
     workspace_root = Path(workspace).expanduser().resolve()
+    # Stage-361 maintainer fix (Opus SHOULD-FIX): chat uploads from #2319 now
+    # land in ~/.hermes/webui/attachments/<sid>/ (outside workspace_root by
+    # design). The pre-existing `path.relative_to(workspace_root)` guard would
+    # silently reject every image upload for vision-capable models. Allow the
+    # configured attachment root in addition to workspace_root so native
+    # multimodal embeds still build the base64 image_url part. The
+    # _attachment_root() helper applies expanduser+resolve and is also reused
+    # by _upload_destination — single source of truth for the inbox root.
+    try:
+        from api.upload import _attachment_root
+        attachment_root = _attachment_root()
+        _allowed_roots = (workspace_root, attachment_root)
+    except Exception:
+        _allowed_roots = (workspace_root,)
     image_count = 0
 
     for att in attachments or []:
@@ -783,9 +797,11 @@ def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachme
             continue
         try:
             path = Path(raw_path).expanduser().resolve()
-            # Uploads should live inside the selected workspace. Do not read
-            # arbitrary paths from client-provided attachment metadata.
-            path.relative_to(workspace_root)
+            # Uploads should live inside the selected workspace OR the
+            # session attachment inbox (#2319). Do not read arbitrary paths
+            # from client-provided attachment metadata.
+            if not any(path.is_relative_to(r) for r in _allowed_roots):
+                continue
             if not path.is_file():
                 continue
             size = path.stat().st_size
