@@ -8298,7 +8298,7 @@ def _handle_chat_sync(handler, body):
                 _merge_display_messages_after_agent_result,
                 _restore_reasoning_metadata,
                 _sanitize_messages_for_api,
-                _session_context_messages,
+                _context_messages_for_new_turn,
                 _workspace_context_prefix,
             )
             workspace_ctx = _workspace_context_prefix(str(s.workspace))
@@ -8315,7 +8315,7 @@ def _handle_chat_sync(handler, body):
             )
 
             _previous_messages = list(s.messages or [])
-            _previous_context_messages = list(_session_context_messages(s))
+            _previous_context_messages = list(_context_messages_for_new_turn(s, msg))
 
             result = agent.run_conversation(
                 user_message=workspace_ctx + msg,
