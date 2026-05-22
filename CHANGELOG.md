@@ -12,6 +12,29 @@
 
 ## [Unreleased]
 
+### Documentation
+
+- **PR #2483** by @franksong2702 (refs #2364) — Add a narrow README note for the community ARM64 Android AVF field report: Hermes Agent + WebUI running inside a Debian 12 VM on a mid-range Android phone with cloud-hosted inference. The note frames the report as a compatibility signal rather than an official support baseline or provider/model benchmark, and records practical mobile caveats around first-install compile time, Android tab reloads, and battery optimization.
+
+## [v0.51.87] — 2026-05-18 — Release BK (stage-380 — 2-PR Docker hygiene + CI gate — read-only mount tmpfs staging + Docker runtime smoke workflow + agent-source boundary inventory + writable-mount startup warning)
+
+### Added
+
+- **PR #2482** by @Michaelyklam (refs #2453) — Add a durable source/API boundary inventory for the WebUI's remaining Hermes Agent source dependencies: chat execution, runtime events, profiles, goals, slash/plugin commands, provider/auth/model catalogs, redaction parity, and imported Agent/Gateway sessions. The new RFC tracks replacement API contracts before the source mount can be removed.
+
+### Changed
+
+- **PR #2482** by @Michaelyklam (refs #2453) — Make the multi-container source boundary more explicit: Docker docs and README now link the boundary inventory, and `docker_init.bash` emits a startup warning when the WebUI sees a writable agent-source mount instead of the default read-only `hermes-agent-src` mount.
+
+### Fixed
+
+- **PR #2490** by @nesquena-hermes — Multi-container Docker startup is no longer broken by the v0.51.84 `:ro` mount on `hermes-agent-src`. `docker_init.bash` was calling `uv pip install "$_agent_src[all]"` against the mounted source tree directly. setuptools' `egg_info` build step touches `hermes_agent.egg-info/` inside the source tree even under PEP 517 build isolation, which `EROFS`-failed on the now-read-only mount and (under `set -e`) killed startup of every multi-container deploy. The init script now stages the agent source into `/tmp/hermes-agent-build` via `rsync` (with a `cp -a` fallback for images without rsync, both excluding any pre-baked `*.egg-info`, `build`, `dist`, and `__pycache__` artifacts) and runs the install against that writable copy, leaving the underlying `:ro` mount untouched. Stage dir is removed after the install completes. This regression was caught by the new Docker runtime smoke gate (below) on its very first CI run against its own PR — 5800+ source-level pytests + the independent reviewer's eyeball had all missed it on PR #2470.
+
+### Infrastructure
+
+- **PR #2490** by @nesquena-hermes — Add a Docker runtime smoke gate (`.github/workflows/docker-smoke.yml`) triggered on PRs and pushes to `master` that modify `Dockerfile`, `docker_init.bash`, `docker-compose*.yml`, `.dockerignore`, or `.env.docker.example`. Validates every compose file parses (`docker compose config`), then matrix-runs the single, two-container, and three-container variants end-to-end: rebuilds the local `Dockerfile` and re-tags it as `ghcr.io/nesquena/hermes-webui:latest` so the multi-container variants exercise PR-level changes rather than the previously-released registry image, `docker compose up -d --wait`s with a 120s health window, probes `/health`, and greps startup logs for known-bad signatures (`EROFS`, `Traceback`, `PermissionError`, `error_exit`, `!! ERROR`, `!! Exiting script`, `groupmod: cannot`, `usermod: cannot`, `Failed to set`). Closes the source-only-test gap that let v0.51.84's `:ro`-mount × `chown -h ... {} +` startup regression reach review with 5800+ green pytests. Workflow runs with `permissions: contents: read`, uses per-run project names and a pre-flight orphan reaper for safe concurrency, and unconditionally tears down all volumes/networks in an `EXIT` trap. Two new source-level invariants in `tests/test_docker_docs_and_readonly.py` pin the staging path so the underlying `:ro`-incompatible call doesn't regress.
+
+
 ## [v0.51.86] — 2026-05-17 — Release BJ (stage-379 — 4-PR review-bypass batch — memory-provider session lifecycle + cross-provider /model alias + RuntimeAdapter cancel seam + Fork-from-here messaging coord)
 
 ### Fixed
