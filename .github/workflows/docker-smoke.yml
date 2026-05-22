@@ -122,16 +122,12 @@ jobs:
       - name: Build local Dockerfile
         # We always build the local Dockerfile so the PR's changes are tested,
         # even on the multi-container variants whose compose files reference
-        # a GHCR-published image. Without this retag, multi-container smoke
-        # runs would test the previous release, not the PR. Tag for both the
-        # upstream (`nesquena`) image name and the fork (`thecouchcoder-com`)
-        # image name so both upstream's docker-compose files and our fork's
-        # docker-compose.{two,three}-container.yml (which reference the fork
-        # GHCR image) resolve locally without hitting the registry.
+        # ghcr.io/thecouchcoder-com/hermes-webui:latest. Without this retag,
+        # multi-container smoke runs would try to pull from GHCR (we don't
+        # publish a `:latest` tag) and fail before the PR's code is exercised.
         run: |
           set -euo pipefail
-          docker build -t ghcr.io/nesquena/hermes-webui:latest .
-          docker tag ghcr.io/nesquena/hermes-webui:latest ghcr.io/thecouchcoder-com/hermes-webui:latest
+          docker build -t ghcr.io/thecouchcoder-com/hermes-webui:latest .
 
       - name: Prepare ephemeral host paths
         id: paths
