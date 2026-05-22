@@ -3500,10 +3500,20 @@ def _run_agent_streaming(
             # closes over it) never captures an unbound name even if this
             # block is reordered later (Issue #765).
             _checkpoint_activity = [0]
+            _live_tool_event_start_ids = set()
+            _live_tool_event_complete_ids = set()
+
+            def _tool_args_snapshot(args):
+                args_snap = {}
+                if isinstance(args, dict):
+                    for k, v in list(args.items())[:4]:
+                        s2 = str(v)
+                        args_snap[k] = s2[:120] + ('...' if len(s2) > 120 else '')
+                return args_snap
 
             def _record_live_tool_start(tool_call_id, name, args):
                 if not tool_call_id or tool_call_id in _live_prompt_estimate_seen_ids:
-                    return
+                    return False
                 _live_prompt_estimate_seen_ids.add(tool_call_id)
                 _tool_call = {
                     'id': tool_call_id,
@@ -3518,10 +3528,11 @@ def _run_agent_streaming(
                     'content': '',
                     'tool_calls': [_tool_call],
                 }])
+                return True
 
             def _record_live_tool_complete(tool_call_id, name, function_result):
                 if not tool_call_id:
-                    return
+                    return False
                 _result_text = _tool_result_snippet(function_result)
                 _bump_live_prompt_estimate([{
                     'role': 'tool',
@@ -3529,6 +3540,7 @@ def _run_agent_streaming(
                     'tool_call_id': tool_call_id,
                     'content': _result_text,
                 }])
+                return True
 
             def on_tool(*cb_args, **cb_kwargs):
                 nonlocal _reasoning_text
@@ -3561,11 +3573,14 @@ def _run_agent_streaming(
                         _emit_metering()
                     return
 
-                args_snap = {}
-                if isinstance(args, dict):
-                    for k, v in list(args.items())[:4]:
-                        s2 = str(v)
-                        args_snap[k] = s2[:120] + ('...' if len(s2) > 120 else '')
+                args_snap = _tool_args_snapshot(args)
+
+                # Modern Hermes Agent builds can call both tool_progress_callback
+                # and the structured tool_start/tool_complete callbacks for the
+                # same tool. Prefer the structured path when it is supported so
+                # the browser receives one tid-tagged tool card per real call.
+                if event_type in (None, 'tool.started') and 'tool_start_callback' in _agent_params:
+                    return
 
                 if event_type in (None, 'tool.started'):
                     _live_tool_calls.append({
@@ -3600,6 +3615,9 @@ def _run_agent_streaming(
                                 put('approval', p)
                     except ImportError:
                         pass
+                    return
+
+                if event_type == 'tool.completed' and 'tool_complete_callback' in _agent_params:
                     return
 
                 if event_type == 'tool.completed':
@@ -3641,6 +3659,28 @@ def _run_agent_streaming(
             def on_tool_start(tool_call_id, name, args):
                 try:
                     _record_live_tool_start(tool_call_id, name, args)
+                    if tool_call_id and tool_call_id not in _live_tool_event_start_ids:
+                        _live_tool_event_start_ids.add(tool_call_id)
+                        _live_tool_calls.append({
+                            'name': name,
+                            'args': args if isinstance(args, dict) else {},
+                            'tid': tool_call_id,
+                        })
+                        # Mirror to shared dict so cancel_stream() can persist it (#1361 §B)
+                        if stream_id in STREAM_LIVE_TOOL_CALLS:
+                            STREAM_LIVE_TOOL_CALLS[stream_id].append({
+                                'name': name,
+                                'args': args if isinstance(args, dict) else {},
+                                'done': False,
+                                'tid': tool_call_id,
+                            })
+                        put('tool', {
+                            'event_type': 'tool.started',
+                            'name': name,
+                            'preview': None,
+                            'args': _tool_args_snapshot(args),
+                            'tid': tool_call_id,
+                        })
                     _tool_stats = meter().get_stats()
                     _tool_stats['session_id'] = session_id
                     _tool_stats['usage'] = _live_usage_snapshot()
@@ -3651,6 +3691,33 @@ def _run_agent_streaming(
             def on_tool_complete(tool_call_id, name, args, function_result):
                 try:
                     _record_live_tool_complete(tool_call_id, name, function_result)
+                    if tool_call_id and tool_call_id not in _live_tool_event_complete_ids:
+                        _live_tool_event_complete_ids.add(tool_call_id)
+                        result_snippet = _tool_result_snippet(function_result)
+                        for live_tc in reversed(_live_tool_calls):
+                            if live_tc.get('done'):
+                                continue
+                            if live_tc.get('tid') == tool_call_id or (not live_tc.get('tid') and live_tc.get('name') == name):
+                                live_tc['done'] = True
+                                live_tc['snippet'] = result_snippet
+                                break
+                        if stream_id in STREAM_LIVE_TOOL_CALLS:
+                            for shared_tc in reversed(STREAM_LIVE_TOOL_CALLS[stream_id]):
+                                if shared_tc.get('done'):
+                                    continue
+                                if shared_tc.get('tid') == tool_call_id or (not shared_tc.get('tid') and shared_tc.get('name') == name):
+                                    shared_tc['done'] = True
+                                    shared_tc['snippet'] = result_snippet
+                                    break
+                        _checkpoint_activity[0] += 1
+                        put('tool_complete', {
+                            'event_type': 'tool.completed',
+                            'name': name,
+                            'preview': result_snippet,
+                            'args': _tool_args_snapshot(args),
+                            'tid': tool_call_id,
+                            'is_error': False,
+                        })
                     _tool_stats = meter().get_stats()
                     _tool_stats['session_id'] = session_id
                     _tool_stats['usage'] = _live_usage_snapshot()
