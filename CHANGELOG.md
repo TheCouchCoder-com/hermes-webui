@@ -14,6 +14,12 @@
 ## [Unreleased]
 
 
+## [v0.51.103] — 2026-05-21 — Release CA (stage-396 — 1-PR follow-on — Settings → Plugins distinguishes exclusive/provider activation)
+
+### Fixed
+
+- **PR #2663** by @Fail-Safe (closes #2659) — Settings → Plugins panel now distinguishes exclusive plugins (memory providers, web backends, browser providers activated via `<category>.provider` config) from disabled-or-broken plugins. The `/api/plugins` payload gains `kind` + `activation` fields; cards render a new "Active (provider)" badge variant for exclusive activation instead of mislabeling these plugins as "Disabled / No registered lifecycle hooks". Purely additive — for users without an exclusive provider configured, the panel renders "Enabled" and "Disabled" badges exactly as before. The legacy `enabled` boolean is preserved on the payload for back-compat with older WebUI clients; new clients read `activation` first with a fallback. 3 new behavioral tests cover the exclusive, model-provider, and standalone code paths.
+
 ## [v0.51.102] — 2026-05-21 — Release BZ (stage-395 — 1-PR follow-on — capped CLI sidebar candidate window now keyed on last-activity not start time)
 
 ### Fixed

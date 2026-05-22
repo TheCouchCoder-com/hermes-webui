@@ -3596,6 +3596,13 @@ def _plugin_visibility_payload(manager=None) -> dict:
     four lifecycle hook names called out by the Settings visibility MVP. It
     never includes plugin source paths, callback names, callback reprs, or raw
     load errors because those can contain private filesystem details.
+
+    Exclusive plugins (e.g. memory providers) are activated through their
+    category's ``<category>.provider`` config, not through ``plugins.enabled``.
+    Their ``loaded.enabled`` stays False by design and they register hooks
+    outside the four visibility hooks below. The payload surfaces ``kind``
+    and ``activation`` so the panel can render them distinctly instead of
+    mislabeling them as "Disabled" with no hooks (issue #2659).
     """
     manager = manager or _get_plugin_manager_for_visibility()
     manager.discover_and_load(force=False)
@@ -3613,6 +3620,14 @@ def _plugin_visibility_payload(manager=None) -> dict:
         name = _clean_plugin_visibility_text(getattr(manifest, "name", "") or plugin_key, limit=120)
         version = _clean_plugin_visibility_text(getattr(manifest, "version", ""), limit=80)
         description = _clean_plugin_visibility_text(getattr(manifest, "description", ""), limit=280)
+        kind = _clean_plugin_visibility_text(getattr(manifest, "kind", "") or "standalone", limit=40)
+        enabled_flag = bool(getattr(loaded, "enabled", False))
+        if kind == "exclusive":
+            activation = "exclusive"
+        elif kind == "model-provider" and enabled_flag:
+            activation = "provider"
+        else:
+            activation = "enabled" if enabled_flag else "disabled"
         registered = []
         for hook in list(getattr(manifest, "provides_hooks", []) or []) + list(getattr(loaded, "hooks_registered", []) or []):
             hook_name = str(hook or "").strip()
@@ -3624,7 +3639,11 @@ def _plugin_visibility_payload(manager=None) -> dict:
             "key": plugin_key or name,
             "version": version,
             "description": description,
-            "enabled": bool(getattr(loaded, "enabled", False)),
+            # `enabled` is preserved for back-compat with older WebUI clients
+            # that key off it directly. New clients should prefer `activation`.
+            "enabled": enabled_flag,
+            "kind": kind,
+            "activation": activation,
             "hooks": registered,
         })
 

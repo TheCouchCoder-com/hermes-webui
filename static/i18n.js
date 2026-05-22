@@ -535,6 +535,8 @@ const LOCALES = {
     plugins_registered_hooks: 'Registered hooks',
     plugins_enabled: 'Enabled',
     plugins_disabled: 'Disabled',
+    plugins_active_provider: 'Active (provider)',
+    plugins_provider_no_hooks: 'Provider plugin — no agent-visibility hooks',
     plugins_load_failed: 'Failed to load plugins: ',
     settings_tab_system: 'System',
     settings_title: 'Settings',
@@ -1766,6 +1768,8 @@ const LOCALES = {
     plugins_registered_hooks: 'Registered hooks',  // TODO: translate
     plugins_enabled: 'Enabled',  // TODO: translate
     plugins_disabled: 'Disabled',  // TODO: translate
+    plugins_active_provider: 'Active (provider)',  // TODO: translate
+    plugins_provider_no_hooks: 'Provider plugin — no agent-visibility hooks',  // TODO: translate
     plugins_load_failed: 'Failed to load plugins: ',  // TODO: translate
     settings_tab_system: 'Sistema',
     settings_title: 'Impostazioni',
@@ -2989,6 +2993,8 @@ const LOCALES = {
     plugins_registered_hooks: 'Registered hooks',  // TODO: translate
     plugins_enabled: 'Enabled',  // TODO: translate
     plugins_disabled: 'Disabled',  // TODO: translate
+    plugins_active_provider: 'Active (provider)',  // TODO: translate
+    plugins_provider_no_hooks: 'Provider plugin — no agent-visibility hooks',  // TODO: translate
     plugins_load_failed: 'Failed to load plugins: ',  // TODO: translate
     settings_tab_system: 'システム',
     settings_title: '設定',
@@ -4729,6 +4735,8 @@ const LOCALES = {
     plugins_registered_hooks: 'Registered hooks',  // TODO: translate
     plugins_enabled: 'Enabled',  // TODO: translate
     plugins_disabled: 'Disabled',  // TODO: translate
+    plugins_active_provider: 'Active (provider)',  // TODO: translate
+    plugins_provider_no_hooks: 'Provider plugin — no agent-visibility hooks',  // TODO: translate
     plugins_load_failed: 'Failed to load plugins: ',  // TODO: translate
     settings_tab_system: 'System',
     status_updated: 'Updated',
@@ -5879,6 +5887,8 @@ const LOCALES = {
     plugins_registered_hooks: 'Registered hooks',  // TODO: translate
     plugins_enabled: 'Enabled',  // TODO: translate
     plugins_disabled: 'Disabled',  // TODO: translate
+    plugins_active_provider: 'Active (provider)',  // TODO: translate
+    plugins_provider_no_hooks: 'Provider plugin — no agent-visibility hooks',  // TODO: translate
     plugins_load_failed: 'Failed to load plugins: ',  // TODO: translate
     settings_tab_system: 'System',
     status_updated: 'Updated',
@@ -6763,6 +6773,8 @@ const LOCALES = {
     plugins_registered_hooks: 'Registered hooks',  // TODO: translate
     plugins_enabled: 'Enabled',  // TODO: translate
     plugins_disabled: 'Disabled',  // TODO: translate
+    plugins_active_provider: 'Active (provider)',  // TODO: translate
+    plugins_provider_no_hooks: 'Provider plugin — no agent-visibility hooks',  // TODO: translate
     plugins_load_failed: 'Failed to load plugins: ',  // TODO: translate
     settings_tab_system: 'System',
     status_updated: 'Updated',
@@ -7426,6 +7438,8 @@ const LOCALES = {
     plugins_registered_hooks: '已注册的挂钩',
     plugins_enabled: '已启用',
     plugins_disabled: '已禁用',
+    plugins_active_provider: '激活（提供方）',
+    plugins_provider_no_hooks: '提供方插件 — 无代理可见挂钩',
     plugins_load_failed: '加载插件失败：',
     workspace_empty_no_path: '未选择工作区。请在 设置 → 工作区 中设置工作区以浏览文件。',
     workspace_empty_dir: '此工作区为空。',
@@ -8686,6 +8700,8 @@ const LOCALES = {
     plugins_registered_hooks: '已註冊的鉤子',
     plugins_enabled: '已啟用',
     plugins_disabled: '已停用',
+    plugins_active_provider: '啟用中（提供者）',
+    plugins_provider_no_hooks: '提供者外掛 — 無代理可見鉤子',
     plugins_load_failed: '載入外掛失敗：',
     settings_tab_system: '系統',
     settings_title: '\u8a2d\u5b9a',
@@ -9995,6 +10011,8 @@ const LOCALES = {
     plugins_registered_hooks: 'Registered hooks',  // TODO: translate
     plugins_enabled: 'Enabled',  // TODO: translate
     plugins_disabled: 'Disabled',  // TODO: translate
+    plugins_active_provider: 'Active (provider)',  // TODO: translate
+    plugins_provider_no_hooks: 'Provider plugin — no agent-visibility hooks',  // TODO: translate
     plugins_load_failed: 'Failed to load plugins: ',  // TODO: translate
     settings_tab_system: 'Sistema',
     settings_title: 'Configurações',
@@ -11121,6 +11139,8 @@ const LOCALES = {
     plugins_registered_hooks: 'Registered hooks',  // TODO: translate
     plugins_enabled: 'Enabled',  // TODO: translate
     plugins_disabled: 'Disabled',  // TODO: translate
+    plugins_active_provider: 'Active (provider)',  // TODO: translate
+    plugins_provider_no_hooks: 'Provider plugin — no agent-visibility hooks',  // TODO: translate
     plugins_load_failed: 'Failed to load plugins: ',  // TODO: translate
     settings_tab_system: '시스템',
     settings_title: '설정',
@@ -12262,6 +12282,8 @@ const LOCALES = {
     plugins_registered_hooks: 'Registered hooks',  // TODO: translate
     plugins_enabled: 'Enabled',  // TODO: translate
     plugins_disabled: 'Disabled',  // TODO: translate
+    plugins_active_provider: 'Active (provider)',  // TODO: translate
+    plugins_provider_no_hooks: 'Provider plugin — no agent-visibility hooks',  // TODO: translate
     plugins_load_failed: 'Failed to load plugins: ',  // TODO: translate
     settings_tab_system: 'Système',
     settings_title: 'Paramètres',

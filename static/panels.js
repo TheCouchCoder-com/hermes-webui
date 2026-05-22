@@ -5895,20 +5895,42 @@ function _buildPluginCard(plugin){
   const card=document.createElement('div');
   card.className='provider-card plugin-card';
   card.dataset.plugin=(plugin&&plugin.key)||'';
+  // `activation` is the canonical state from /api/plugins (added in #2659).
+  // Fall back to the older `enabled` boolean when the field is missing so
+  // the panel still works against older backends.
+  const activation=(plugin&&typeof plugin.activation==='string')
+    ? plugin.activation
+    : (plugin&&plugin.enabled===false ? 'disabled' : 'enabled');
+  const isProvider=activation==='exclusive'||activation==='provider';
   const hooks=Array.isArray(plugin&&plugin.hooks)?plugin.hooks:[];
+  // Provider plugins (memory/web/browser/etc.) register hooks on their
+  // category's dispatcher, not the four agent-wide visibility hooks the
+  // payload filters to. Show an explanatory line instead of the generic
+  // "No registered lifecycle hooks" when the visibility-hook list is empty.
   const hookHtml=hooks.length
     ? hooks.map(h=>`<span class="plugin-hook-badge">${esc(h)}</span>`).join('')
-    : '<span class="plugin-hook-empty">'+t('plugins_no_hooks')+'</span>';
+    : '<span class="plugin-hook-empty">'+t(isProvider?'plugins_provider_no_hooks':'plugins_no_hooks')+'</span>';
   const version=(plugin&&plugin.version)?' · v'+esc(plugin.version):'';
   const desc=(plugin&&plugin.description)?esc(plugin.description):t('plugins_no_description');
-  const enabled=plugin&&plugin.enabled!==false;
+  let badgeText;
+  let badgeClass;
+  if(isProvider){
+    badgeText=t('plugins_active_provider');
+    badgeClass='plugin-card-badge-provider';
+  }else if(activation==='enabled'){
+    badgeText=t('plugins_enabled');
+    badgeClass='';
+  }else{
+    badgeText=t('plugins_disabled');
+    badgeClass='plugin-card-badge-disabled';
+  }
   card.innerHTML=`
     <div class="provider-card-header plugin-card-header">
       <div class="provider-card-info">
         <div class="provider-card-name">${esc((plugin&&plugin.name)||t('plugins_unnamed'))}</div>
         <div class="provider-card-meta">${esc((plugin&&plugin.key)||'plugin')}${version}</div>
       </div>
-      <span class="provider-card-badge ${enabled?'':'plugin-card-badge-disabled'}">${enabled?t('plugins_enabled'):t('plugins_disabled')}</span>
+      <span class="provider-card-badge ${badgeClass}">${badgeText}</span>
     </div>
     <div class="provider-card-body plugin-card-body">
       <div class="provider-card-hint">${desc}</div>
