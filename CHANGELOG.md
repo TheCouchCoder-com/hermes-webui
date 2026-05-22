@@ -12,9 +12,24 @@
 
 ## [Unreleased]
 
+## [v0.51.88] — 2026-05-18 — Release BL (stage-381 — 3-PR security + UX + lineage batch — session-bound CSRF tokens for unsafe browser requests + quoted-reply selected-text composer append + compression-continuation sidebar collapse)
+
+### Security
+
+- **PR #2484** by @franksong2702 (refs #1909) — Add session-bound CSRF token protection for authenticated unsafe browser requests, layered on top of the existing Origin/Referer same-origin checks. New helpers in `api/auth.py` derive a per-session HMAC token from the HttpOnly session cookie's server-side token (rotates on login, invalidates on logout/expiry). `api/routes.py` `_check_csrf()` now requires a valid `X-Hermes-CSRF-Token` (legacy `X-CSRF-Token` accepted) on authenticated POST/PATCH/DELETE/PUT requests with a browser Origin/Referer. `/api/auth/login` and `/api/csp-report` remain exempt so the bootstrap and CSP-report paths stay unauthenticated; non-browser callers (curl, MCP, agent) without Origin/Referer continue to bypass the token check. The shell template now injects the token via `__CSRF_TOKEN_JSON__` and the frontend attaches it to same-origin unsafe fetches.
+
+### Added
+
+- **PR #2485** by @franksong2702 (refs #2481) — Add a ChatGPT-style "Reply with selection" floating button that appears when the user selects visible chat transcript text. Clicking the button appends the selection into the composer as a Markdown blockquote, with repeat selections appending additional quoted blocks for multi-selection workflows. Frontend-only slice: no new backend routing, message schema, or persistence contract — the existing composer/send path is reused. New i18n labels/title/aria text across locales including `zh-Hant`.
+
+### Fixed
+
+- **PR #2493** by @dso2ng (closes #2489) — Collapse WebUI auto-compression continuations into the parent session's sidebar row so long-running conversations stay visually continuous. `static/sessions.js` `_sessionLineageKey()` now accepts a `sessionsById` map and recognises the `pre_compression_snapshot` parent-chain shape as compression lineage even when the continuation lacks explicit `_lineage_root_id` / `lineage_root_id` metadata. The existing child/fork guard is preserved; only the snapshot-parent case is folded back into a single sidebar row. Regression test covers the #2489 case where parent snapshot + continuation were both visible but the continuation carried only `parent_session_id`.
+
 ### Documentation
 
 - **PR #2483** by @franksong2702 (refs #2364) — Add a narrow README note for the community ARM64 Android AVF field report: Hermes Agent + WebUI running inside a Debian 12 VM on a mid-range Android phone with cloud-hosted inference. The note frames the report as a compatibility signal rather than an official support baseline or provider/model benchmark, and records practical mobile caveats around first-install compile time, Android tab reloads, and battery optimization.
+- **PR #2487** by @Michaelyklam (refs #1925) — Advance the runtime-adapter RFC after the Slice 3a cancel-control implementation shipped in v0.51.86. The RFC now marks Slice 3a as shipped and defines the next Slice 3b gate for approval/clarify controls: route them through `RuntimeAdapter.respond_approval(...)` / `respond_clarify(...)` only after pinning response-shape stability, bounded missing-prompt behavior, replayable request/resolution events, duplicate-response safety, and explicit non-goals for queue/goal and runner/sidecar work.
 
 ## [v0.51.87] — 2026-05-18 — Release BK (stage-380 — 2-PR Docker hygiene + CI gate — read-only mount tmpfs staging + Docker runtime smoke workflow + agent-source boundary inventory + writable-mount startup warning)
 

@@ -4,7 +4,7 @@
 - **Author:** @Michaelyklam
 - **Updated by:** @franksong2702
 - **Created:** 2026-05-11
-- **Revised:** 2026-05-16
+- **Revised:** 2026-05-17
 - **Tracking issue:** [#1925](https://github.com/nesquena/hermes-webui/issues/1925)
 
 ## Credit and Scope
@@ -26,7 +26,7 @@ process.
 
 This document is intentionally a reviewable spec and migration gate. It should be
 accepted before any implementation PR changes the streaming hot path, introduces a
-runner process, or moves cancellation / approval / clarify control flow.
+runner process, or moves a new approval / clarify / queue / goal control path.
 
 ## Problem
 
@@ -49,7 +49,7 @@ The immediate goal is not to build a sidecar. The immediate goal is to define th
 browser contract, classify current runtime state, and gate the first reversible
 journal slice.
 
-## Current Gate State — 2026-05-16
+## Current Gate State — 2026-05-17
 
 Slice 1 is now past the first active validation gate:
 
@@ -67,10 +67,23 @@ Slice 1 is now past the first active validation gate:
   status/replay/reattach behavior instead of keeping one live `/api/chat/stream`
   EventSource per active session.
 
-This evidence does not prove the future runner/sidecar path. It does mean the
-project should stop treating Slice 1 as purely passive observation and can move to
-Slice 2 planning: introduce the adapter seam over the still-legacy journaled path
-without moving execution ownership yet.
+This evidence did not prove the future runner/sidecar path. It did unblock the
+adapter-seam work:
+
+- #2416 shipped the Slice 2 RuntimeAdapter seam contract.
+- #2424 shipped the default-off `legacy-journal` RuntimeAdapter seam in
+  v0.51.81.
+- #2438 shipped the response-shape parity follow-up in v0.51.83, keeping the
+  adapter flag from expanding `/api/chat/start`'s public JSON contract.
+- #2469 shipped the Slice 3a cancel-control gate in v0.51.85.
+- #2479 shipped the first Slice 3a implementation in v0.51.86, routing Stop
+  Generation through `RuntimeAdapter.cancel_run(...)` only when
+  `HERMES_WEBUI_RUNTIME_ADAPTER=legacy-journal` is enabled.
+
+The next gate is not the runner/sidecar yet. It is the next control migration
+gate: approval and clarify must be specified together before implementation,
+because both are callback-backed, user-mediated pauses in the active agent loop
+and have the same state-lifetime/replay hazards.
 
 ## Goals
 
@@ -407,12 +420,12 @@ execution-survives-WebUI-restart gate remains deferred to Slice 4.
 
 ### Slice 3: Control migration
 
-Status as of 2026-05-17: not started. Slice 3 should begin with cancel only.
-Cancel is the smallest control-plane migration because it already has one clear
+Status as of 2026-05-17: Slice 3a cancel routing shipped in v0.51.86 via #2479.
+Cancel was the smallest control-plane migration because it already had one clear
 browser affordance, one active-run target, and an existing legacy handler to
-delegate to. Approval, clarify, queue/continue, and goal are intentionally held
-behind a successful cancel-control slice because they carry more callback and
-state-lifetime risk.
+delegate to. Approval, clarify, queue/continue, and goal remain intentionally
+held behind separate gates because they carry more callback and state-lifetime
+risk.
 
 Scope:
 
@@ -473,6 +486,71 @@ Non-goals for Slice 3a:
 - no queue/continue or goal migration;
 - no runner process, sidecar, or execution-survives-WebUI-restart claim;
 - no public `/api/chat/start` response-shape expansion for adapter-only fields.
+
+#### Slice 3b: Approval and clarify control gate
+
+The next control migration should cover approval and clarify together as one
+gate, but not necessarily one implementation commit. They are distinct browser
+widgets, but architecturally they share the same high-risk shape: the agent loop
+pauses on a live callback, the browser presents a user-mediated decision, and the
+runtime must resume from a bounded response without orphaning callback state.
+
+During Slice 3b, `RuntimeAdapter.respond_approval(...)` and
+`RuntimeAdapter.respond_clarify(...)` remain protocol translators over the
+existing legacy callback paths. They must not create a second approval queue,
+clarify queue, callback registry, pending-prompt table, or runner-owned wait loop
+inside the main WebUI process.
+
+Acceptance properties:
+
+1. **Same visible result as legacy approval / clarify.** Existing approval cards,
+   clarify prompts, choices, denial paths, and resumed-agent behavior remain
+   unchanged for users. The adapter flag changes only the route/control entry
+   point.
+2. **Stable response contracts.** Existing approval and clarify HTTP endpoints
+   keep their current browser-facing response shapes. Adapter-only fields such as
+   internal status strings, callback ids, or active-control metadata must not leak
+   into public responses unless a later RFC explicitly expands the contract.
+3. **Bounded missing-prompt behavior.** Responding to a non-existent, already
+   resolved, stale, or expired approval/clarify id returns a bounded
+   `ControlResult` such as `not-active` / `expired` / `unsupported`; it must not
+   block the request, recreate a callback, or synthesize a success path.
+4. **Replayable request and resolution events.** Approval/clarify request and
+   resolution events remain journal-visible so reload/reconnect can show the last
+   safe state. Slice 3b does not have to make pending approvals survive a WebUI
+   process restart while execution is still in-process; that property belongs to
+   the runner/sidecar gate.
+5. **No new runtime-surrogate state.** The implementation must not add new
+   process-local global maps, long-lived queues, or callback registries under
+   adapter-specific names. If the existing legacy callback path needs more state
+   to satisfy the route, stop and amend this RFC before landing code.
+6. **Idempotent duplicate responses.** Repeating the same approve/deny/clarify
+   response is safe: the runtime accepts at most one response for the pending
+   request, records one resolution event, and later attempts return bounded
+   not-active/expired status without resuming the run twice.
+
+Suggested regression coverage:
+
+- route/source tests proving flagged approval and clarify response paths call the
+  adapter seam while the default path remains the existing legacy handler;
+- adapter unit tests proving `respond_approval` and `respond_clarify` delegate
+  exactly once, return accepted/not-active/unsupported `ControlResult` values, and
+  never expose unsafe internal strings to the browser response;
+- journal/session-load assertions that request and resolution events remain
+  replayable and renderable after reconnect;
+- duplicate-response tests for approval and clarify ids;
+- existing approval/clarify UI/static tests under default legacy mode to prove no
+  browser contract drift.
+
+Non-goals for Slice 3b:
+
+- no queue/continue or goal migration;
+- no runner process, sidecar, or execution-survives-WebUI-restart claim;
+- no persistence of pending approval/clarify callbacks outside the current legacy
+  callback model;
+- no change to approval risk classification, allowed choices, or clarify prompt
+  UX;
+- no public chat-start/status response-shape expansion for adapter-only fields.
 
 ### Slice 4: Runner process / sidecar boundary
 
