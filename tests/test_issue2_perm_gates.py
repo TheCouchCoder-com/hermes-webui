@@ -36,6 +36,18 @@ class StubHandler:
             origin = 'http://127.0.0.1:8787'
         if origin:
             hdr['Origin'] = origin
+        # Upstream v0.51.88 (#1909) added a session-bound CSRF token check
+        # on top of the Origin/Host comparison. Derive the matching token
+        # from the supplied session cookie so perm-gate tests exercise the
+        # permission path, not the CSRF guard.
+        if cookie and '=' in cookie:
+            cookie_val = cookie.split('=', 1)[1]
+            try:
+                token = auth.csrf_token_for_session(cookie_val)
+            except Exception:
+                token = None
+            if token:
+                hdr[auth.CSRF_HEADER_NAME] = token
         self.headers = hdr
         self.rfile = io.BytesIO(self._body_bytes)
         self.client_address = (client_ip, 12345)

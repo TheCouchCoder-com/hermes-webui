@@ -4473,7 +4473,7 @@ async function applyUpdates(target){
   // so a fresh retry starts clean.
   if(forceBtnReset){forceBtnReset.style.display='none';}
   try{
-    const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify({target})});
+    const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify({target}),timeoutMs:120000});
     if(!res.ok){
       _showUpdateError(target,res);
       resetApplyButton(0);

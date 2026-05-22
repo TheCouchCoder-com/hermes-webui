@@ -636,7 +636,7 @@
   .app-titlebar-title{font-size:12px;font-weight:600;color:var(--text);letter-spacing:-.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:60vw;}
   .app-titlebar-sub{font-size:10px;color:var(--muted);background:var(--hover-bg);padding:2px 7px;border-radius:4px;font-family:'SF Mono',ui-monospace,monospace;white-space:nowrap;flex-shrink:0;}
   .app-titlebar-sub[hidden]{display:none;}
-  .app-titlebar-hamburger{display:none;width:32px;height:32px;flex-shrink:0;}
+  .app-titlebar-hamburger,.app-titlebar-spacer{display:none;width:32px;height:32px;flex-shrink:0;}
   .app-titlebar-hamburger{-webkit-app-region:no-drag;align-items:center;justify-content:center;background:none;border:none;color:var(--muted);border-radius:8px;cursor:pointer;padding:0;-webkit-tap-highlight-color:transparent;transition:background-color .15s,color .15s;}
   .app-titlebar-hamburger:hover{background:var(--hover-bg);color:var(--text);}
   .titlebar-profile-wrap{position:relative;flex:0 1 auto;min-width:0;-webkit-app-region:no-drag;}
@@ -1798,7 +1798,7 @@
     .sidebar .resize-handle{display:none;}
     /* Hamburger button (in app titlebar on mobile) */
     .app-titlebar{justify-content:space-between;}
-    .app-titlebar-hamburger{display:flex;}
+    .app-titlebar-hamburger,.app-titlebar-spacer{display:flex;}
     /* Titlebar profile chip: collapse to icon-only on phone widths. */
     .titlebar-profile-chip{max-width:32px;padding:2px 6px;}
     .titlebar-profile-chip .composer-profile-label{display:none;}

@@ -55,7 +55,14 @@ class TestComposerPlaceholderProfile:
         src = _src("boot.js")
         fetch_idx = src.find("api('/api/profile/active')")
         assert fetch_idx >= 0, "boot.js should fetch the active profile during boot"
-        label_idx = src.find("const profileLabel=$('profileChipLabel');", fetch_idx)
+        # Fork PR #1 added a titlebar profile chip and routes the composer
+        # label through the shared _setProfileChipLabel() helper instead of
+        # touching #profileChipLabel directly. Accept either pattern so the
+        # upstream assertion intent (chip label is synced after the profile
+        # fetch) is met by our two-chip implementation.
+        label_idx = src.find("_setProfileChipLabel(S.activeProfile||'default')", fetch_idx)
+        if label_idx < 0:
+            label_idx = src.find("const profileLabel=$('profileChipLabel');", fetch_idx)
         assert label_idx >= 0, "profile chip sync should follow active profile fetch"
         assert "applyBotName();" in src[fetch_idx:label_idx], (
             "boot should apply the profile-aware assistant name after active profile resolution"

@@ -34,6 +34,18 @@ class StubHandler:
         hdr['Content-Length'] = str(len(self._body_bytes))
         hdr['Host'] = '127.0.0.1:8787'
         hdr['Origin'] = origin or 'http://127.0.0.1:8787'
+        # Upstream v0.51.88 (#1909) added a session-bound CSRF requirement
+        # for browser-unsafe POST/PATCH/DELETE. Derive the CSRF token from
+        # the supplied session cookie so admin RBAC tests exercise the RBAC
+        # path, not the CSRF guard.
+        if cookie and '=' in cookie:
+            cookie_val = cookie.split('=', 1)[1]
+            try:
+                token = auth.csrf_token_for_session(cookie_val)
+            except Exception:
+                token = None
+            if token:
+                hdr[auth.CSRF_HEADER_NAME] = token
         self.headers = hdr
         self.rfile = io.BytesIO(self._body_bytes)
         self.client_address = (client_ip, 12345)
