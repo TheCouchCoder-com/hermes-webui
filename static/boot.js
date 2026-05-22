@@ -82,6 +82,7 @@ function _workspacePanelEls(){
     layout: document.querySelector('.layout'),
     panel: document.querySelector('.rightpanel'),
     toggleBtn: $('btnWorkspacePanelToggle'),
+    edgeToggleBtn: $('btnWorkspacePanelEdgeToggle'),
     collapseBtn: $('btnCollapseWorkspacePanel'),
   };
 }
@@ -100,7 +101,7 @@ function _setWorkspacePanelMode(mode){
   // Persist open/closed across refreshes (browse/preview → open; closed → closed)
   // Do NOT overwrite the user's "keep open" preference — only track runtime state
   // so that toggleWorkspacePanel(false) from the toolbar doesn't clear the setting.
-  localStorage.setItem('hermes-webui-workspace-panel', open ? 'open' : 'closed');
+  try{localStorage.setItem('hermes-webui-workspace-panel', open ? 'open' : 'closed');}catch(_){}
   layout.classList.toggle('workspace-panel-collapsed',!open);
   if(_isCompactWorkspaceViewport()){
     panel.classList.toggle('mobile-open',open);
@@ -176,7 +177,7 @@ function _setButtonTooltip(btn, text){
 }
 
 function syncWorkspacePanelUI(){
-  const {layout,panel,toggleBtn,collapseBtn}= _workspacePanelEls();
+  const {layout,panel,toggleBtn,edgeToggleBtn,collapseBtn}= _workspacePanelEls();
   if(!layout||!panel)return;
   const desktopOpen=_workspacePanelMode!=='closed';
   const mobileOpen=panel.classList.contains('mobile-open');
@@ -190,6 +191,12 @@ function syncWorkspacePanelUI(){
     _setButtonTooltip(toggleBtn, isOpen?'Hide workspace panel':'Show workspace panel');
     toggleBtn.disabled=!canBrowse;
   }
+  if(edgeToggleBtn){
+    edgeToggleBtn.classList.toggle('active',isOpen);
+    edgeToggleBtn.setAttribute('aria-expanded',isOpen?'true':'false');
+    _setButtonTooltip(edgeToggleBtn, isOpen?'Hide workspace panel':'Show workspace panel');
+    edgeToggleBtn.disabled=!canBrowse;
+  }
   if(collapseBtn){
     _setButtonTooltip(collapseBtn, isCompact?'Close workspace panel':'Hide workspace panel');
   }
@@ -201,11 +208,8 @@ function syncWorkspacePanelUI(){
   const clearBtn=$('btnClearPreview');
   if(clearBtn){
     clearBtn.disabled=!isOpen;
-    _setButtonTooltip(clearBtn, hasPreview?'Close preview':'Hide workspace panel');
-    // On desktop, only show the X button when a file preview is open.
-    // In browse mode the chevron (btnCollapseWorkspacePanel) already serves
-    // as the close control, so showing both produces a duplicate X.
-    if(!isCompact) clearBtn.style.display=hasPreview?'':'none';
+    _setButtonTooltip(clearBtn, hasPreview?'Close preview':'Close');
+    if(!isCompact) clearBtn.style.display='';
   }
 }
 
@@ -279,8 +283,34 @@ function expandSidebar(){
   }catch(_){}
   _syncSidebarAria();
 })();
+// ── Boot-time tab visibility ────────────────────────────────────────────────
+// Apply hidden tabs from localStorage. The primary flash-prevention is an
+// inline <script> in index.html (after sidebar-nav) that runs synchronously
+// before first paint. This IIFE is a secondary fallback: it ensures consistency
+// after panels.js is loaded and handles the active-tab switch. No-op if
+// panels.js hasn't loaded yet (typeof guard).
+(function _restoreTabVisibility(){
+  try{
+    if(typeof _applyTabVisibility==='function'&&typeof _getHiddenTabs==='function'){
+      _applyTabVisibility(_getHiddenTabs());
+    }
+    var active=document.querySelector('.rail .rail-btn.nav-tab.active[data-panel]')
+               ||document.querySelector('.sidebar-nav .nav-tab.active[data-panel]');
+    if(active&&active.classList.contains('nav-tab-hidden')){
+      var chatBtn=document.querySelector('.rail .rail-btn.nav-tab[data-panel="chat"]');
+      if(chatBtn)chatBtn.classList.add('active');
+      if(active)active.classList.remove('active');
+    }
+  }catch(_){}
+})();
 function toggleMobileFiles(){
   toggleWorkspacePanel();
+}
+function closeMobileWorkspacePanelFromChat(e){
+  if(!_isCompactWorkspaceViewport()||_workspacePanelMode==='closed') return;
+  const panel=document.querySelector('.rightpanel');
+  if(panel&&panel.contains(e.target)) return;
+  closeWorkspacePanel();
 }
 function toggleWorkspacePanel(force){
   const {panel}= _workspacePanelEls();
@@ -323,6 +353,7 @@ $('btnSend').onclick=()=>{
   }
   send();
 };
+$('mainChat')?.addEventListener('pointerdown', closeMobileWorkspacePanelFromChat);
 $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInput').value='';$('fileInput').click();};
 
 // ── Voice input (Web Speech API + MediaRecorder fallback) ───────────────────
@@ -896,6 +927,25 @@ function clearPreview(opts={}){
 }
 $('btnClearPreview').onclick=handleWorkspaceClose;
 // workspacePath click handler removed -- use topbar workspace chip dropdown instead
+function _applySessionContextMetadataUpdate(data){
+  if(!S.session||!data||!data.session)return;
+  S.session.context_length=data.session.context_length||0;
+  S.session.threshold_tokens=data.session.threshold_tokens||0;
+  S.session.last_prompt_tokens=data.session.last_prompt_tokens||0;
+  if(typeof _syncCtxIndicator==='function'){
+    const u=S.lastUsage||{};
+    const _pick=(latest,stored,dflt=0)=>latest!=null?latest:(stored!=null?stored:dflt);
+    _syncCtxIndicator({
+      input_tokens:_pick(u.input_tokens,S.session.input_tokens),
+      output_tokens:_pick(u.output_tokens,S.session.output_tokens),
+      estimated_cost:_pick(u.estimated_cost,S.session.estimated_cost),
+      context_length:S.session.context_length||0,
+      last_prompt_tokens:_pick(u.last_prompt_tokens,S.session.last_prompt_tokens),
+      threshold_tokens:S.session.threshold_tokens||0,
+    });
+  }
+}
+
 $('modelSelect').onchange=async()=>{
   if(!S.session)return;
   const selectedModel=$('modelSelect').value;
@@ -905,7 +955,11 @@ $('modelSelect').onchange=async()=>{
   if(typeof closeModelDropdown==='function') closeModelDropdown();
   if(typeof _writePersistedModelState==='function') _writePersistedModelState(modelState.model,modelState.model_provider);
   else try{localStorage.setItem('hermes-webui-model',modelState.model)}catch{}
-  await api('/api/session/update',{method:'POST',body:JSON.stringify({
+  // Clarify scope: composer model changes are session-local, not the global default.
+  if(typeof showToast==='function'){
+    showToast(t('model_scope_toast')||'Applies to this conversation from your next message.', 3000);
+  }
+  const data=await api('/api/session/update',{method:'POST',body:JSON.stringify({
     session_id:S.session.session_id,
     workspace:S.session.workspace,
     model:modelState.model,
@@ -915,10 +969,7 @@ $('modelSelect').onchange=async()=>{
   S.session.model_provider=modelState.model_provider||null;
   if(typeof syncModelChip==='function') syncModelChip();
   syncTopbar();
-  // Clarify scope: composer model changes are session-local, not the global default.
-  if(typeof showToast==='function'){
-    showToast(t('model_scope_toast')||'Applies to this conversation from your next message.', 3000);
-  }
+  _applySessionContextMetadataUpdate(data);
   // Warn if selected model belongs to a different provider than what Hermes is configured for
   if(typeof _checkProviderMismatch==='function'){
     const warn=_checkProviderMismatch(selectedModel);
@@ -971,6 +1022,11 @@ let _imeComposing=false;
 })();
 function _isImeEnter(e){return e.isComposing||e.keyCode===229||_imeComposing;}
 window._isImeEnter=_isImeEnter;
+function _isVirtualKeyboardLikelyOpen(){
+  const vv=window.visualViewport;
+  if(!vv||!window.innerHeight)return true;
+  return window.innerHeight-vv.height>120;
+}
 $('msg').addEventListener('keydown',e=>{
   // Autocomplete navigation when dropdown is open
   const dd=$('cmdDropdown');
@@ -988,13 +1044,14 @@ $('msg').addEventListener('keydown',e=>{
     }
   }
   // Send key: respect user preference.
-  // On touch-primary devices (software keyboard), default to Enter = newline
-  // since there's no physical Shift key. Users send via the Send button.
+  // On touch-primary devices with the software keyboard open, default to
+  // Enter = newline since there's no physical Shift key. Hardware keyboards on
+  // tablets keep desktop behavior when the viewport is not keyboard-shrunk.
   // The 'ctrl+enter' setting also uses this behavior (Enter = newline).
   // Users can override in Settings by explicitly choosing 'enter' mode.
   if(e.key==='Enter'){
     if(_isImeEnter(e)){return;}
-    const _mobileDefault=matchMedia('(pointer:coarse)').matches&&window._sendKey==='enter';
+    const _mobileDefault=matchMedia('(pointer:coarse)').matches&&window._sendKey==='enter'&&_isVirtualKeyboardLikelyOpen();
     if(window._sendKey==='ctrl+enter'||_mobileDefault){
       if(e.ctrlKey||e.metaKey){e.preventDefault();send();}
     } else {
@@ -1095,6 +1152,11 @@ document.querySelectorAll('.suggestion').forEach(btn=>{
   btn.onclick=()=>{$('msg').value=btn.dataset.msg;send();};
 });
 
+function applyEmptyStateSuggestionPref(){
+  if(!$('emptyState')) return;
+  $('emptyState').classList.toggle('no-suggestions',window._hideEmptyStateSuggestions===true);
+}
+
 window.addEventListener('resize',()=>{
   _syncWorkspacePanelInlineWidth();
   syncWorkspacePanelState();
@@ -1168,9 +1230,12 @@ const _SKINS=[
   {name:'Sisyphus', colors:['#A78BFA','#8B5CF6','#7C3AED']},
   {name:'Charizard',colors:['#FB923C','#F97316','#EA580C']},
   {name:'Sienna',   colors:['#D97757','#C06A49','#9A523A']},
+  {name:'Catppuccin',colors:['#CBA6F7','#B4BEFE','#8839EF']},
+  {name:'Nous',     colors:['#4682B4','#3A6E9A','#2C5F88']},
+  {name:'Geist Contrast', value:'geist-contrast', colors:['#000000','#ffffff','#FFF175']},
 ];
 const _VALID_THEMES=new Set((_THEMES||[]).map(t=>t.value));
-const _VALID_SKINS=new Set((_SKINS||[]).map(s=>s.name.toLowerCase()));
+const _VALID_SKINS=new Set((_SKINS||[]).map(s=>(s.value||s.name).toLowerCase()));
 const _LEGACY_THEME_MAP={
   slate:{theme:'dark',skin:'slate'},
   solarized:{theme:'dark',skin:'poseidon'},
@@ -1190,7 +1255,7 @@ function _normalizeAppearance(theme,skin){
   return {theme:nextTheme,skin:nextSkin};
 }
 
-// Sync <meta name="theme-color"> with the active theme's computed --bg.
+// Sync <meta name="theme-color"> with the active theme's app chrome color.
 // This surfaces the WebUI's exact theme background to:
 //   1. Mobile Safari status bar (the prefers-color-scheme media variants in index.html
 //      cover the pre-load case; this updater handles user-toggled changes mid-session).
@@ -1198,12 +1263,12 @@ function _normalizeAppearance(theme,skin){
 //   3. Native WKWebView wrappers (e.g. hermes-swift-mac) that read this attribute as
 //      the source of truth for AppKit chrome (tab bar, title bar, traffic-light area)
 //      instead of pixel-sampling — overlay-resistant and IPC-free.
-// Reading getComputedStyle(html).getPropertyValue('--bg') picks up the active skin
+// Reading getComputedStyle(html).getPropertyValue('--sidebar') picks up the active skin
 // (Default, Sienna, Sisyphus, Charizard, etc.) so each skin's distinct paint reaches
 // the meta tag.
 function _syncThemeColorMeta(){
   try{
-    const bg=getComputedStyle(document.documentElement).getPropertyValue('--bg').trim();
+    const bg=getComputedStyle(document.documentElement).getPropertyValue('--sidebar').trim();
     if(!bg) return;
     const known=document.getElementById('hermes-theme-color');
     if(known){
@@ -1332,30 +1397,25 @@ function _buildSkinPicker(activeSkin){
   if(!grid) return;
   grid.innerHTML='';
   for(const skin of _SKINS){
-    const key=skin.name.toLowerCase();
+    const key=(skin.value||skin.name).toLowerCase();
     const btn=document.createElement('button');
     btn.type='button';
     btn.className='skin-pick-btn';
     btn.dataset.skinVal=key;
     btn.style.cssText='border:1px solid var(--border2);border-radius:8px;padding:8px 4px;text-align:center;cursor:pointer;background:none;transition:all .15s';
-    btn.onclick=()=>_pickSkin(skin.name);
+    btn.onclick=()=>_pickSkin(key);
     const dots=skin.colors.map(c=>`<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${c}"></span>`).join('');
-    btn.innerHTML=`<div style="display:flex;gap:3px;justify-content:center;margin-bottom:4px">${dots}</div><span style="font-size:11px;color:var(--text)">${skin.name}</span>`;
+    const label=skin.label||skin.name;
+    btn.innerHTML=`<div style="display:flex;gap:3px;justify-content:center;margin-bottom:4px">${dots}</div><span style="font-size:11px;color:var(--text)">${label}</span>`;
     grid.appendChild(btn);
   }
   _syncSkinPicker((activeSkin||'default').toLowerCase());
 }
 
 function applyBotName(){
-  // Prefer profile name over global bot_name for personalised placeholder.
-  // If activeProfile is set and not 'default', use it (capitalised).
-  // Falls back to window._botName (global bot_name setting) or 'Hermes'.
-  let name;
-  if(S.activeProfile && S.activeProfile!=='default'){
-    name=S.activeProfile.charAt(0).toUpperCase()+S.activeProfile.slice(1);
-  }else{
-    name=window._botName||'Hermes';
-  }
+  // The saved assistant name applies to the default profile only.
+  // Non-default profiles use their own profile names.
+  const name=assistantDisplayName();
   document.title=name;
   const sidebarH1=document.querySelector('.sidebar-header h1');
   if(sidebarH1) sidebarH1.textContent=name;
@@ -1375,8 +1435,13 @@ function applyBotName(){
     _bootSettings=s;
     window._sendKey=s.send_key||'enter';
     window._showTokenUsage=!!s.show_token_usage;
+    window._showQuotaChip=s.show_quota_chip===true;
+    window._hideEmptyStateSuggestions=s.hide_empty_state_suggestions===true;
+    applyEmptyStateSuggestionPref();
     window._showTps=!!s.show_tps;
+    window._fadeTextEffect=!!s.fade_text_effect;
     window._showCliSessions=!!s.show_cli_sessions;
+    window._showPreviousMessagingSessions=!!s.show_previous_messaging_sessions;
     window._soundEnabled=!!s.sound_enabled;
     window._notificationsEnabled=!!s.notifications_enabled;
     // Persist default workspace so the blank new-chat page can show it
@@ -1386,16 +1451,72 @@ function applyBotName(){
     window._showThinking=s.show_thinking!==false;
     window._simplifiedToolCalling=s.simplified_tool_calling!==false;
     window._sidebarDensity=(s.sidebar_density==='detailed'?'detailed':'compact');
+    window._pinnedSessionsLimit=parseInt(s.pinned_sessions_limit||3,10)||3;
     window._busyInputMode=(s.busy_input_mode||'queue');
     window._sessionEndlessScrollEnabled=!!s.session_endless_scroll;
     window._botName=s.bot_name||'Hermes';
-    if(s.default_model) window._defaultModel=s.default_model;
+    if(s.default_model_provider) window._activeProvider=s.default_model_provider;
+    if(s.default_model){
+      window._defaultModel=s.default_model;
+      const sel=$('modelSelect');
+      if(sel&&typeof _applyModelToDropdown==='function'){
+        // Fresh page boot must prefer the profile/server default over stale
+        // browser-persisted model state. A restored session can still apply its
+        // own persisted model later through loadSession().
+        if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
+        else {
+          localStorage.removeItem('hermes-webui-model');
+          localStorage.removeItem('hermes-webui-model-state');
+        }
+        const existingDefaultOpt=Array.from(sel.options).find(o=>o.value===s.default_model);
+        if(existingDefaultOpt&&window._activeProvider&&!existingDefaultOpt.dataset.provider){
+          existingDefaultOpt.dataset.provider=window._activeProvider;
+        }
+        if(!existingDefaultOpt){
+          const opt=document.createElement('option');
+          opt.value=s.default_model;
+          opt.textContent=typeof getModelLabel==='function'?getModelLabel(s.default_model):s.default_model;
+          opt.dataset.custom='1';
+          opt.dataset.provider=window._activeProvider||'';
+          sel.querySelectorAll('option[data-custom]').forEach(o=>o.remove());
+          sel.appendChild(opt);
+        }
+        _applyModelToDropdown(s.default_model,sel,window._activeProvider||null);
+      }
+    }
     window._sessionJumpButtonsEnabled=!!s.session_jump_buttons;
-    const appearance=_normalizeAppearance(s.theme,s.skin);
-    localStorage.setItem('hermes-theme',appearance.theme);
-    _applyTheme(appearance.theme);
-    localStorage.setItem('hermes-skin',appearance.skin);
-    _applySkin(appearance.skin);
+    // Reconcile appearance: prefer localStorage (what the user last saw) over
+    // the server.  If they diverge (e.g. a previous autosave POST failed),
+    // push the localStorage values back to the server so settings.json stays
+    // in sync without ever clobbering the user's chosen theme/skin.
+    //
+    // Caveat: the pre-paint inline script in index.html normalises empty
+    // localStorage into 'dark'/'default' BEFORE this code runs, so a truly
+    // empty (new-browser) state is indistinguishable from a user who chose
+    // the defaults.  To avoid blocking server→client sync on first visit we
+    // only let localStorage override the server when it carries an explicit
+    // user-selectable theme value or a NON-DEFAULT skin.  That keeps the
+    // server in charge for empty first-visit state while preserving explicit
+    // light/dark/system choices after a failed autosave.
+    const srvAppearance=_normalizeAppearance(s.theme,s.skin);
+    const lsTheme=(localStorage.getItem('hermes-theme')||'').trim().toLowerCase();
+    const lsSkin=(localStorage.getItem('hermes-skin')||'').trim().toLowerCase();
+    const lsAppearance=_normalizeAppearance(lsTheme||null,lsSkin||null);
+    const lsHasExplicitSkin=lsSkin&&lsSkin!=='default';
+    const lsHasExplicitTheme=lsTheme&&['system','light','dark'].includes(lsTheme);
+    const theme=lsHasExplicitTheme?lsAppearance.theme:srvAppearance.theme;
+    const skin=lsHasExplicitSkin?lsAppearance.skin:srvAppearance.skin;
+    localStorage.setItem('hermes-theme',theme);
+    _applyTheme(theme);
+    localStorage.setItem('hermes-skin',skin);
+    _applySkin(skin);
+    // Reconcile: if localStorage and server disagree, push localStorage
+    // values to the server so the next refresh won't revert.
+    if((lsHasExplicitTheme||lsHasExplicitSkin)&&(theme!==srvAppearance.theme||skin!==srvAppearance.skin)){
+      try{
+        api('/api/settings',{method:'POST',body:JSON.stringify({theme,skin})});
+      }catch(_){}
+    }
     const fontSize=(s.font_size||localStorage.getItem('hermes-font-size')||'default');
     localStorage.setItem('hermes-font-size',fontSize);
     _applyFontSize(fontSize);
@@ -1406,13 +1527,16 @@ function applyBotName(){
       setLocale(_lang);
       if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();
     }
-    applyBotName();
     // TTS: apply enabled state on boot so buttons show/hide correctly (#499)
     if(typeof _applyTtsEnabled==='function') _applyTtsEnabled(localStorage.getItem('hermes-tts-enabled')==='true');
   }catch(e){
     window._sendKey='enter';
     window._showTokenUsage=false;
+    window._showQuotaChip=false;
+    window._hideEmptyStateSuggestions=false;
+    applyEmptyStateSuggestionPref();
     window._showTps=false;
+    window._fadeTextEffect=false;
     window._showCliSessions=false;
     window._soundEnabled=false;
     window._notificationsEnabled=false;
@@ -1421,6 +1545,7 @@ function applyBotName(){
     window._simplifiedToolCalling=true;
     window._sessionJumpButtonsEnabled=false;
     window._sidebarDensity='compact';
+    window._pinnedSessionsLimit=3;
     window._busyInputMode='queue';
     window._sessionEndlessScrollEnabled=false;
     window._botName='Hermes';
@@ -1432,7 +1557,6 @@ function applyBotName(){
       setLocale(_lang);
       if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();
     }
-    applyBotName();
     if(typeof _applyTtsEnabled==='function') _applyTtsEnabled(localStorage.getItem('hermes-tts-enabled')==='true');
   }
   // Non-blocking update check (fire-and-forget, once per tab session)
@@ -1444,6 +1568,7 @@ function applyBotName(){
   }
   // Fetch active profile
   try{const p=await api('/api/profile/active');S.activeProfile=p.name||'default';}catch(e){S.activeProfile='default';}
+  applyBotName();
   // Update profile chip labels (composer + titlebar) immediately and reveal
   // the titlebar chip wrap once we know the active profile.
   _setProfileChipLabel(S.activeProfile||'default');
@@ -1473,12 +1598,15 @@ function applyBotName(){
   // Fetch available models without blocking session restore. The static HTML
   // options are enough for first paint; the dynamic provider list can settle
   // after the saved session is visible.
-  const _modelDropdownReady=populateModelDropdown().then(()=>{
+  const _hydrateBootModelDropdown=()=>populateModelDropdown().then(()=>{
     const savedState=(typeof _readPersistedModelState==='function')
       ? _readPersistedModelState()
       : (localStorage.getItem('hermes-webui-model')?{model:localStorage.getItem('hermes-webui-model'),model_provider:null}:null);
     const savedModel=savedState&&savedState.model;
-    if(savedModel && $('modelSelect')){
+    // Guardrail: prefer profile/server default on boot when available.
+    // Persisted browser model state should not override a valid default model.
+    const allowBootSavedModelOverride=!window._defaultModel;
+    if(savedModel && $('modelSelect') && allowBootSavedModelOverride){
       const applied=(typeof _applyModelToDropdown==='function')
         ? _applyModelToDropdown(savedModel,$('modelSelect'),savedState.model_provider||null)
         : null;
@@ -1486,19 +1614,34 @@ function applyBotName(){
       // If the value didn't take (model not in list), clear the bad pref
       if(!applied&&$('modelSelect').value!==savedModel){
         if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
-        else localStorage.removeItem('hermes-webui-model');
+        else {
+          localStorage.removeItem('hermes-webui-model');
+          localStorage.removeItem('hermes-webui-model-state');
+        }
       }
       else if(typeof syncModelChip==='function') syncModelChip();
     }
     if(S.session) syncTopbar();
   }).catch(()=>{});
-  window._modelDropdownReady=_modelDropdownReady;
-  // Pre-load workspace list so sidebar name is correct from first render.
+  const _startBootModelDropdown=()=>{
+    const ready=window._modelDropdownReady;
+    if(ready&&typeof ready.then==='function') return ready;
+    const next=_hydrateBootModelDropdown();
+    window._modelDropdownReady=next;
+    return next;
+  };
+  window._modelDropdownReady=null;
+  window._ensureModelDropdownReady=_startBootModelDropdown;
+  // Start independent boot fetches without holding the conversation list behind
+  // them. The sidebar can render from /api/sessions while workspace/onboarding
+  // metadata settles in parallel.
+  const _workspaceListReady=loadWorkspaceList();
+  const _onboardingReady=_bootSettings.onboarding_completed?Promise.resolve(false):loadOnboardingWizard();
   // Render the session list before restoring the saved conversation so a stale
   // saved-session/client-side boot error cannot leave the sidebar empty forever.
-  await loadWorkspaceList();
-  await loadOnboardingWizard();
   await renderSessionList();
+  await _workspaceListReady;
+  await _onboardingReady;
   _initResizePanels();
   // Workspace panel restore happens AFTER loadSession so we know if
   // the session has a workspace — prevents the snap-open-then-closed flash (#576).
@@ -1509,6 +1652,7 @@ function applyBotName(){
   const _srch = document.getElementById('sessionSearch'); if (_srch) _srch.value = '';
   // Initialize reasoning chip on boot (fixes #1103 — chip hidden until session load)
   if(typeof fetchReasoningChip==='function') fetchReasoningChip();
+  if(typeof refreshProviderQuotaIndicator==='function') refreshProviderQuotaIndicator();
   const urlSession=(typeof _sessionIdFromLocation==='function')?_sessionIdFromLocation():null;
   const savedLocal=localStorage.getItem('hermes-webui-session');
   const saved=urlSession||savedLocal;
@@ -1570,7 +1714,7 @@ function applyBotName(){
         // even though there is no active session (#workspace-persist).
         const _ephPanelPref=localStorage.getItem('hermes-webui-workspace-panel-pref')==='open'
           || localStorage.getItem('hermes-webui-workspace-panel')==='open';
-        if(_ephPanelPref) _workspacePanelMode='browse';
+        if(_ephPanelPref&&!_isCompactWorkspaceViewport()) _workspacePanelMode='browse';
         syncTopbar();syncWorkspacePanelState();
         $('emptyState').style.display='';
         await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();
@@ -1581,7 +1725,7 @@ function applyBotName(){
       // the panel via toolbar X doesn't suppress the "keep open" setting.
       const panelPref=localStorage.getItem('hermes-webui-workspace-panel-pref')==='open'
         || localStorage.getItem('hermes-webui-workspace-panel')==='open';
-      if(S.session&&S.session.workspace&&panelPref){
+      if(S.session&&S.session.workspace&&panelPref&&!_isCompactWorkspaceViewport()){
         _workspacePanelMode='browse';
       }
       S._bootReady=true;
@@ -1595,7 +1739,7 @@ function applyBotName(){
   // user had it open during their last session (#workspace-persist).
   const _freshPanelPref=localStorage.getItem('hermes-webui-workspace-panel-pref')==='open'
     || localStorage.getItem('hermes-webui-workspace-panel')==='open';
-  if(_freshPanelPref) _workspacePanelMode='browse';
+  if(_freshPanelPref&&!_isCompactWorkspaceViewport()) _workspacePanelMode='browse';
   syncWorkspacePanelState();
   $('emptyState').style.display='';
   await renderSessionList();

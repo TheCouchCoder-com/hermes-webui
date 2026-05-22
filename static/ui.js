@@ -1,7 +1,12 @@
 const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[],toolCalls:[],activeStreamId:null,currentDir:'.',activeProfile:'default',showHiddenWorkspaceFiles:false};
+
+function assistantDisplayName(){
+  if(S.activeProfile&&S.activeProfile!=='default') return S.activeProfile.charAt(0).toUpperCase()+S.activeProfile.slice(1);
+  return window._botName||'Hermes';
+}
 const INFLIGHT={};  // keyed by session_id while request in-flight
 const SESSION_QUEUES={};  // keyed by session_id for queued follow-up turns
-const MAX_UPLOAD_BYTES=20*1024*1024;
+const MAX_UPLOAD_BYTES=(window.__HERMES_CONFIG__&&window.__HERMES_CONFIG__.maxUploadBytes)||20*1024*1024;
 const MAX_UPLOAD_MB=Math.round(MAX_UPLOAD_BYTES/1024/1024);
 // Tracks which session's queue to drain in setBusy(false).
 // Set to activeSid just before setBusy(false) in done/error handlers so the
@@ -350,6 +355,43 @@ async function jumpToSessionStart(){
   }
 }
 
+function _userMessageDomId(rawIdx){
+  return `msg-user-${rawIdx}`;
+}
+
+function _questionJumpButtonHtml(questionRawIdx){
+  if(typeof questionRawIdx!=='number'||questionRawIdx<0) return '';
+  const label=t('jump_to_question')||'Question';
+  const title=t('jump_to_question_label')||'Jump to the question for this response';
+  return `<button class="msg-question-jump-btn" type="button" title="${esc(title)}" aria-label="${esc(title)}" onclick="jumpToTurnQuestion(${questionRawIdx})"><span aria-hidden="true">↑</span><span>${esc(label)}</span></button>`;
+}
+
+function _highlightQuestionRow(row){
+  if(!row) return;
+  row.classList.remove('msg-question-highlight');
+  void row.offsetWidth;
+  row.classList.add('msg-question-highlight');
+  window.setTimeout(()=>row.classList.remove('msg-question-highlight'),1800);
+}
+
+async function jumpToTurnQuestion(questionRawIdx){
+  const container=$('messages');
+  if(!container||typeof questionRawIdx!=='number'||questionRawIdx<0) return;
+  const scrollToTarget=()=>{
+    const row=document.getElementById(_userMessageDomId(questionRawIdx));
+    if(!row) return false;
+    row.scrollIntoView({block:'center',behavior:'smooth'});
+    _highlightQuestionRow(row);
+    return true;
+  };
+  if(scrollToTarget()) return;
+  if(_messageHiddenBeforeCount()>0){
+    _messageRenderWindowSize=Math.max(_currentMessageRenderWindowSize(),_messageRenderableMessageCount());
+    renderMessages({ preserveScroll:true });
+    requestAnimationFrame(scrollToTarget);
+  }
+}
+
 const DASHBOARD_STATUS_TTL_MS=60000;
 let _dashboardStatusCache=null;
 let _dashboardStatusFetchedAt=0;
@@ -359,10 +401,15 @@ function _dashboardIsBrowserLoopback(){
   return host==='127.0.0.1'||host==='localhost'||host==='::1';
 }
 function _dashboardBrowserUrl(status){
-  if(!status||!status.running||!status.port) return '';
+  if(!status||!status.running) return '';
+  if(status.browser_url||status.url){
+    try{return new URL(status.browser_url||status.url).toString().replace(/\/$/,'');}
+    catch(_){}
+  }
+  if(!status.port) return '';
   let source;
-  try{source=new URL(status.url||('http://127.0.0.1:'+status.port));}
-  catch(_){source=new URL('http://127.0.0.1:'+status.port);}
+  try{source=new URL('http://127.0.0.1:'+status.port);}
+  catch(_){return '';}
   const browserHost=window.location.hostname||source.hostname;
   const displayHost=browserHost.includes(':')&&!browserHost.startsWith('[')?'['+browserHost+']':browserHost;
   return source.protocol+'//'+displayHost+':'+status.port;
@@ -597,6 +644,91 @@ if(document.readyState==='loading') document.addEventListener('DOMContentLoaded'
 else _initMediaPlaybackObserver();
 setTimeout(_initMediaPlaybackObserver,0);
 
+// ── Ambient provider quota indicator (#1766) ────────────────────────────────
+let _providerQuotaRefreshInFlight=false;
+
+function _formatQuotaMoneyShort(value){
+  const n=Number(value);
+  if(!Number.isFinite(n)) return '';
+  if(Math.abs(n)>=100) return '$'+n.toFixed(0);
+  if(Math.abs(n)>=10) return '$'+n.toFixed(1);
+  return '$'+n.toFixed(2);
+}
+function _formatQuotaPercentShort(value){
+  const n=Number(value);
+  if(!Number.isFinite(n)) return '';
+  return Math.max(0,Math.min(100,n)).toFixed(0)+'%';
+}
+function _providerQuotaIndicatorText(status){
+  if(!status||status.status!=='available') return null;
+  const provider=status.display_name||status.provider||'Provider';
+  const accountLimits=status.account_limits||null;
+  if(accountLimits&&Array.isArray(accountLimits.windows)&&accountLimits.windows.length){
+    const w=accountLimits.windows.find(x=>x&&Number.isFinite(Number(x.remaining_percent)))||accountLimits.windows[0];
+    const remaining=_formatQuotaPercentShort(w&&w.remaining_percent);
+    if(remaining) return {label:provider+' '+remaining, title:(status.message||'Provider usage loaded')+' — '+remaining+' remaining'};
+  }
+  const quota=status.quota||null;
+  if(quota){
+    const remaining=_formatQuotaMoneyShort(quota.limit_remaining);
+    const used=_formatQuotaMoneyShort(quota.usage);
+    const limit=_formatQuotaMoneyShort(quota.limit);
+    if(remaining){
+      const parts=[];
+      if(used) parts.push('used '+used);
+      if(limit) parts.push('limit '+limit);
+      return {label:provider+' '+remaining, title:(status.message||'Provider quota loaded')+(parts.length?' — '+parts.join(' · '):'')};
+    }
+  }
+  return null;
+}
+function renderProviderQuotaIndicator(status){
+  const chip=$('providerQuotaChip');
+  const label=$('providerQuotaChipLabel');
+  if(!chip||!label) return;
+  // Hide entirely when the user has disabled the ambient quota chip in Settings.
+  // Default is off (window._showQuotaChip defaults to false in boot.js) so users
+  // never see the chip unless they opt in.
+  if(window._showQuotaChip!==true){
+    chip.hidden=true;
+    label.textContent='';
+    chip.removeAttribute('title');
+    return;
+  }
+  const text=_providerQuotaIndicatorText(status);
+  if(!text||status.status!=='available'||(!status.quota&&!status.account_limits)){
+    chip.hidden=true;
+    label.textContent='';
+    chip.removeAttribute('title');
+    return;
+  }
+  label.textContent=text.label;
+  chip.title=text.title;
+  chip.hidden=false;
+}
+async function refreshProviderQuotaIndicator(){
+  // Short-circuit before the fetch when the chip is disabled — no point asking
+  // the server for quota data the UI will throw away.
+  if(window._showQuotaChip!==true){
+    const chip=$('providerQuotaChip');
+    if(chip){chip.hidden=true;chip.removeAttribute('title');}
+    return;
+  }
+  if(_providerQuotaRefreshInFlight) return;
+  _providerQuotaRefreshInFlight=true;
+  try{
+    const status=await api('/api/provider/quota');
+    renderProviderQuotaIndicator(status);
+  }catch(_e){
+    renderProviderQuotaIndicator(null);
+  }finally{
+    _providerQuotaRefreshInFlight=false;
+  }
+}
+window.addEventListener('visibilitychange',()=>{
+  if(document.visibilityState==='visible'&&typeof refreshProviderQuotaIndicator==='function') refreshProviderQuotaIndicator();
+});
+
 // Dynamic model labels -- populated by populateModelDropdown(), fallback to static map
 let _dynamicModelLabels={};
 window._configuredModelBadges=window._configuredModelBadges||{};
@@ -610,6 +742,7 @@ const MODEL_STATE_KEY='hermes-webui-model-state';
 // first colliding entry.
 function _getOptionProviderId(opt){
   if(!opt) return '';
+  if(opt.dataset && opt.dataset.provider) return opt.dataset.provider;
   const group=opt.parentElement;
   if(group && group.tagName==='OPTGROUP' && group.dataset && group.dataset.provider){
     return group.dataset.provider;
@@ -622,6 +755,18 @@ function _providerFromModelValue(modelId){
   const value=String(modelId||'').trim();
   if(value.startsWith('@')&&value.includes(':')) return value.slice(1,value.lastIndexOf(':'));
   return '';
+}
+function _providerSkipsModelMismatchWarning(providerId){
+  const p=String(providerId||'').toLowerCase();
+  return !p||p==='custom'||p.startsWith('custom:')||p==='openrouter';
+}
+function _providerDefersMissingModelFallback(providerId){
+  const p=String(providerId||'').toLowerCase();
+  // Named custom providers and OpenRouter can legitimately route vendor-prefixed
+  // model IDs that are not present in the current static catalog. Do not
+  // silently rewrite those sessions to the default just because the option has
+  // not been hydrated yet (#2405).
+  return p.startsWith('custom:')||p==='openrouter';
 }
 function _modelStateForSelect(sel, modelId){
   const value=String(modelId||'').trim();
@@ -770,6 +915,9 @@ async function populateModelDropdown(){
     // Per-page-load — not synced across browser tabs.
     window._defaultModel=data.default_model||null;
     window._configuredModelBadges=data.configured_model_badges||{};
+    // Keep the g.extra_models label hydration path below in this function; tests
+    // assert populateModelDropdown preserves that full-catalog label contract.
+    window._modelEndpointErrors={};
 
     const _synthGroupsFromConfigured=()=>{
       const badgeMap=window._configuredModelBadges||{};
@@ -819,6 +967,11 @@ async function populateModelDropdown(){
       const og=document.createElement('optgroup');
       og.label=g.provider;
       if(g.provider_id) og.dataset.provider=g.provider_id;
+      if(g.models_endpoint_error){
+        const errorKey=g.provider_id||g.provider||'';
+        og.dataset.modelsEndpointError=JSON.stringify(g.models_endpoint_error);
+        if(errorKey) window._modelEndpointErrors[errorKey]=g.models_endpoint_error;
+      }
       for(const m of (Array.isArray(g.models)?g.models:[])){
         const opt=document.createElement('option');
         opt.value=m.id;
@@ -839,8 +992,10 @@ async function populateModelDropdown(){
       }
       sel.appendChild(og);
     }
-    // Set default model from server if no localStorage preference
-    if(data.default_model && !(typeof _readPersistedModelState==='function'&&_readPersistedModelState()) && !localStorage.getItem('hermes-webui-model')){
+    // Set default model from server on fresh/blank boot. Loaded sessions keep
+    // their own persisted model and apply it via loadSession(). Do not let stale
+    // browser localStorage suppress the profile default.
+    if(data.default_model && !(S.session&&S.session.model)){
       _applyModelToDropdown(data.default_model, sel, data.active_provider||null);
     }
     if(typeof syncModelChip==='function') syncModelChip();
@@ -884,21 +1039,20 @@ function _addLiveModelsToSelect(provider, models, sel){
     sel.appendChild(providerGroup);
   }
   const existingIds=new Set([...sel.options].map(o=>o.value));
-  // Normalized dedup: strip @provider: prefix and unify separators so
+  // Normalized dedup: strip one @provider: prefix and namespace so
   // 'minimax/minimax-m2.7' matches '@nous:minimax/minimax-m2.7' (#907).
-  // Strip ONLY the first colon — Ollama tag IDs are multi-colon
-  // (e.g. '@ollama-cloud:qwen3-vl:235b-instruct') and split(':',2) would
-  // truncate the tag suffix in JS (the limit arg discards extras, unlike Python).
   const _normId=id=>{
     let s=String(id||'');
-    if(s.startsWith('@')&&s.includes(':')) s=s.substring(s.indexOf(':')+1); // strip only @provider:
-    s=s.split('/').pop();                                                    // strip namespace prefix
+    if(s.startsWith('@')&&s.includes(':')) s=s.substring(s.indexOf(':')+1);
+    s=s.split('/').pop();
     return s.replace(/-/g,'.').toLowerCase();
   };
   const existingNorm=new Set([...sel.options].map(o=>_normId(o.value)));
   let added=0;
   const _ap=(window._activeProvider||'').toLowerCase();
-  const _isPortalFetch=_ap && _ap!=='openrouter' && _ap!=='custom' && _ap!=='openai-codex' && provider===_ap;
+  const _providerLower=String(provider||'').toLowerCase();
+  const _isNamedCustomActiveProvider=_ap.startsWith('custom:');
+  const _isPortalFetch=_ap && _ap!=='openrouter' && _ap!=='custom' && _ap!=='openai-codex' && (_providerLower===_ap||_isNamedCustomActiveProvider&&_providerLower===_ap);
   for(const m of models){
     let mid=m.id;
     if(_isPortalFetch && !mid.startsWith('@')){
@@ -963,12 +1117,13 @@ async function _fetchLiveModels(provider, sel){
  *
  * Provider detection is intentionally loose — we compare the model's slash
  * prefix (e.g. "openai/" from "openai/gpt-4o") against the active provider
- * name. Custom/local endpoints report active_provider='custom' or the
- * base_url hostname and we skip the check to avoid false positives.
+ * name. Custom/local endpoints report active_provider='custom', a named
+ * custom provider such as 'custom:zenmux', or the base_url hostname; skip the
+ * check for those values to avoid false positives.
  */
 function _checkProviderMismatch(modelId){
   const ap=(window._activeProvider||'').toLowerCase();
-  if(!ap||ap==='custom'||ap==='openrouter') return null; // can't reliably check
+  if(_providerSkipsModelMismatchWarning(ap)) return null; // can't reliably check
   // @provider: prefixed IDs came from that provider's live model list — no mismatch possible
   if(modelId.startsWith('@')) return null;
   const slash=modelId.indexOf('/');
@@ -1073,12 +1228,19 @@ function renderModelDropdown(){
   for(const child of Array.from(sel.children)){
     if(child.tagName==='OPTGROUP'){
       const providerId=child.dataset&&child.dataset.provider?child.dataset.provider:'';
+      let modelsEndpointError=null;
+      if(child.dataset&&child.dataset.modelsEndpointError){
+        try{ modelsEndpointError=JSON.parse(child.dataset.modelsEndpointError); }catch(_e){ modelsEndpointError=null; }
+      }
       for(const opt of Array.from(child.children)){
         const rawValue=String(opt.value||'');
         const displayName=rawValue.startsWith('@custom:')
           ? getModelLabel(rawValue)
           : (opt.textContent||getModelLabel(rawValue));
-        _modelData.push({value:opt.value,name:esc(displayName),id:esc(opt.value),group:child.label||'',badge:_getConfiguredModelBadge(opt.value,_badgeMap,providerId)});
+        _modelData.push({value:opt.value,name:esc(displayName),id:esc(opt.value),group:child.label||'',providerId,modelsEndpointError,badge:_getConfiguredModelBadge(opt.value,_badgeMap,providerId)});
+      }
+      if(modelsEndpointError && !child.children.length){
+        _modelData.push({value:`__models_endpoint_error__:${providerId||child.label||''}`,name:'',id:'',group:child.label||'',providerId,modelsEndpointError,endpointErrorOnly:true});
       }
     }
     if(child.tagName==='OPTION'){
@@ -1206,7 +1368,7 @@ function renderModelDropdown(){
           }
         }
         const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(badgeLabel)}</span>`:'';
-        row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(modelName)}</span>${badgeHtml}</div><span class="model-opt-id">${m.id}</span>`;
+        row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(modelName)}</span>${badgeHtml}</div><span class="model-opt-id">${esc(m.id)}</span>`;
         row.onclick=()=>selectModelFromDropdown(m.value);
         dd.appendChild(row);
       }
@@ -1217,8 +1379,17 @@ function renderModelDropdown(){
     const _groupCounts={};
     for(const m of _modelData){
       if(configuredIds.has(m.value)) continue;
-      if(m.group) _groupCounts[m.group]=(_groupCounts[m.group]||0)+1;
+      if(m.group&&!m.endpointErrorOnly) _groupCounts[m.group]=(_groupCounts[m.group]||0)+1;
     }
+    const _renderProviderEndpointHint=(groupName)=>{
+      if(!groupName) return;
+      const entry=_modelData.find(m=>m.group===groupName&&m.modelsEndpointError);
+      if(!entry||!entry.modelsEndpointError) return;
+      const hint=document.createElement('div');
+      hint.className='model-provider-hint';
+      hint.textContent=entry.modelsEndpointError.message||'Models endpoint could not be reached for this provider.';
+      dd.appendChild(hint);
+    };
     for(const m of _modelData){
       if(configuredIds.has(m.value)||!matches(m)) continue;
       if(m.group&&m.group!==_lastGroup){
@@ -1227,14 +1398,16 @@ function renderModelDropdown(){
         const count=_groupCounts[m.group]||0;
         heading.textContent=count>1?`${m.group} (${count})`:m.group;
         dd.appendChild(heading);
+        _renderProviderEndpointHint(m.group);
         _lastGroup=m.group;
       }
+      if(m.endpointErrorOnly) continue;
       const row=document.createElement('div');
       row.className='model-opt'+(m.value===sel.value?' active':'');
       const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(m.badge.label||'Configured')}</span>`:'';
       // Inline provider chip on every row that has a group (#1425)
       const providerChip=m.group?`<span class="model-opt-provider">${esc(m.group)}</span>`:'';
-      row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${m.name}</span>${badgeHtml}${providerChip}</div><span class="model-opt-id">${m.id}</span>`;
+      row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(m.name)}</span>${badgeHtml}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
       row.onclick=()=>selectModelFromDropdown(m.value);
       dd.appendChild(row);
     }
@@ -1282,6 +1455,8 @@ async function selectModelFromDropdown(value){
     opt.value=value;
     opt.textContent=getModelLabel(value);
     opt.dataset.custom='1';
+    const badge=(window._configuredModelBadges||{})[value];
+    if(badge&&badge.provider) opt.dataset.provider=badge.provider;
     // Remove any previous custom option before adding new one
     sel.querySelectorAll('option[data-custom]').forEach(o=>o.remove());
     sel.appendChild(opt);
@@ -1303,6 +1478,7 @@ async function toggleModelDropdown(){
   if(typeof closeWsDropdown==='function') closeWsDropdown();
   if(typeof closeReasoningDropdown==='function') closeReasoningDropdown();
   if(typeof closeToolsetsDropdown==='function') closeToolsetsDropdown();
+  if(typeof window._ensureModelDropdownReady==='function') window._ensureModelDropdownReady();
   const ready=window._modelDropdownReady;
   if(ready&&typeof ready.then==='function'){
     try{await ready;}catch(_){}
@@ -1780,7 +1956,76 @@ if(typeof document!=='undefined'){
 // prevent the new chat's first scroll comparing against the previous chat's
 // scrollTop (Opus stage-302 SHOULD-FIX, #1731 follow-up).
 function _resetScrollDirectionTracker(){ _lastScrollTop=null; }
-if (typeof window !== 'undefined') window._resetScrollDirectionTracker = _resetScrollDirectionTracker;
+if(typeof window!=='undefined') window._resetScrollDirectionTracker=_resetScrollDirectionTracker;
+/* ── Pull-to-refresh for PWA standalone (Android) ── */
+(function(){
+  if(typeof document==='undefined') return;
+  const isStandalone=window.navigator?.standalone||matchMedia('(display-mode:standalone),(display-mode:fullscreen)').matches;
+  if(!isStandalone) return;
+  const el=document.getElementById('messages');
+  if(!el) return;
+  let _ptrState=0; // 0=idle, 1=pulling, 2=ready
+  let _ptrStartY=0;
+  let _ptrCurrentY=0;
+  const THRESHOLD=80;
+  let _indicator=null;
+  function _ptrCreateIndicator(){
+    if(_indicator) return;
+    _indicator=document.createElement('div');
+    _indicator.className='pull-to-refresh-indicator';
+    _indicator.innerHTML='<span class="ptr-icon">↓</span> <span class="ptr-text">Pull to refresh</span>';
+    el.parentNode.insertBefore(_indicator,el);
+  }
+  function _ptrUpdate(progress){
+    _ptrCreateIndicator();
+    const pulling=progress<1;
+    _indicator.classList.toggle('active',progress>0);
+    const icon=_indicator.querySelector('.ptr-icon');
+    const text=_indicator.querySelector('.ptr-text');
+    if(icon) icon.classList.toggle('ready',!pulling);
+    if(text) text.textContent=pulling?'Pull to refresh':'Release to refresh';
+  }
+  function _ptrReset(){
+    _ptrState=0;
+    _ptrStartY=0;
+    _ptrCurrentY=0;
+    if(_indicator) _indicator.classList.remove('active');
+  }
+  el.addEventListener('touchstart',function(e){
+    if(el.scrollTop>0||_ptrState!==0) return;
+    _ptrStartY=e.touches[0].clientY;
+    _ptrState=1;
+  },{passive:true});
+  el.addEventListener('touchmove',function(e){
+    if(_ptrState!==1) return;
+    _ptrCurrentY=e.touches[0].clientY;
+    const pull=_ptrCurrentY-_ptrStartY;
+    if(pull<0){ _ptrReset(); return; }
+    /* If not at the top, smooth-scroll to top first.
+       Next pull gesture will trigger the refresh. */
+    if(el.scrollTop>0){
+      el.scrollTo({top:0,behavior:'smooth'});
+      _ptrReset();
+      return;
+    }
+    const progress=Math.min(pull/THRESHOLD,1);
+    _ptrUpdate(progress);
+    _ptrState=progress>=1?2:1;
+    if(progress>0.3) e.preventDefault();
+  },{passive:false});
+  el.addEventListener('touchend',function(){
+    if(_ptrState===2){
+      if(typeof window.refreshSessionList==='function'){
+        Promise.resolve(window.refreshSessionList('pull', {force:true, refreshActive:true})).catch(()=>{}).finally(_ptrReset);
+      }else{
+        window.location.reload();
+      }
+      return;
+    }
+    _ptrReset();
+  },{passive:true});
+  el.addEventListener('touchcancel',_ptrReset,{passive:true});
+})();
 (function(){
   const el=document.getElementById('messages');
   if(!el) return;
@@ -1836,6 +2081,46 @@ function _formatActiveElapsedTimer(seconds){
   const s=total%60;
   return`${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
 }
+const _COMPRESSION_ELAPSED_MAX_SECONDS=5*60;
+let _compressionElapsedTimer=null;
+function _compressionElapsedStartedAt(state){const n=Number(state&&state.startedAt);return Number.isFinite(n)&&n>0?n:null;}
+function _compressionElapsedLabel(state){
+  const started=_compressionElapsedStartedAt(state);
+  if(!started)return'';
+  const elapsed=Math.max(0,(Date.now()/1000)-started);
+  if(elapsed>=_COMPRESSION_ELAPSED_MAX_SECONDS)return '5+ min';
+  return _formatActiveElapsedTimer(elapsed);
+}
+function _compressionElapsedExpired(state){const started=_compressionElapsedStartedAt(state);return !!(started&&((Date.now()/1000)-started)>=_COMPRESSION_ELAPSED_MAX_SECONDS);}
+function _compressionLiveCardNode(){return document.querySelector('[data-live-compression-card="1"][data-compression-started-at]');}
+function _compressionLiveCardState(){
+  const node=_compressionLiveCardNode();
+  const started=Number(node&&node.getAttribute('data-compression-started-at'));
+  if(!node||!S.session||!Number.isFinite(started)||started<=0)return null;
+  return {sessionId:S.session.session_id,phase:'running',automatic:true,message:node.getAttribute('data-compression-message')||'Auto-compressing context...',startedAt:started};
+}
+function _updateCompressionElapsedCards(state){
+  if(!state)return false;
+  const preview=_autoCompressionPreviewText(state), detail=_autoCompressionDetailText(state);
+  let updated=false;
+  document.querySelectorAll('.tool-card-compress-auto.tool-card-compress-running').forEach(card=>{
+    const previewEl=card.querySelector('.tool-card-preview');
+    const detailEl=card.querySelector('.tool-card-result pre');
+    if(previewEl) previewEl.textContent=preview;
+    if(detailEl) detailEl.textContent=detail;
+    updated=true;
+  });
+  return updated;
+}
+function _updateCompressionElapsedTimer(){
+  const state=_compressionStateForCurrentSession()||_compressionLiveCardState();
+  if(state&&state.automatic&&state.phase==='running'){
+    _updateCompressionElapsedCards(state);
+    if(_compressionElapsedExpired(state)) _clearCompressionElapsedTimer();
+  }else _clearCompressionElapsedTimer();
+}
+function _startCompressionElapsedTimer(){if(!_compressionElapsedTimer)_compressionElapsedTimer=setInterval(_updateCompressionElapsedTimer,1000);}
+function _clearCompressionElapsedTimer(){if(_compressionElapsedTimer){clearInterval(_compressionElapsedTimer);_compressionElapsedTimer=null;}}
 let _activityElapsedTimer=null;
 let _activityElapsedTimerGroup=null;
 function _activityElapsedStartedAt(group){
@@ -1986,12 +2271,14 @@ function _syncCtxIndicator(usage){
   // branch below — honest "no data" instead of misleading "890% used".
   const promptTok=usage.last_prompt_tokens||0;
   const totalTok=(usage.input_tokens||0)+(usage.output_tokens||0);
+  const cacheReadTok=usage.cache_read_tokens||0;
+  const cacheWriteTok=usage.cache_write_tokens||0;
   // Default context window to 128K when not provided by backend
   const DEFAULT_CTX=128*1024;
   const ctxWindow=usage.context_length||DEFAULT_CTX;
   const cost=usage.estimated_cost;
   // Show indicator whenever we have any usage data (tokens or cost)
-  if(!promptTok&&!totalTok&&!cost){
+  if(!promptTok&&!totalTok&&!cost&&!cacheReadTok&&!cacheWriteTok){
     if(wrap) wrap.style.display='none';
     _syncMobileCtxDisplay({visible:false});
     return;
@@ -2024,9 +2311,12 @@ function _syncCtxIndicator(usage){
   const compressText=pct>=75?t('ctx_compress_action'):(pct>=50?t('ctx_compress_hint'):'');
   if(compressWrap) compressWrap.style.display=compressText?'':'none';
   _setCtxCompressButton(compressBtn,compressText);
+  const cacheHitPct=usage.cache_hit_percent;
+  const cacheText=cacheHitPct!=null?t('usage_cache_hit_detail',cacheHitPct,_fmtTokens(cacheReadTok),_fmtTokens(cacheWriteTok)):'';
   let label=hasPromptTok?`Context window ${pct}% used`:`${_fmtTokens(totalTok)} tokens used`;
   if(!hasExplicitCtx&&hasPromptTok) label+=' (est. 128K)';
   if(cost) label+=` \u00b7 $${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
+  if(cacheText) label+=` \u00b7 ${cacheText}`;
   el.setAttribute('aria-label',label);
   const usageText=hasPromptTok?(overflowed?`${rawPct}% used (context exceeded)`:`${pct}% used (${100-pct}% left)`):`${_fmtTokens(totalTok)} tokens used`;
   const tokensText=hasPromptTok?`${_fmtTokens(promptTok)} / ${_fmtTokens(ctxWindow)} tokens used`:`In: ${_fmtTokens(usage.input_tokens||0)} \u00b7 Out: ${_fmtTokens(usage.output_tokens||0)}`;
@@ -2048,6 +2338,11 @@ function _syncCtxIndicator(usage){
   if(costLine){
     if(cost){
       costText=`Estimated cost: $${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
+      if(cacheText) costText+=` \u00b7 ${cacheText}`;
+      costLine.style.display='';
+      costLine.textContent=costText;
+    }else if(cacheText){
+      costText=cacheText;
       costLine.style.display='';
       costLine.textContent=costText;
     }else{
@@ -2270,6 +2565,16 @@ function _sanitizeThinkingDisplayText(text){
   return stripped.trim();
 }
 
+function _stripVisibleAssistantEchoFromThinking(thinkingText, visibleText){
+  let out=String(thinkingText||'');
+  const visible=String(visibleText||'');
+  if(!out||!visible) return out.trim();
+  visible.split(/\n{2,}/).map(s=>s.trim()).filter(s=>s.length>=20).forEach(snippet=>{
+    out=out.split(snippet).join('');
+  });
+  return out.trim();
+}
+
 function renderMd(raw){
   let s=(raw||'').replace(/\r\n/g,'\n').replace(/\r/g,'\n');
   // ── Entity decode: must run FIRST so &gt; lines become > for the blockquote
@@ -2432,7 +2737,7 @@ function renderMd(raw){
   s=s.replace(/\\\[([\s\S]+?)\\\]/g,(_,m)=>{math_stash.push({type:'display',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
   // Inline math: $...$ — require non-space at boundaries to avoid false positives
   // e.g. "costs $5 and $10" should not trigger (space after opening $)
-  s=s.replace(/\$([^\s$\n][^$\n]*?[^\s$\n]|\S)\$/g,(_,m)=>{math_stash.push({type:'inline',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
+  s=s.replace(/\$([^\s$\n][^$\n]*?[^\s$\n]|\S)\$/g,(_,m)=>{if(m.includes(' | '))return '\$'+m+'\$';math_stash.push({type:'inline',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
   // Also stash \(...\) LaTeX delimiters.
   // Match a single literal backslash before the delimiter (the common LLM form).
   s=s.replace(/\\\((.+?)\\\)/g,(_,m)=>{math_stash.push({type:'inline',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
@@ -2499,7 +2804,7 @@ function renderMd(raw){
     t=t.replace(/\x00C(\d+)\x00/g,(_,i)=>_code_stash[+i]);
     // Stash [label](url) links before autolink so the URL in href= is not re-linked
     const _link_stash=[];
-    t=t.replace(/\[([^\]]+)\]\((https?:\/\/[^\)]+)\)/g,(_,lb,u)=>{_link_stash.push(`<a href="${u.replace(/"/g,'%22')}" target="_blank" rel="noopener">${esc(lb)}</a>`);return `\x00L${_link_stash.length-1}\x00`;});
+    t=t.replace(/\[([^\]]+)\]\(((?:https?|file):\/\/[^\)]+)\)/g,(_,lb,u)=>{_link_stash.push(`<a href="${_markdownHref(u)}" target="_blank" rel="noopener">${esc(lb)}</a>`);return `\x00L${_link_stash.length-1}\x00`;});
     t=t.replace(/(https?:\/\/[^\s<>"')\]]+)/g,(url)=>{const trail=url.match(/[.,;:!?)]$/)?url.slice(-1):'';const clean=trail?url.slice(0,-1):url;return `<a href="${clean}" target="_blank" rel="noopener">${esc(clean)}</a>${trail}`;});
     t=t.replace(/\x00L(\d+)\x00/g,(_,i)=>_link_stash[+i]);
     t=t.replace(/\x00G(\d+)\x00/g,(_,i)=>_img_stash[+i]);
@@ -2562,11 +2867,26 @@ function renderMd(raw){
     if(rows.length<2)return block;
     const isSep=r=>/^\|[\s|:-]+\|$/.test(r.trim());
     if(!isSep(rows[1]))return block;
-    const parseRow=r=>r.trim().replace(/^\|/,'').replace(/\|$/,'').split('|').map(c=>`<td>${inlineMd(c.trim())}</td>`).join('');
-    const parseHeader=r=>r.trim().replace(/^\|/,'').replace(/\|$/,'').split('|').map(c=>`<th>${inlineMd(c.trim())}</th>`).join('');
+    // _protectPipes: temporarily swap pipes inside matching bracket pairs for a
+    // sentinel before split('|'), then restore. Iterates until no more matches
+    // so all pipes inside one pair are caught.
+    // Note: both opening and closing brace literals in the character classes
+    // are written as hex escapes (\x7b and \x7d) so the JS source contains no
+    // bare brace glyphs that would confuse the brace-counting extractFunc in
+    // tests/test_renderer_js_behaviour.py. Regex semantics are identical.
+    // Bracket set is paren / square / curly only -- NOT angle brackets, since
+    // angle brackets are overwhelmingly comparison operators in real LLM table
+    // output (`| x < 5 | y > 10 |`) and treating them as a pair collapses cells.
+    const _protectPipes=r=>{let prev;do{prev=r;r=r.replace(/([([\x7b][^)\]\x7d]*)[|]([^)\]\x7d]*[)\]\x7d])/g,(_,a,b)=>a+'\x00PIPE\x00'+b);}while(r!==prev);return r;};
+    const _restorePipes=s=>s.replace(/\x00PIPE\x00/g,'|');
+    const parseRow=r=>{r=_protectPipes(r);return r.trim().replace(/^\|/,'').replace(/\|$/,'').split('|').map(c=>`<td>${inlineMd(_restorePipes(c.trim()))}</td>`).join('');};
+    const parseHeader=r=>{r=_protectPipes(r);return r.trim().replace(/^\|/,'').replace(/\|$/,'').split('|').map(c=>`<th>${inlineMd(_restorePipes(c.trim()))}</th>`).join('');};
     const header=`<tr>${parseHeader(rows[0])}</tr>`;
     const body=rows.slice(2).map(r=>`<tr>${parseRow(r)}</tr>`).join('');
-    return `<table><thead>${header}</thead><tbody>${body}</tbody></table>`;
+    // Surround with blank lines so the final paragraph splitter treats the
+    // generated table as its own block even when the regex consumes one of the
+    // markdown block's trailing newlines.
+    return `\n\n<table><thead>${header}</thead><tbody>${body}</tbody></table>\n\n`;
   });
   // #487: Outer image pass — handles ![alt](url) in plain paragraphs (outside tables/lists).
   // Runs AFTER the table pass (images in table cells are handled by inlineMd() above).
@@ -2577,7 +2897,7 @@ function renderMd(raw){
   // Stash existing <a> tags first to avoid re-linking already-linked URLs.
   const _a_stash=[];
   s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>)/g,m=>{_a_stash.push(m);return `\x00A${_a_stash.length-1}\x00`;});
-  s=s.replace(/\[([^\]]+)\]\((https?:\/\/[^\)]+)\)/g,(_,label,url)=>`<a href="${url.replace(/"/g,'%22')}" target="_blank" rel="noopener">${esc(label)}</a>`);
+  s=s.replace(/\[([^\]]+)\]\(((?:https?|file):\/\/[^\)]+)\)/g,(_,label,url)=>`<a href="${_markdownHref(url)}" target="_blank" rel="noopener">${esc(label)}</a>`);
   s=s.replace(/\x00A(\d+)\x00/g,(_,i)=>_a_stash[+i]);
   // Restore raw <pre> only after markdown rewrites so literal preformatted
   // content stays placeholder-protected, then let the sanitizer normalize tags.
@@ -2592,6 +2912,18 @@ function renderMd(raw){
   const SAFE_TAGS=/^<\/?(?:strong|em|del|code|pre|h[1-6]|ul|ol|li|table|thead|tbody|tr|th|td|hr|blockquote|p|br|a|div|span|img)([\s>]|$)/i;
   function _safeAttrValue(v){
     return String(v||'').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&amp;/g,'&').trim();
+  }
+  function _markdownHref(raw){
+    const href=String(raw||'').replace(/"/g,'%22');
+    if(/^file:\/\//i.test(href)){
+      try{
+        const path=decodeURIComponent(href.replace(/^file:\/\//i,''));
+        return 'api/media?path='+encodeURIComponent(path)+'&inline=1';
+      }catch(_){
+        return 'api/media?path='+encodeURIComponent(href.replace(/^file:\/\//i,''))+'&inline=1';
+      }
+    }
+    return href;
   }
   function _isSafeUrl(v, img){
     const raw=_safeAttrValue(v);
@@ -2709,7 +3041,7 @@ function renderMd(raw){
     return '\x00E'+(_pre_stash.length-1)+'\x00';
   });
   const parts=s.split(/\n{2,}/);
-  s=parts.map(p=>{p=p.trim();if(!p)return '';if(/^<(h[1-6]|ul|ol|pre|hr|blockquote)|^\x00[EQ]/.test(p))return p;return `<p>${p.replace(/\n/g,'<br>')}</p>`;}).join('\n');
+  s=parts.map(p=>{p=p.trim();if(!p)return '';if(/^<(h[1-6]|ul|ol|table|pre|hr|blockquote)|^\x00[EQ]/.test(p))return p;return `<p>${p.replace(/\n/g,'<br>')}</p>`;}).join('\n');
   s=s.replace(/\x00E(\d+)\x00/g,(_,i)=>_pre_stash[+i]);
   // ── Restore MEDIA stash → inline images or download links ─────────────────
   s=s.replace(/\x00D(\d+)\x00/g,(_,i)=>{
@@ -2994,6 +3326,16 @@ function setBusy(v){
     if(next){
       updateQueueBadge(sid);
       setTimeout(()=>{
+        // Guard: if the user switched away from the drain session during
+        // the 120ms settle window, the queued message must NOT go to the
+        // wrong chat.  Put it back into the original session's queue and
+        // skip sending — it will drain when the user returns to that session
+        // or when its next stream completes while it is the active view.
+        if(S.session&&S.session.session_id!==sid){
+          queueSessionMessage(sid,next);
+          updateQueueBadge(sid);
+          return;
+        }
         $('msg').value=next.text||'';
         S.pendingFiles=Array.isArray(next.files)?[...next.files]:[];
         // Restore model from queued item (sent in /api/chat/start payload)
@@ -3512,6 +3854,19 @@ function copyMsg(btn){
     setTimeout(()=>{btn.innerHTML=orig;btn.style.color='';},1500);
   }).catch(()=>showToast(t('copy_failed')));
 }
+function _copyThinkingText(btn){
+  const card=btn&&btn.closest?btn.closest('.thinking-card'):null;
+  if(!card)return;
+  const pre=card.querySelector('.thinking-card-body pre');
+  const text=pre?pre.textContent:'';
+  if(!text)return;
+  _copyText(text).then(()=>{
+    const orig=btn.innerHTML;
+    btn.innerHTML=li('check',12);
+    btn.style.color='var(--accent)';
+    setTimeout(()=>{btn.innerHTML=orig;btn.style.color='';},1500);
+  }).catch(()=>showToast(t('copy_failed')));
+}
 
 // ── TTS: Text-to-Speech via Web Speech API (#499) ──
 // Strips markdown, code blocks, and MEDIA: paths for clean speech output.
@@ -3667,6 +4022,67 @@ function clearInflightState(sid){
     if(Object.keys(all).length) localStorage.setItem(INFLIGHT_STATE_KEY, JSON.stringify(all));
     else localStorage.removeItem(INFLIGHT_STATE_KEY);
   }catch(_){ }
+}
+
+function snapshotLiveTurnHtmlForSession(sid){
+  // Keep the DOM snapshot memory-only. Persisted INFLIGHT state intentionally
+  // stores structured stream state, not outerHTML, so a hard reload still uses
+  // the safer flat replay path instead of reviving stale nodes/listeners.
+  if(!sid||!INFLIGHT[sid]) return;
+  const turn=$('liveAssistantTurn');
+  if(!turn) return;
+  if(turn.dataset&&turn.dataset.sessionId&&turn.dataset.sessionId!==sid) return;
+  INFLIGHT[sid].liveTurnHtml=turn.outerHTML;
+}
+
+function _liveAssistantSegmentTextLength(seg){
+  if(!seg) return 0;
+  const body=seg.querySelector('.msg-body')||seg;
+  return String(body.textContent||'').trim().length;
+}
+
+function _mergeRestoredLiveAssistantSegment(restored, existing){
+  if(!restored||!existing) return;
+  const existingLive=existing.querySelector('[data-live-assistant="1"]');
+  if(!existingLive) return;
+  const restoredLive=restored.querySelector('[data-live-assistant="1"]');
+  const existingLen=_liveAssistantSegmentTextLength(existingLive);
+  const restoredLen=_liveAssistantSegmentTextLength(restoredLive);
+  if(existingLen<=restoredLen) return;
+  const replacement=existingLive.cloneNode(true);
+  if(restoredLive){
+    restoredLive.replaceWith(replacement);
+    return;
+  }
+  const blocks=_assistantTurnBlocks(restored);
+  if(!blocks) return;
+  const anchor=Array.from(blocks.children).filter(el=>
+    el.matches('.tool-call-group,.tool-card-row,.agent-activity-thinking,.thinking-card-row,[data-live-assistant="1"]')
+  ).pop();
+  if(anchor) anchor.insertAdjacentElement('afterend', replacement);
+  else blocks.appendChild(replacement);
+}
+
+function restoreLiveTurnHtmlForSession(sid){
+  const inflight=INFLIGHT[sid];
+  if(!sid||!inflight||!inflight.liveTurnHtml) return false;
+  const inner=$('msgInner');
+  if(!inner) return false;
+  const template=document.createElement('template');
+  template.innerHTML=String(inflight.liveTurnHtml||'').trim();
+  const restored=template.content.firstElementChild;
+  if(!restored) return false;
+  restored.id='liveAssistantTurn';
+  if(S.session) restored.dataset.sessionId=S.session.session_id;
+  const existing=$('liveAssistantTurn');
+  _mergeRestoredLiveAssistantSegment(restored, existing);
+  if(existing) existing.replaceWith(restored);
+  else inner.appendChild(restored);
+  const liveGroup=restored.querySelector('.tool-call-group[data-live-tool-call-group="1"]');
+  if(liveGroup&&typeof _startActivityElapsedTimer==='function') _startActivityElapsedTimer(liveGroup);
+  if(typeof placeLiveToolCardsHost==='function') placeLiveToolCardsHost();
+  requestAnimationFrame(()=>postProcessRenderedMessages(restored));
+  return true;
 }
 
 function markInflight(sid, streamId) {
@@ -3864,7 +4280,7 @@ async function refreshSession() {
     const data = await api(`/api/session?session_id=${encodeURIComponent(S.session.session_id)}`);
     S.session = data.session;
     S.messages = data.session.messages || [];
-    const pendingMsg=getPendingSessionMessage(data.session);
+    const pendingMsg=getPendingSessionMessage(data.session,S.messages);
     if(pendingMsg) S.messages.push(pendingMsg);
     S.activeStreamId=data.session.active_stream_id||null;
 
@@ -3875,8 +4291,25 @@ async function refreshSession() {
 // ── Update banner ──
 function _formatUpdateTargetStatus(label,info){
   if(!info||!(info.behind>0)) return null;
-  const branch=info.branch?` (${info.branch})`:'';
-  return `${label}${branch}: ${info.behind} update${info.behind>1?'s':''}`;
+  const release=(info.release_based&&info.latest_version)
+    ?` (${info.current_version||'unknown'} -> ${info.latest_version})`
+    :(info.branch?` (${info.branch})`:'');
+  const noun=info.release_based?'release':'update';
+  return `${label}${release}: ${info.behind} ${noun}${info.behind>1?'s':''}`;
+}
+function _formatUpdateCheckError(label,info){
+  if(!info||!info.error) return null;
+  const detail=String(info.error).replace(/^fetch failed:?\s*/i,'').trim();
+  return detail ? `${label}: ${detail}` : label;
+}
+function _isSafeUpdateCompareUrl(url){
+  if(!url||!/^https?:\/\//i.test(url)) return false;
+  try{
+    const parsed=new URL(url);
+    return parsed.protocol==='https:'||parsed.protocol==='http:';
+  }catch(e){
+    return false;
+  }
 }
 function _renderUpdateBannerRow(target,label,info){
   const row=$('updateRow-'+target);
@@ -3911,6 +4344,79 @@ function _renderUpdateBannerRow(target,label,info){
   if(forceBtn){forceBtn.style.display='none';}
   if(applyBtn){applyBtn.disabled=false;applyBtn.textContent='Update Now';}
   return true;
+}
+async function showWhatsNewSummary(target){
+  const data=window._updateData||{};
+  const scopedUpdates=target?{[target]:data[target]}:data;
+  const cache=target?_loadStoredUpdateSummaries()[target]:null;
+  const signature=target?_updateSummarySignature(data[target]):'';
+  if(cache&&cache.signature===signature&&cache.payload){
+    _renderUpdateSummaryPanel(cache.payload,data,target);
+    _renderUpdateWhatsNewLinks(data,{mode:'summary'});
+    return;
+  }
+  _renderUpdateSummaryPanel({summary:'Writing a simple summary…'},data,target);
+  try{
+    const res=await api('/api/updates/summary',{method:'POST',body:JSON.stringify({updates:scopedUpdates,target:target||null}),timeoutMs:60000});
+    _rememberGeneratedSummary(target,res,data);
+    _renderUpdateSummaryPanel(res,data,target);
+    _renderUpdateWhatsNewLinks(data,{mode:'summary'});
+  }catch(e){
+    console.warn('[updates] summary failed',e);
+    _renderUpdateSummaryPanel({
+      summary_sections:[
+        {title:"What you'll notice",items:['Could not generate the summary right now.']},
+        {title:'Worth knowing',items:['Try again later, or use the comparison links below for the raw update details.']},
+      ],
+    },data,target);
+  }
+}
+function _renderUpdateWhatsNewLinks(data){
+  const options=arguments.length>1&&arguments[1]?arguments[1]:{};
+  const container=$('updateWhatsNewLinks');
+  if(!container) return;
+  container.replaceChildren();
+  const targets=_updateWhatsNewTargets(data);
+  if(!targets.length){
+    container.style.display='none';
+    _hideUpdateSummaryPanel();
+    return;
+  }
+  container.style.display='block';
+  _pruneGeneratedSummaries(data);
+  const useSummary=(options.mode||'')==='summary'||window._whatsNewSummaryEnabled===true;
+  if(useSummary){
+    targets.forEach((target,idx)=>{
+      if(idx>0) container.appendChild(document.createTextNode(' \u00b7 '));
+      const btn=document.createElement('button');
+      btn.type='button';
+      btn.className='linklike';
+      btn.style.color='var(--accent)';
+      btn.style.textDecoration='underline';
+      btn.style.background='none';
+      btn.style.border='0';
+      btn.style.padding='0';
+      btn.style.cursor='pointer';
+      btn.textContent=_updateSummaryButtonLabel(target,data);
+      btn.onclick=()=>showWhatsNewSummary(target.key);
+      container.appendChild(btn);
+    });
+    return;
+  }
+  _hideUpdateSummaryPanel();
+  if(targets.length===1){
+    const target=targets[0];
+    const link=document.createElement('a');
+    link.href=target.url;
+    link.target='_blank';
+    link.rel='noopener';
+    link.style.color='var(--accent)';
+    link.style.textDecoration='underline';
+    link.textContent="What's new in "+target.label+'?';
+    container.appendChild(link);
+    return;
+  }
+  _appendUpdateDiffLinks(container,targets,"What's new: ");
 }
 function _showUpdateBanner(data){
   const shownWebui=_renderUpdateBannerRow('webui','WebUI',data.webui);
@@ -3967,7 +4473,7 @@ async function applyUpdates(target){
   // so a fresh retry starts clean.
   if(forceBtnReset){forceBtnReset.style.display='none';}
   try{
-    const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify({target})});
+    const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify({target}),timeoutMs:120000});
     if(!res.ok){
       _showUpdateError(target,res);
       resetApplyButton(0);
@@ -4015,7 +4521,7 @@ async function forceUpdate(btn){
   const errEl=$('updateError-'+target);
   if(errEl){errEl.style.display='none';}
   try{
-    const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify({target})});
+    const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify({target}),timeoutMs:120000});
     if(!res.ok){
       if(errEl){errEl.textContent='Force update failed: '+(res.message||'unknown error');errEl.style.display='block';}
       btn.disabled=false;btn.textContent='Force update';
@@ -4065,11 +4571,12 @@ async function _waitForServerThenReload(opts){
   if(msgEl) msgEl.textContent='⚠️ Server is taking longer than expected — click Reload when ready';
 }
 
-function getPendingSessionMessage(session){
+function getPendingSessionMessage(session, messagesOverride=null){
   const text=String(session?.pending_user_message||'').trim();
   if(!text) return null;
   const attachments=Array.isArray(session?.pending_attachments)?session.pending_attachments.filter(Boolean):[];
-  const messages=Array.isArray(session?.messages)?session.messages:[];
+  const sourceMessages=Array.isArray(messagesOverride)?messagesOverride:session?.messages;
+  const messages=Array.isArray(sourceMessages)?sourceMessages:[];
   const lastUser=[...messages].reverse().find(m=>m&&m.role==='user');
   if(lastUser){
     const lastText=String(msgContent(lastUser)||'').trim();
@@ -4138,7 +4645,7 @@ function _forEachProfileChip(fn){
 
 function syncTopbar(){
   if(!S.session){
-    document.title=window._botName||'Hermes';
+    document.title=assistantDisplayName();
     if(typeof syncWorkspaceDisplays==='function') syncWorkspaceDisplays();
     if(typeof _syncWorkspaceHeadingState==='function') _syncWorkspaceHeadingState();
     if(typeof syncModelChip==='function') syncModelChip();
@@ -4161,7 +4668,7 @@ function syncTopbar(){
   }
   const sessionTitle=S.session.title||t('untitled');
   const _topbarTitle=$('topbarTitle');if(_topbarTitle)_topbarTitle.textContent=sessionTitle;
-  document.title=sessionTitle+' \u2014 '+(window._botName||'Hermes');
+  document.title=sessionTitle+' \u2014 '+assistantDisplayName();
   const vis=S.messages.filter(m=>m&&m.role&&m.role!=='tool');
   const _topbarMeta=$('topbarMeta');
   if(_topbarMeta){
@@ -4220,13 +4727,16 @@ function syncTopbar(){
       // default rather than silently retaining the previous chat's selection (#1771).
       if(!applied){
         const deferModelCorrection=Boolean(S.session._modelResolutionDeferred);
+        const missingModelIsRoutable=_providerDefersMissingModelFallback(S.session.model_provider||window._activeProvider||null);
         // Also defer if a live model fetch is still in flight — the model may be
         // in the list once the fetch completes. Persisting now would corrupt the
         // session with the wrong model before live models arrive (#1169).
         const liveStillPending=window._activeProvider&&_liveModelFetchPending.has(window._activeProvider);
-        if(liveStillPending){
+        if(liveStillPending||missingModelIsRoutable){
           // Live fetch in flight — don't touch sel.value or S.session.model yet.
           // _addLiveModelsToSelect() will re-apply S.session.model once done (#1169).
+          // Named custom providers/OpenRouter can also route vendor-prefixed IDs
+          // outside the static catalog, so preserve the user's explicit choice.
         } else {
           const fallback=_applySessionModelFallback(modelSel);
           if(fallback&&!deferModelCorrection){
@@ -4291,7 +4801,7 @@ function isTpsDisplayEnabled(){
   return window._showTps===true;
 }
 function _assistantRoleHtml(tsTitle='', tpsText=''){
-  const _bn=window._botName||'Hermes';
+  const _bn=assistantDisplayName();
   const tps=(isTpsDisplayEnabled()&&tpsText)?`<span class="msg-tps-inline" title="Tokens per second">${esc(tpsText)}</span>`:'';
   return `<div class="msg-role assistant" ${tsTitle?`title="${esc(tsTitle)}"`:''}><div class="role-icon assistant">${esc(_bn.charAt(0).toUpperCase())}</div><span style="font-size:12px">${esc(_bn)}</span>${tps}</div>`;
 }
@@ -4317,23 +4827,26 @@ function _createAssistantTurn(tsTitle='', tpsText=''){
   const row=document.createElement('div');
   row.className='msg-row assistant-turn';
   row.dataset.role='assistant';
+  if(S.session) row.dataset.sessionId=S.session.session_id;
   row.innerHTML=`${_assistantRoleHtml(tsTitle, tpsText)}<div class="assistant-turn-blocks"></div>`;
   return row;
 }
 function _assistantTurnBlocks(turn){
   return turn?turn.querySelector('.assistant-turn-blocks'):null;
 }
-function _thinkingCardHtml(text){
+function _thinkingCardHtml(text, open){
   const clean=_sanitizeThinkingDisplayText(text);
-  return `<div class="thinking-card"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(clean)}</pre></div></div>`;
+  const copyBtn=`<button class="thinking-copy-btn" onclick="event.stopPropagation();_copyThinkingText(this)" title="${t('copy')}" aria-label="${t('copy')}">${li('copy',12)}</button>`;
+  const classes=`thinking-card${open?' open':''}`;
+  return `<div class="${classes}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-btn-row">${copyBtn}<span class="thinking-card-toggle">${li('chevron-right',12)}</span></span></div><div class="thinking-card-body"><pre>${esc(clean)}</pre></div></div>`;
 }
 function isSimplifiedToolCalling(){
   return window._simplifiedToolCalling!==false;
 }
-function _thinkingActivityNode(text){
+function _thinkingActivityNode(text, open){
   const row=document.createElement('div');
   row.className='agent-activity-thinking';
-  row.innerHTML=_thinkingCardHtml(text);
+  row.innerHTML=_thinkingCardHtml(text, open);
   return row;
 }
 // ── Activity-group user expand intent (#1298) ──────────────────────────────
@@ -4398,7 +4911,7 @@ function ensureActivityGroup(inner, opts){
   if(!inner) return null;
   const live=!!opts.live;
   const activityKey=opts.activityKey||(live?_activityKeyForLiveTurn():null);
-  const selector=live?'.tool-call-group[data-live-tool-call-group="1"]':'.tool-call-group[data-agent-activity-group="1"]';
+  const selector=live?'.tool-call-group[data-live-tool-call-group="1"][data-live-activity-current="1"]':'.tool-call-group[data-agent-activity-group="1"]';
   let group=inner.querySelector(selector);
   if(!group){
     group=document.createElement('div');
@@ -4415,7 +4928,10 @@ function ensureActivityGroup(inner, opts){
     group.setAttribute('data-tool-call-group','1');
     group.setAttribute('data-agent-activity-group','1');
     if(activityKey) group.setAttribute('data-activity-disclosure-key',activityKey);
-    if(live) group.setAttribute('data-live-tool-call-group','1');
+    if(live){
+      group.setAttribute('data-live-tool-call-group','1');
+      group.setAttribute('data-live-activity-current','1');
+    }
     group.innerHTML=`<button type="button" class="tool-call-group-summary" aria-expanded="${collapsed?'false':'true'}" onclick="_toggleActivityGroup(this)"><span class="tool-call-group-chevron">${li('chevron-right',12)}</span><span class="tool-call-group-label">Activity</span><span class="tool-call-group-duration"></span></button><div class="tool-call-group-body"></div>`;
     const anchor=opts.anchor||null;
     if(anchor&&anchor.parentElement===inner) anchor.insertAdjacentElement('afterend', group);
@@ -4427,6 +4943,13 @@ function ensureActivityGroup(inner, opts){
   _syncToolCallGroupSummary(group);
   if(live) _startActivityElapsedTimer(group);
   return group;
+}
+function closeCurrentLiveActivityGroup(){
+  const turn=$('liveAssistantTurn');
+  if(!turn) return;
+  turn.querySelectorAll('.tool-call-group[data-live-tool-call-group="1"][data-live-activity-current="1"]').forEach(group=>{
+    group.removeAttribute('data-live-activity-current');
+  });
 }
 function _compressionStateForCurrentSession(){
   const state=window._compressionUi;
@@ -4440,6 +4963,7 @@ function isCompressionUiRunning(){
 }
 function clearCompressionUi(){
   window._compressionUi=null;
+  _clearCompressionElapsedTimer();
   _setCompressionSessionLock(null);
   renderCompressionUi();
 }
@@ -4448,8 +4972,14 @@ function setCompressionUi(state){
     clearCompressionUi();
     return;
   }
-  window._compressionUi={...state};
-  if(state.sessionId) _setCompressionSessionLock(state.sessionId);
+  const nextState={...state};
+  if(nextState.automatic&&nextState.phase==='running'&&!_compressionElapsedStartedAt(nextState)){
+    nextState.startedAt=Date.now()/1000;
+  }
+  window._compressionUi=nextState;
+  if(nextState.sessionId) _setCompressionSessionLock(nextState.sessionId);
+  if(nextState.automatic&&nextState.phase==='running') _startCompressionElapsedTimer();
+  else _clearCompressionElapsedTimer();
   renderCompressionUi();
 }
 function _compressionCardsHtml(state){
@@ -4515,19 +5045,46 @@ function _compressionCardsHtml(state){
     </div>
     ${referenceHtml}`;
 }
-function _autoCompressionCardsHtml(state){
+function _autoCompressionBaseDetail(state){
   const fallback='Context auto-compressed to continue the conversation';
-  const detail=String(state.message||fallback).trim()||fallback;
-  const preview=String(state.summary?.headline||detail).trim()||detail;
+  const running=state&&state.phase==='running';
+  return running
+    ? (String(state.message||'Auto-compressing context...').trim()||'Auto-compressing context...')
+    : (String(state&&state.message||fallback).trim()||fallback);
+}
+function _autoCompressionPreviewText(state){
+  const copy=_engineAwareCompressionCopy(String(state&&state.engine||_compressionEngineForSession()).toLowerCase(), String(state&&state.mode||_compressionModeForSession()).toLowerCase());
+  const running=state&&state.phase==='running';
+  const detail=_autoCompressionBaseDetail(state);
+  if(!running) return (String(state&&state.summary?.headline||copy.preview||detail).trim()||detail);
+  const elapsedLabel=_compressionElapsedLabel(state);
+  return [detail, elapsedLabel].filter(Boolean).join(' · ');
+}
+function _autoCompressionDetailText(state){
+  const running=state&&state.phase==='running';
+  const base=_autoCompressionBaseDetail(state);
+  const elapsedLabel=running?_compressionElapsedLabel(state):'';
+  if(running)return elapsedLabel?`Elapsed: ${elapsedLabel}`:base;
+  const continuation=String(state&&state.continuationSessionId||'').trim();
+  const handoff=continuation?`Continued in compressed session: ${continuation}`:'';
+  return [base,handoff].filter(Boolean).join('\n');
+}
+function _autoCompressionCardsHtml(state){
+  const copy=_engineAwareCompressionCopy(String(state&&state.engine||_compressionEngineForSession()).toLowerCase(), String(state&&state.mode||_compressionModeForSession()).toLowerCase());
+  const running=state&&state.phase==='running';
+  const preview=_autoCompressionPreviewText(state);
+  const cardDetail=_autoCompressionDetailText(state);
   return `
     <div class="tool-card-row compression-card-row" data-compression-card="1">
       ${_compressionStatusCardHtml({
-        statusLabel: t('auto_compress_label'),
+        statusLabel: (String(state&&state.engine||'').toLowerCase()==='lcm'||String(state&&state.mode||'').toLowerCase()==='lossless_retrieval')?copy.label:t('auto_compress_label'),
         previewText: preview,
-        detail,
-        icon: li('check',13),
-        open: false,
-        variantClass: 'tool-card-compress-complete tool-card-compress-auto',
+        detail: cardDetail,
+        icon: running ? '<span class="tool-card-running-dot"></span>' : li('check',13),
+        open: running,
+        variantClass: running
+          ? 'tool-card-compress-running tool-card-compress-auto'
+          : 'tool-card-compress-complete tool-card-compress-auto',
       })}
     </div>`;
 }
@@ -4536,6 +5093,33 @@ function _compressionCardsNode(state){
   wrap.className='compression-turn';
   wrap.innerHTML=`<div class="compression-turn-blocks">${_compressionCardsHtml(state)}</div>`;
   return wrap;
+}
+function appendLiveCompressionCard(state){
+  if(!S.session||!S.activeStreamId||!state) return false;
+  let turn=$('liveAssistantTurn');
+  if(!turn){
+    turn=_createAssistantTurn();
+    turn.id='liveAssistantTurn';
+    if(S.session) turn.dataset.sessionId=S.session.session_id;
+    $('msgInner').appendChild(turn);
+  }
+  const inner=_assistantTurnBlocks(turn);
+  if(!inner) return false;
+  closeCurrentLiveActivityGroup();
+  const node=_compressionCardsNode(state);
+  if(!node) return false;
+  node.setAttribute('data-live-compression-card','1');
+  if(state.automatic&&state.phase==='running'){
+    const started=_compressionElapsedStartedAt(state)||Date.now()/1000;
+    node.setAttribute('data-compression-started-at',String(started));
+    node.setAttribute('data-compression-message',String(state.message||'Auto-compressing context...'));
+    _startCompressionElapsedTimer();
+  }
+  const existing=inner.querySelector('[data-live-compression-card="1"]');
+  if(existing) existing.replaceWith(node);
+  else inner.appendChild(node);
+  if(typeof scrollIfPinned==='function') scrollIfPinned();
+  return true;
 }
 function _isHandoffSummaryToolPayload(value){
   if(!value||typeof value!=='object'||Array.isArray(value)) return false;
@@ -4584,10 +5168,24 @@ function _isContextCompactionMessage(m){
   const text=msgContent(m)||String(m.content||'');
   return /^\s*\[context compaction/i.test(text) || /^\s*context compaction/i.test(text);
 }
+function _isPreservedCompressionTaskListMarkerText(text){
+  return /^\s*\[your active task list was preserved across context compression\]/i.test(String(text||''));
+}
+function _isPreservedCompressionTaskListMarkerOnlyText(text){
+  return _isPreservedCompressionTaskListMarkerText(text)
+    && !String(text||'')
+      .replace(/^\s*\[your active task list was preserved across context compression\]\s*/i,'')
+      .trim();
+}
 function _isPreservedCompressionTaskListMessage(m){
   if(!m||m.role!=='user') return false;
   const text=msgContent(m)||String(m.content||'');
   return /^\s*\[your active task list was preserved across context compression\]/i.test(text);
+}
+function _isMarkerOnlyAssistantCompressionMessage(m){
+  if(!m||m.role!=='assistant') return false;
+  const text=msgContent(m)||String(m.content||'');
+  return _isPreservedCompressionTaskListMarkerOnlyText(text);
 }
 function _preservedCompressionTaskListPreview(text){
   const body=String(text||'')
@@ -4647,14 +5245,15 @@ function _latestCompressionReferenceMessage(messages, summaryText=''){
   return {message:null, rawIdx:-1};
 }
 function _compressionReferenceCardHtml(text, open=false){
+  const copy=_engineAwareCompressionCopy();
   const preview=text.split(/\n+/).filter(Boolean).slice(0,2).join(' ');
   return `
     <div class="tool-card-row compression-card-row" data-compression-card="1" data-raw-text="${esc(text)}">
       <div class="tool-card tool-card-compress-reference${open?' open':''}">
         <div class="tool-card-header" onclick="this.closest('.tool-card').classList.toggle('open')">
           <span class="tool-card-icon">${li('star',13)}</span>
-          <span class="tool-card-name">${esc(t('context_compaction_label'))}</span>
-          <span class="tool-card-preview">${esc(t('reference_only_label'))} · ${esc(preview)}</span>
+          <span class="tool-card-name">${esc(copy.label)}</span>
+          <span class="tool-card-preview">${esc(copy.preview)} · ${esc(preview)}</span>
           <span class="tool-card-toggle">${li('chevron-right',12)}</span>
           <button class="msg-copy-btn msg-action-btn tool-card-copy compression-reference-copy" title="${t('copy')}" onclick="copyMsg(this);event.stopPropagation()">${li('copy',13)}</button>
         </div>
@@ -4727,6 +5326,31 @@ function _formatMessageFooterTimestamp(tsVal){
   }
   const opts={month:'short', day:'numeric', hour:'numeric', minute:'2-digit'};
   return fmt?fmt(date,opts):date.toLocaleString([], opts);
+}
+function _compressionEngineForSession(){
+  return String(
+    (S.session&&(
+      S.session.compression_anchor_engine
+      || S.session.context_engine
+    )) || 'compressor'
+  ).trim().toLowerCase() || 'compressor';
+}
+function _compressionModeForSession(){
+  return String(
+    (S.session&&S.session.compression_anchor_mode) || 'summary_compaction'
+  ).trim().toLowerCase() || 'summary_compaction';
+}
+function _engineAwareCompressionCopy(engine=_compressionEngineForSession(), mode=_compressionModeForSession()){
+  if(engine==='lcm'||mode==='lossless_retrieval'){
+    return {
+      label:t('retrieval_context_label'),
+      preview:t('retrieval_context_preview'),
+    };
+  }
+  return {
+    label:t('context_compaction_label'),
+    preview:t('reference_only_label'),
+  };
 }
 function _compressionStatusCardHtml({
   statusLabel,
@@ -4831,19 +5455,63 @@ function renderCompressionUi(){
   el.style.display='none';
 }
 // Session render cache: avoids full markdown+DOM rebuild when switching back
-// to a session that was already rendered with the same message count.
+// to a session whose rendered transcript inputs are unchanged.
 // Keyed by session_id. Only used on cross-session navigation, never for
 // in-session updates (new messages, edits, stream events).
-//
-// Known limitation: cache key is session_id + message count. Edits and retries
-// that mutate message content without changing the count will serve stale HTML
-// on back-navigation until the user triggers an in-session update. Acceptable
-// for the common read-only back-navigation case; not suitable as a general cache.
 const _sessionHtmlCache=new Map();
 let _sessionHtmlCacheSid=null; // session_id currently rendered in the DOM
 function clearMessageRenderCache(){
   _sessionHtmlCache.clear();
   _sessionHtmlCacheSid=null;
+}
+
+function _messageRenderCacheSignature(){
+  let hash=2166136261;
+  function add(value){
+    const s=String(value==null?'':value);
+    for(let i=0;i<s.length;i++){
+      hash^=s.charCodeAt(i);
+      hash=Math.imul(hash,16777619)>>>0;
+    }
+    hash^=31;
+    hash=Math.imul(hash,16777619)>>>0;
+  }
+  const messages=Array.isArray(S.messages)?S.messages:[];
+  add(messages.length);
+  for(const m of messages){
+    if(!m||typeof m!=='object'){ add('missing'); continue; }
+    add(m.role);add(m.timestamp);add(m._ts);add(m._error);add(m._statusCard);
+    add(msgContent(m));
+    if(Array.isArray(m.content)){
+      add('content-array');
+      m.content.forEach(part=>{
+        if(!part||typeof part!=='object'){ add(part); return; }
+        add(part.type);add(part.id);add(part.name);add(part.text);add(part.content);
+      });
+    }
+    if(Array.isArray(m.tool_calls)){
+      add('message-tool-calls');add(m.tool_calls.length);
+      m.tool_calls.forEach(tc=>{add(tc&&tc.id);add(tc&&tc.name);add(tc&&tc.type);add(JSON.stringify(tc&&tc.function||{}));});
+    }
+    if(Array.isArray(m._partial_tool_calls)){
+      add('partial-tool-calls');add(m._partial_tool_calls.length);
+      m._partial_tool_calls.forEach(tc=>{add(tc&&tc.id);add(tc&&tc.name);add(tc&&tc.snippet);});
+    }
+    if(_messageHasReasoningPayload(m)) add(m.reasoning||m.thinking||m._reasoning||'reasoning');
+    if(Array.isArray(m.attachments)) m.attachments.forEach(a=>add(a&&typeof a==='object'?JSON.stringify(a):a));
+  }
+  const toolCalls=Array.isArray(S.toolCalls)?S.toolCalls:[];
+  add('settled-tool-calls');add(toolCalls.length);
+  toolCalls.forEach(tc=>{
+    if(!tc||typeof tc!=='object'){ add(tc); return; }
+    add(tc.tid);add(tc.id);add(tc.name);add(tc.done);add(tc.is_diff);add(tc.assistant_msg_idx);add(tc.snippet);add(JSON.stringify(tc.args||{}));
+  });
+  if(S.session){
+    add(S.session.message_count);add(S.session.updated_at);add(S.session.compression_anchor_visible_idx);
+    add(JSON.stringify(S.session.compression_anchor_message_key||null));
+    add(S.session.compression_anchor_summary||'');
+  }
+  return `${messages.length}:${toolCalls.length}:${hash.toString(16)}`;
 }
 
 function _clipCliToolSnippet(text, maxLen=20000){
@@ -4992,6 +5660,7 @@ function renderMessages(options){
   const msgCount=S.messages.length;
   if(sid!==_messageRenderWindowSid) _resetMessageRenderWindow(sid);
   const renderWindowSize=_currentMessageRenderWindowSize();
+  const renderSignature=_messageRenderCacheSignature();
   const hasTransientTranscriptUi=!!(
     (window._compressionUi&&(!window._compressionUi.sessionId||window._compressionUi.sessionId===sid)) ||
     (window._handoffUi&&(!window._handoffUi.sessionId||window._handoffUi.sessionId===sid))
@@ -5007,7 +5676,7 @@ function renderMessages(options){
   // before those cards can be inserted.
   if(sid&&sid!==_sessionHtmlCacheSid&&!INFLIGHT[sid]&&!hasTransientTranscriptUi){
     const cached=_sessionHtmlCache.get(sid);
-    if(cached&&cached.msgCount===msgCount&&cached.renderWindowSize===renderWindowSize){
+    if(cached&&cached.msgCount===msgCount&&cached.renderWindowSize===renderWindowSize&&cached.signature===renderSignature){
       inner.innerHTML=cached.html;
       _sessionHtmlCacheSid=sid;
       _wireMessageWindowLoadEarlierButton();
@@ -5117,6 +5786,13 @@ function renderMessages(options){
   }
   let _prevSepKey=null;
   let currentAssistantTurn=null;
+  const questionRawIdxByAssistantRawIdx=new Map();
+  let lastQuestionRawIdx=-1;
+  for(const entry of visWithIdx){
+    const role=entry&&entry.m&&entry.m.role;
+    if(role==='user') lastQuestionRawIdx=entry.rawIdx;
+    else if(role==='assistant') questionRawIdxByAssistantRawIdx.set(entry.rawIdx,lastQuestionRawIdx);
+  }
   const assistantSegments=new Map();
   const assistantThinking=new Map();
   const userRows=new Map();
@@ -5167,8 +5843,16 @@ function renderMessages(options){
       }
     }
     const isUser=m.role==='user';
+    if(!isUser&&_isMarkerOnlyAssistantCompressionMessage(m)){
+      content='**Error:** No response received after context compression. Please retry.';
+    }
     const displayContent=isUser?_stripWorkspaceDisplayPrefix(content):content;
+    if(thinkingText&&!isUser){
+      thinkingText=_stripVisibleAssistantEchoFromThinking(thinkingText, displayContent);
+    }
     const isLastAssistant=!isUser&&vi===renderVisWithIdx.length-1;
+    const nextRendered=renderVisWithIdx[vi+1];
+    const isTurnFinalAssistant=!isUser&&(!nextRendered||!nextRendered.m||nextRendered.m.role!=='assistant');
     let filesHtml='';
     if(m.attachments&&m.attachments.length){
       // Static regression tests intentionally look for msg-media-img/msg-file-badge near this branch.
@@ -5201,7 +5885,10 @@ function renderMessages(options){
     const tsTitle=tsVal?(_fmtSv?_fmtSv(new Date(tsVal*1000),{}):new Date(tsVal*1000).toLocaleString()):'';
     const tsTime=_formatMessageFooterTimestamp(tsVal);
     const timeHtml = tsTime ? `<span class="msg-time" title="${esc(tsTitle)}">${tsTime}</span>` : '';
-    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${retryBtn}</span></div>`;
+    const questionJumpBtn = (!isUser&&!m._live&&isTurnFinalAssistant)
+      ? _questionJumpButtonHtml(questionRawIdxByAssistantRawIdx.get(rawIdx))
+      : '';
+    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${retryBtn}</span>${questionJumpBtn}</div>`;
 
     if(_isContextCompactionMessage(m)){
       if(compressionState || referenceNode){
@@ -5221,6 +5908,7 @@ function renderMessages(options){
       currentAssistantTurn=null;
       const row=document.createElement('div');
       row.className='msg-row';
+      row.id=_userMessageDomId(rawIdx);
       row.dataset.msgIdx=rawIdx;
       row.dataset.role='user';
       row.dataset.rawText=String(displayContent).trim();
@@ -5288,6 +5976,7 @@ function renderMessages(options){
   }
   function _insertCompressionLikeNodeByRawIdx(node, rawIdx){
     if(!node) return;
+    if(rawIdx<firstRenderedRawIdx) return;
     if(!renderVisWithIdx.length){
       inner.appendChild(node);
       return;
@@ -5309,7 +5998,7 @@ function renderMessages(options){
       const turn=anchorSeg.closest('.assistant-turn');
       const blocks=_assistantTurnBlocks(turn);
       if(blocks){
-        blocks.appendChild(node);
+        blocks.insertBefore(node, anchorSeg);
         return;
       }
       const turnParent=turn && turn.parentElement;
@@ -5431,7 +6120,7 @@ function renderMessages(options){
     if(derived.length) S.toolCalls=derived;
   }
   if(!S.busy){
-    inner.querySelectorAll('.tool-call-group:not([data-compression-card]),.tool-card-row:not([data-compression-card])').forEach(el=>el.remove());
+    inner.querySelectorAll('.tool-call-group:not([data-compression-card]),.tool-card-row:not([data-compression-card]),.agent-activity-thinking:not([data-live-thinking="1"])').forEach(el=>el.remove());
     const byAssistant = {};
     for(const tc of (S.toolCalls||[])){
       const key = tc.assistant_msg_idx !== undefined ? tc.assistant_msg_idx : -1;
@@ -5452,14 +6141,16 @@ function renderMessages(options){
         }
         if(!anchorRow) continue;
         const anchorParent=anchorRow.parentElement;
-        const insertAfterNode = anchorInsertAfter.get(anchorRow) || anchorRow;
+        let insertAfterNode = anchorInsertAfter.get(anchorRow) || anchorRow;
         const group=ensureActivityGroup(anchorParent,{collapsed:true,anchor:insertAfterNode,activityKey:`assistant:${aIdx}`});
         const sourceMsg=S.messages[aIdx]||{};
         if(sourceMsg._turnDuration!==undefined) group.setAttribute('data-turn-duration', String(sourceMsg._turnDuration));
         const body=group&&group.querySelector('.tool-call-group-body');
         if(!body) continue;
         const thinkingText=assistantThinking.get(aIdx);
-        if(thinkingText) body.appendChild(_thinkingActivityNode(thinkingText));
+        if(thinkingText){
+          body.appendChild(_thinkingActivityNode(thinkingText, false));
+        }
         for(const tc of cards){
           body.appendChild(buildToolCard(tc));
         }
@@ -5567,6 +6258,8 @@ function renderMessages(options){
         const cost=msg._turnUsage.estimated_cost;
         let text=`${_fmtTokens(inTok)} in · ${_fmtTokens(outTok)} out`;
         if(cost) text+=` · ~$${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
+        const cacheHitPct=msg._turnUsage.cache_hit_percent;
+        if(cacheHitPct!=null) text+=` · ${t('usage_cached_percent',cacheHitPct)}`;
         usage.textContent=text;
         fragments.push(usage);
       }
@@ -5594,7 +6287,7 @@ function renderMessages(options){
     const _html=inner.innerHTML;
     // Only cache sessions with <300KB rendered HTML; evict oldest beyond 8 sessions.
     if(_html.length<300_000){
-      _sessionHtmlCache.set(sid,{html:_html,msgCount,renderWindowSize});
+      _sessionHtmlCache.set(sid,{html:_html,msgCount,renderWindowSize,signature:renderSignature});
       if(_sessionHtmlCache.size>8){_sessionHtmlCache.delete(_sessionHtmlCache.keys().next().value);}
     }
   }
@@ -5691,16 +6384,36 @@ function _syncToolCallGroupSummary(group){
   if(durationEl){
     if(group.getAttribute('data-live-tool-call-group')==='1'){
       const activeText=_activityElapsedLabel(group);
+      const progressText=_activityLiveProgressLabel(group);
       if(activeText) group.setAttribute('data-active-turn-elapsed',activeText);
       else group.removeAttribute('data-active-turn-elapsed');
-      durationEl.textContent=activeText?`Working ${activeText}`:'';
-      durationEl.style.display=activeText?'':'none';
+      durationEl.textContent=[progressText, activeText].filter(Boolean).join(' · ');
+      durationEl.style.display=durationEl.textContent?'':'none';
     }else{
       const durationText=_formatTurnDuration(group.dataset.turnDuration);
       durationEl.textContent=durationText?`Done in ${durationText}`:'';
       durationEl.style.display=durationText?'':'none';
     }
   }
+}
+
+function _activityProgressLabelForToolName(name){
+  const key=String(name||'').toLowerCase().replace(/[^a-z0-9]+/g,'_');
+  if(!key) return 'Working';
+  if(key.includes('search')||key.includes('grep')) return 'Searching workspace';
+  if(key.includes('read')||key.includes('view')||key.includes('open')) return 'Reading files';
+  if(key.includes('write')||key.includes('patch')||key.includes('edit')) return 'Updating files';
+  if(key.includes('terminal')||key.includes('shell')||key.includes('command')||key.includes('process')) return 'Running command';
+  if(key.includes('web')||key.includes('fetch')||key.includes('curl')) return 'Checking web data';
+  if(key.includes('todo')||key.includes('plan')) return 'Planning next steps';
+  return 'Working';
+}
+
+function _activityLiveProgressLabel(group){
+  if(!group||group.getAttribute('data-live-tool-call-group')!=='1') return '';
+  const running=group.querySelector('.tool-card.tool-card-running .tool-card-name');
+  const latest=running || Array.from(group.querySelectorAll('.tool-card-name')).pop();
+  return _activityProgressLabelForToolName(latest?latest.textContent:'');
 }
 
 // ── Live tool card helpers (called during SSE streaming) ──
@@ -6433,7 +7146,10 @@ let _katexReady=false;
 
 function renderKatexBlocks(container){
   const root=container||document;
-  const blocks=root.querySelectorAll('.katex-block:not([data-rendered]),.katex-inline:not([data-rendered])');
+  const blocks=root.querySelectorAll(
+    '.katex-block:not([data-rendered]),.katex-inline:not([data-rendered]),'+
+    'equation-block:not([data-rendered]),equation-inline:not([data-rendered])'
+  );
   if(!blocks.length) return;
   if(!_katexReady){
     if(!_katexLoading){
@@ -6455,7 +7171,8 @@ function renderKatexBlocks(container){
   blocks.forEach(el=>{
     el.dataset.rendered='true';
     const src=el.textContent||'';
-    const displayMode=el.dataset.katex==='display';
+    const tagName=(el.tagName||'').toLowerCase();
+    const displayMode=el.dataset.katex==='display'||tagName==='equation-block';
     try{
       katex.render(src,el,{
         displayMode,
@@ -6532,16 +7249,17 @@ function finalizeThinkingCard(){
       const summary=group.querySelector('.tool-call-group-summary');
       if(summary) summary.setAttribute('aria-expanded','false');
     }
-    const active=group.querySelector('.agent-activity-thinking[data-thinking-active="1"]');
+    const active=turn.querySelector('.agent-activity-thinking[data-thinking-active="1"]');
     if(active) active.removeAttribute('data-thinking-active');
     _syncToolCallGroupSummary(group);
   }
 }
-function appendThinking(text=''){
+function appendThinking(text='', options){
   // Guard: ignore if session was switched during an async SSE stream.
   // The old stream's reasoning events can still fire after switch;
   // without this check they would pollute the new session's DOM.
-  if(!S.session||!S.activeStreamId) return;
+  const allowPendingPlaceholder=!!(options&&options.pending===true);
+  if(!S.session||(!S.activeStreamId&&!allowPendingPlaceholder)) return;
   $('emptyState').style.display='none';
   let turn=$('liveAssistantTurn');
   if(!turn){
@@ -6584,31 +7302,33 @@ function appendThinking(text=''){
     }
     return;
   }
-  if(!String(text||'').trim()){
-    scrollIfPinned();
-    return;
-  }
+  const thinkingText=String(text||'').trim()||'Thinking…';
   const allChildren=Array.from(blocks.children);
   const anchor=allChildren.filter(el=>
     el.id!=='toolRunningRow' &&
-    el.matches('[data-live-assistant="1"],.tool-call-group,.tool-card-row,.agent-activity-thinking')
+    el.matches('[data-live-assistant="1"],.tool-call-group,.tool-card-row')
   ).pop();
   const group=ensureActivityGroup(blocks,{live:true,collapsed:true,anchor,activityKey:_activityKeyForLiveTurn()});
   const body=group&&group.querySelector('.tool-call-group-body');
   if(!body) return;
   let row=body.querySelector('.agent-activity-thinking[data-thinking-active="1"]');
   if(!row){
-    row=document.createElement('div');
-    row.className='agent-activity-thinking';
-    row.setAttribute('data-thinking-active','1');
-    body.insertBefore(row, body.firstChild);
+    const thinkingCards=Array.from(body.querySelectorAll('.agent-activity-thinking'));
+    row=thinkingCards.pop()||null;
+    if(row) row.setAttribute('data-thinking-active','1');
   }
-  _renderThinkingInto(row,text);
+  if(!row){
+    row=_thinkingActivityNode(thinkingText, false);
+    row.setAttribute('data-thinking-active','1');
+    body.appendChild(row);
+  }else{
+    _renderThinkingInto(row,thinkingText);
+  }
   _syncToolCallGroupSummary(group);
   scrollIfPinned();
   if(_scrollPinned){
-    const thinkingBody=row&&row.querySelector('.thinking-card-body');
-    if(thinkingBody) thinkingBody.scrollTop=thinkingBody.scrollHeight;
+    const body=row&&row.querySelector('.thinking-card-body');
+    if(body) body.scrollTop=body.scrollHeight;
   }
 }
 function updateThinking(text=''){appendThinking(text);}
@@ -6973,6 +7693,13 @@ function _renderTreeItems(container, entries, depth){
       const isExpanded=S._expandedDirs.has(item.path);
       arrow.textContent=isExpanded?'\u25BE':'\u25B8';
       el.appendChild(arrow);
+    }else{
+      // Keep file icons aligned with sibling directories that occupy this
+      // slot with the expand/collapse toggle. #2554
+      const spacer=document.createElement('span');
+      spacer.className='file-tree-toggle-placeholder';
+      spacer.setAttribute('aria-hidden','true');
+      el.appendChild(spacer);
     }
 
     // Icon
@@ -7195,6 +7922,23 @@ function _showFileContextMenu(e, item){
     }
   };
   menu.appendChild(copyPathItem);
+
+  // Download as zip — only for directories. Streams the folder contents
+  // through /api/folder/download which builds the zip on the fly.
+  if(item.type==='dir'){
+    const dlItem=document.createElement('div');
+    dlItem.textContent=t('download_folder');
+    dlItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
+    dlItem.onmouseenter=()=>dlItem.style.background='var(--hover-bg)';
+    dlItem.onmouseleave=()=>dlItem.style.background='';
+    dlItem.onclick=()=>{
+      menu.remove();
+      const url='/api/folder/download?session_id='+encodeURIComponent(S.session.session_id)
+              + '&path='+encodeURIComponent(item.path||'');
+      window.location.href=url;
+    };
+    menu.appendChild(dlItem);
+  }
 
   // Divider + Delete
   const sep=document.createElement('hr');
