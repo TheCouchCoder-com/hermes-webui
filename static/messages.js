@@ -1829,12 +1829,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // Context was auto-compressed during this turn. Render it through the
       // same transient compression-card path as manual /compress, without
       // inserting a fake assistant message into history or model context.
-      if(!S.session||S.session.session_id!==activeSid) return;
+      if(!S.session) return;
+      const currentSid=S.session.session_id;
       let d={};
       try{ d=JSON.parse(e.data||'{}')||{}; }catch(_){ d={}; }
       const eventSid=d.old_session_id||d.session_id||activeSid;
-      if(eventSid!==activeSid && d.new_session_id!==activeSid && d.continuation_session_id!==activeSid) return;
       const continuationSid=d.new_session_id||d.continuation_session_id||'';
+      const eventMatchesCurrent=!!(currentSid&&(eventSid===currentSid||d.new_session_id===currentSid||d.continuation_session_id===currentSid));
+      if(!eventMatchesCurrent) return;
+      const displaySid=currentSid;
       const message=String(d.message||'Context auto-compressed to continue the conversation').trim();
       if(d.usage&&typeof _syncCtxIndicator==='function'){
         S.lastUsage={...(S.lastUsage||{}),...d.usage};
@@ -1842,10 +1845,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       if(typeof setCompressionUi==='function'){
         const state={
-          sessionId:activeSid,
+          sessionId:displaySid,
           phase:'done',
           automatic:true,
           message,
+          engine:d.engine,
+          mode:d.mode,
+          details:d.details,
           summary:{headline:message},
           continuationSessionId:continuationSid,
         };

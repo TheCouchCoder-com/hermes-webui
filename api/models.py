@@ -377,6 +377,11 @@ class Session:
                  compression_anchor_message_key=None,
                  compression_anchor_summary=None,
                  pre_compression_snapshot: bool=False,
+                 context_engine=None,
+                 compression_anchor_engine=None,
+                 compression_anchor_mode=None,
+                 compression_anchor_details=None,
+                 context_engine_state=None,
                  context_length=None, threshold_tokens=None,
                  last_prompt_tokens=None,
                  gateway_routing=None, gateway_routing_history=None,
@@ -417,6 +422,11 @@ class Session:
         self.compression_anchor_message_key = compression_anchor_message_key
         self.compression_anchor_summary = compression_anchor_summary
         self.pre_compression_snapshot = bool(pre_compression_snapshot)
+        self.context_engine = context_engine
+        self.compression_anchor_engine = compression_anchor_engine
+        self.compression_anchor_mode = compression_anchor_mode
+        self.compression_anchor_details = compression_anchor_details if isinstance(compression_anchor_details, dict) else {}
+        self.context_engine_state = context_engine_state if isinstance(context_engine_state, dict) else {}
         self.context_length = context_length
         self.threshold_tokens = threshold_tokens
         self.last_prompt_tokens = last_prompt_tokens
@@ -436,7 +446,14 @@ class Session:
         self.read_only = bool(kwargs.get('read_only', False))
         self.enabled_toolsets = enabled_toolsets  # List[str] or None — per-session toolset override
         self.composer_draft = composer_draft if isinstance(composer_draft, dict) else {}
-        self._metadata_message_count = None
+        raw_message_count = kwargs.get('message_count')
+        parsed_message_count = None
+        if raw_message_count is not None:
+            try:
+                parsed_message_count = int(raw_message_count)
+            except (TypeError, ValueError):
+                parsed_message_count = None
+        self._metadata_message_count = parsed_message_count if parsed_message_count is not None and parsed_message_count >= 0 else None
 
     @property
     def path(self):
@@ -474,6 +491,8 @@ class Session:
             'pending_user_message', 'pending_attachments', 'pending_started_at',
             'compression_anchor_visible_idx', 'compression_anchor_message_key',
             'compression_anchor_summary', 'pre_compression_snapshot',
+            'context_engine', 'compression_anchor_engine', 'compression_anchor_mode',
+            'compression_anchor_details', 'context_engine_state',
             'context_length', 'threshold_tokens', 'last_prompt_tokens',
             'gateway_routing', 'gateway_routing_history', 'llm_title_generated',
             'parent_session_id',
@@ -563,7 +582,18 @@ class Session:
         p = SESSION_DIR / f'{sid}.json'
         if not p.exists():
             return None
-        return cls(**json.loads(p.read_text(encoding='utf-8')))
+        data = json.loads(p.read_text(encoding='utf-8'))
+        data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
+        session = cls(**data)
+        if _collapsed_partials:
+            try:
+                # Self-heal bloated sessions on first full load without touching
+                # recency/index ordering; save() creates a .bak because this
+                # intentionally shrinks the transcript (#2592).
+                session.save(touch_updated_at=False, skip_index=True)
+            except Exception:
+                logger.debug("Failed to persist collapsed duplicate partials for %s", sid, exc_info=True)
+        return session
 
     @classmethod
     def load_metadata_only(cls, sid):
@@ -590,7 +620,19 @@ class Session:
             parsed['messages'] = []
             parsed['tool_calls'] = []
             session = cls(**parsed)
-            session._metadata_message_count = _lookup_index_message_count(sid)
+            metadata_message_count = _lookup_index_message_count(sid)
+            if metadata_message_count is None:
+                raw_count = parsed.get('message_count')
+                if isinstance(raw_count, int) and raw_count >= 0:
+                    metadata_message_count = raw_count
+                else:
+                    try:
+                        parsed_count = int(raw_count)
+                    except (TypeError, ValueError):
+                        parsed_count = None
+                    if parsed_count is not None and parsed_count >= 0:
+                        metadata_message_count = parsed_count
+            session._metadata_message_count = metadata_message_count
             # Mark this session as a metadata-only stub. save() refuses to write
             # such a session because doing so would atomically replace the
             # on-disk JSON with messages=[], wiping the conversation. Any
@@ -641,6 +683,11 @@ class Session:
             'compression_anchor_message_key': self.compression_anchor_message_key,
             'compression_anchor_summary': self.compression_anchor_summary,
             'pre_compression_snapshot': self.pre_compression_snapshot,
+            'context_engine': self.context_engine,
+            'compression_anchor_engine': self.compression_anchor_engine,
+            'compression_anchor_mode': self.compression_anchor_mode,
+            'compression_anchor_details': self.compression_anchor_details,
+            'context_engine_state': self.context_engine_state,
             'context_length': self.context_length,
             'threshold_tokens': self.threshold_tokens,
             'last_prompt_tokens': self.last_prompt_tokens,
@@ -722,6 +769,57 @@ def _truncate_journal_tool_args(args, limit: int = 4) -> dict:
 
 def _normalize_journal_recovery_text(value) -> str:
     return " ".join(str(value or "").split())
+
+
+def _partial_message_signature(message: dict) -> tuple:
+    """Return a stable identity for partial assistant markers recovered on load."""
+    if not isinstance(message, dict):
+        return ('', '', ())
+    tool_sig = []
+    for tool_call in message.get('_partial_tool_calls') or []:
+        if not isinstance(tool_call, dict):
+            continue
+        try:
+            args_sig = json.dumps(
+                tool_call.get('args') or {},
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            )
+        except Exception:
+            args_sig = str(tool_call.get('args') or '')
+        tool_sig.append((
+            str(tool_call.get('name') or ''),
+            args_sig,
+            bool(tool_call.get('done', False)),
+            bool(tool_call.get('is_error', False)),
+            str(tool_call.get('preview') or tool_call.get('snippet') or ''),
+        ))
+    return (
+        str(message.get('content') or '').strip(),
+        str(message.get('reasoning') or '').strip(),
+        tuple(tool_sig),
+    )
+
+
+def _collapse_adjacent_duplicate_partials(messages) -> tuple[list, bool]:
+    """Collapse repeated identical partial markers from the same failed turn."""
+    if not isinstance(messages, list):
+        return messages, False
+    collapsed = []
+    changed = False
+    previous_partial_sig = None
+    for message in messages:
+        if isinstance(message, dict) and message.get('_partial'):
+            sig = _partial_message_signature(message)
+            if previous_partial_sig == sig:
+                changed = True
+                continue
+            previous_partial_sig = sig
+        else:
+            previous_partial_sig = None
+        collapsed.append(message)
+    return collapsed, changed
 
 
 def _find_existing_assistant_for_journal_content(session, content: str) -> int | None:

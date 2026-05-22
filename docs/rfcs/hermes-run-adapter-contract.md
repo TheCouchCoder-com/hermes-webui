@@ -94,8 +94,13 @@ adapter-seam work:
   `queue_message(...)` as a staged protocol method only; `/queue` remains
   browser-side queue/drain behavior, and no server-side queue endpoint or queue
   scheduler should be added merely for adapter symmetry.
+- #2575 shipped the Slice 4a runner/sidecar contract gate in v0.51.93. The next
+  implementation step can add runner-backend adapter plumbing, but it must stay
+  default-off, keep legacy fallback intact, pass explicit profile/workspace/model
+  payloads instead of mutating WebUI process globals, and avoid recreating
+  `STREAMS` / `CANCEL_FLAGS` / approval queues / clarify queues under new names.
 
-The next gate is the runner/sidecar planning contract, not queue implementation
+The next gate is runner-backend plumbing, not queue implementation
 by default. Queue / continue routing should only move before Slice 4 if a future
 maintainer decision identifies an existing server-side legacy entry point and
 pins its response shape, ordering, and idempotency contract. Otherwise, keeping
@@ -745,6 +750,26 @@ Non-goals for Slice 4a:
 - no new server-side queue endpoint or scheduler just for adapter symmetry;
 - no dependency on Hermes Agent shipping `/v1/runs` before WebUI can validate the
   local runner boundary.
+
+#### Slice 4b: Runner adapter client facade
+
+The first code slice after the Slice 4a contract should be a small
+`RunnerRuntimeAdapter` facade that delegates to an injected runner client. This
+is still not the runner process itself. Its job is to pin the adapter-facing
+normalization rules before route wiring or process supervision lands:
+
+- `start_run` forwards a `StartRunRequest` carrying explicit session, profile,
+  workspace, attachments, model/provider, toolset, source, and metadata payloads;
+- `observe_run` and `get_run` normalize runner responses into `RunEventStream`
+  and `RunStatus` so a recreated WebUI server can observe the same runner-owned
+  state without relying on process-local `STREAMS`;
+- controls normalize accepted / not-active / unsupported outcomes into bounded
+  `ControlResult` values;
+- the facade itself owns no `AIAgent`, worker thread, cancellation registry,
+  approval queue, clarify queue, goal scheduler, or server-side queue.
+
+The implementation remains default-off until a later slice adds an actual runner
+client/backend and explicit route selection.
 
 ## First Meaningful Success Criteria
 

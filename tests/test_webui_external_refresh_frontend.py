@@ -37,3 +37,16 @@ def test_force_reload_clears_stale_blocking_prompts_immediately():
     """
     assert "hideApprovalCard(forceReload)" in SESSIONS_JS
     assert "hideClarifyCard(forceReload, forceReload?'external-refresh':'dismissed')" in SESSIONS_JS
+
+
+def test_same_session_force_reload_preserves_non_empty_composer_input():
+    """A slow same-session refresh must not roll back text typed meanwhile.
+
+    The active-session refresh path can finish seconds after it started. If the
+    user kept typing, restoring the server draft at the end of that load would
+    replace newer local input with an older debounced draft.
+    """
+    assert "function _restoreComposerDraft(draft, targetSid, opts={})" in SESSIONS_JS
+    assert "const preserveActiveInput = !!(opts && opts.preserveActiveInput);" in SESSIONS_JS
+    assert "if (preserveActiveInput && current && current !== text) return;" in SESSIONS_JS
+    assert "_restoreComposerDraft(_draft, sid, {preserveActiveInput:currentSid===sid&&forceReload});" in SESSIONS_JS

@@ -4290,6 +4290,79 @@ function _renderUpdateBannerRow(target,label,info){
   if(applyBtn){applyBtn.disabled=false;applyBtn.textContent='Update Now';}
   return true;
 }
+async function showWhatsNewSummary(target){
+  const data=window._updateData||{};
+  const scopedUpdates=target?{[target]:data[target]}:data;
+  const cache=target?_loadStoredUpdateSummaries()[target]:null;
+  const signature=target?_updateSummarySignature(data[target]):'';
+  if(cache&&cache.signature===signature&&cache.payload){
+    _renderUpdateSummaryPanel(cache.payload,data,target);
+    _renderUpdateWhatsNewLinks(data,{mode:'summary'});
+    return;
+  }
+  _renderUpdateSummaryPanel({summary:'Writing a simple summary…'},data,target);
+  try{
+    const res=await api('/api/updates/summary',{method:'POST',body:JSON.stringify({updates:scopedUpdates,target:target||null}),timeoutMs:60000});
+    _rememberGeneratedSummary(target,res,data);
+    _renderUpdateSummaryPanel(res,data,target);
+    _renderUpdateWhatsNewLinks(data,{mode:'summary'});
+  }catch(e){
+    console.warn('[updates] summary failed',e);
+    _renderUpdateSummaryPanel({
+      summary_sections:[
+        {title:"What you'll notice",items:['Could not generate the summary right now.']},
+        {title:'Worth knowing',items:['Try again later, or use the comparison links below for the raw update details.']},
+      ],
+    },data,target);
+  }
+}
+function _renderUpdateWhatsNewLinks(data){
+  const options=arguments.length>1&&arguments[1]?arguments[1]:{};
+  const container=$('updateWhatsNewLinks');
+  if(!container) return;
+  container.replaceChildren();
+  const targets=_updateWhatsNewTargets(data);
+  if(!targets.length){
+    container.style.display='none';
+    _hideUpdateSummaryPanel();
+    return;
+  }
+  container.style.display='block';
+  _pruneGeneratedSummaries(data);
+  const useSummary=(options.mode||'')==='summary'||window._whatsNewSummaryEnabled===true;
+  if(useSummary){
+    targets.forEach((target,idx)=>{
+      if(idx>0) container.appendChild(document.createTextNode(' \u00b7 '));
+      const btn=document.createElement('button');
+      btn.type='button';
+      btn.className='linklike';
+      btn.style.color='var(--accent)';
+      btn.style.textDecoration='underline';
+      btn.style.background='none';
+      btn.style.border='0';
+      btn.style.padding='0';
+      btn.style.cursor='pointer';
+      btn.textContent=_updateSummaryButtonLabel(target,data);
+      btn.onclick=()=>showWhatsNewSummary(target.key);
+      container.appendChild(btn);
+    });
+    return;
+  }
+  _hideUpdateSummaryPanel();
+  if(targets.length===1){
+    const target=targets[0];
+    const link=document.createElement('a');
+    link.href=target.url;
+    link.target='_blank';
+    link.rel='noopener';
+    link.style.color='var(--accent)';
+    link.style.textDecoration='underline';
+    link.textContent="What's new in "+target.label+'?';
+    container.appendChild(link);
+    return;
+  }
+  _appendUpdateDiffLinks(container,targets,"What's new: ");
+}
 function _showUpdateBanner(data){
   const shownWebui=_renderUpdateBannerRow('webui','WebUI',data.webui);
   const shownAgent=_renderUpdateBannerRow('agent','Agent',data.agent);
@@ -4393,7 +4466,7 @@ async function forceUpdate(btn){
   const errEl=$('updateError-'+target);
   if(errEl){errEl.style.display='none';}
   try{
-    const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify({target})});
+    const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify({target}),timeoutMs:120000});
     if(!res.ok){
       if(errEl){errEl.textContent='Force update failed: '+(res.message||'unknown error');errEl.style.display='block';}
       btn.disabled=false;btn.textContent='Force update';
@@ -4925,9 +4998,10 @@ function _autoCompressionBaseDetail(state){
     : (String(state&&state.message||fallback).trim()||fallback);
 }
 function _autoCompressionPreviewText(state){
+  const copy=_engineAwareCompressionCopy(String(state&&state.engine||_compressionEngineForSession()).toLowerCase(), String(state&&state.mode||_compressionModeForSession()).toLowerCase());
   const running=state&&state.phase==='running';
   const detail=_autoCompressionBaseDetail(state);
-  if(!running) return (String(state&&state.summary?.headline||detail).trim()||detail);
+  if(!running) return (String(state&&state.summary?.headline||copy.preview||detail).trim()||detail);
   const elapsedLabel=_compressionElapsedLabel(state);
   return [detail, elapsedLabel].filter(Boolean).join(' · ');
 }
@@ -4941,13 +5015,14 @@ function _autoCompressionDetailText(state){
   return [base,handoff].filter(Boolean).join('\n');
 }
 function _autoCompressionCardsHtml(state){
+  const copy=_engineAwareCompressionCopy(String(state&&state.engine||_compressionEngineForSession()).toLowerCase(), String(state&&state.mode||_compressionModeForSession()).toLowerCase());
   const running=state&&state.phase==='running';
   const preview=_autoCompressionPreviewText(state);
   const cardDetail=_autoCompressionDetailText(state);
   return `
     <div class="tool-card-row compression-card-row" data-compression-card="1">
       ${_compressionStatusCardHtml({
-        statusLabel: t('auto_compress_label'),
+        statusLabel: (String(state&&state.engine||'').toLowerCase()==='lcm'||String(state&&state.mode||'').toLowerCase()==='lossless_retrieval')?copy.label:t('auto_compress_label'),
         previewText: preview,
         detail: cardDetail,
         icon: running ? '<span class="tool-card-running-dot"></span>' : li('check',13),
@@ -5115,14 +5190,15 @@ function _latestCompressionReferenceMessage(messages, summaryText=''){
   return {message:null, rawIdx:-1};
 }
 function _compressionReferenceCardHtml(text, open=false){
+  const copy=_engineAwareCompressionCopy();
   const preview=text.split(/\n+/).filter(Boolean).slice(0,2).join(' ');
   return `
     <div class="tool-card-row compression-card-row" data-compression-card="1" data-raw-text="${esc(text)}">
       <div class="tool-card tool-card-compress-reference${open?' open':''}">
         <div class="tool-card-header" onclick="this.closest('.tool-card').classList.toggle('open')">
           <span class="tool-card-icon">${li('star',13)}</span>
-          <span class="tool-card-name">${esc(t('context_compaction_label'))}</span>
-          <span class="tool-card-preview">${esc(t('reference_only_label'))} · ${esc(preview)}</span>
+          <span class="tool-card-name">${esc(copy.label)}</span>
+          <span class="tool-card-preview">${esc(copy.preview)} · ${esc(preview)}</span>
           <span class="tool-card-toggle">${li('chevron-right',12)}</span>
           <button class="msg-copy-btn msg-action-btn tool-card-copy compression-reference-copy" title="${t('copy')}" onclick="copyMsg(this);event.stopPropagation()">${li('copy',13)}</button>
         </div>
@@ -5195,6 +5271,31 @@ function _formatMessageFooterTimestamp(tsVal){
   }
   const opts={month:'short', day:'numeric', hour:'numeric', minute:'2-digit'};
   return fmt?fmt(date,opts):date.toLocaleString([], opts);
+}
+function _compressionEngineForSession(){
+  return String(
+    (S.session&&(
+      S.session.compression_anchor_engine
+      || S.session.context_engine
+    )) || 'compressor'
+  ).trim().toLowerCase() || 'compressor';
+}
+function _compressionModeForSession(){
+  return String(
+    (S.session&&S.session.compression_anchor_mode) || 'summary_compaction'
+  ).trim().toLowerCase() || 'summary_compaction';
+}
+function _engineAwareCompressionCopy(engine=_compressionEngineForSession(), mode=_compressionModeForSession()){
+  if(engine==='lcm'||mode==='lossless_retrieval'){
+    return {
+      label:t('retrieval_context_label'),
+      preview:t('retrieval_context_preview'),
+    };
+  }
+  return {
+    label:t('context_compaction_label'),
+    preview:t('reference_only_label'),
+  };
 }
 function _compressionStatusCardHtml({
   statusLabel,
@@ -5775,6 +5876,7 @@ function renderMessages(options){
   }
   function _insertCompressionLikeNodeByRawIdx(node, rawIdx){
     if(!node) return;
+    if(rawIdx<firstRenderedRawIdx) return;
     if(!renderVisWithIdx.length){
       inner.appendChild(node);
       return;
@@ -7715,6 +7817,23 @@ function _showFileContextMenu(e, item){
     }
   };
   menu.appendChild(copyPathItem);
+
+  // Download as zip — only for directories. Streams the folder contents
+  // through /api/folder/download which builds the zip on the fly.
+  if(item.type==='dir'){
+    const dlItem=document.createElement('div');
+    dlItem.textContent=t('download_folder');
+    dlItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
+    dlItem.onmouseenter=()=>dlItem.style.background='var(--hover-bg)';
+    dlItem.onmouseleave=()=>dlItem.style.background='';
+    dlItem.onclick=()=>{
+      menu.remove();
+      const url='/api/folder/download?session_id='+encodeURIComponent(S.session.session_id)
+              + '&path='+encodeURIComponent(item.path||'');
+      window.location.href=url;
+    };
+    menu.appendChild(dlItem);
+  }
 
   // Divider + Delete
   const sep=document.createElement('hr');

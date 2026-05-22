@@ -47,7 +47,7 @@ function _saveComposerDraftNow(sid, text, files) {
 // Restore composer draft from server onto #msg textarea.
 // Only restores if there's actual text (skip empty/None drafts).
 // Guards against double-restore when rapidly switching sessions.
-function _restoreComposerDraft(draft, targetSid) {
+function _restoreComposerDraft(draft, targetSid, opts={}) {
   const ta = $('msg');
   if (!ta) return;
   // targetSid is the session that was requested — if it no longer matches
@@ -55,10 +55,20 @@ function _restoreComposerDraft(draft, targetSid) {
   if (targetSid && _loadingSessionId !== null && _loadingSessionId !== targetSid) return;
   const text = (draft && typeof draft.text === 'string') ? draft.text : '';
   const files = (draft && Array.isArray(draft.files)) ? draft.files : [];
+  const current = ta.value || '';
+  const preserveActiveInput = !!(opts && opts.preserveActiveInput);
+
+  // Same-session force refreshes are driven by external state changes and may
+  // finish seconds after the user continued typing. In that case the local
+  // composer is the authoritative in-progress draft; never replace non-empty
+  // local input with an older server draft. Cross-session switches still restore
+  // normally so the previous session's composer contents do not leak forward.
+  if (preserveActiveInput && current && current !== text) return;
+
   // If there's no text and no files, clear the textarea (a previous session's
   // draft may still be sitting there from a cross-session switch).
   if (!text && !files.length) {
-    if (ta.value) {
+    if (current) {
       ta.value = '';
       if (typeof autoResize === 'function') autoResize();
       if (typeof updateSendBtn === 'function') updateSendBtn();
@@ -66,7 +76,6 @@ function _restoreComposerDraft(draft, targetSid) {
     return;
   }
   // Only update if different to avoid cursor jumps on unrelated session switches.
-  const current = ta.value || '';
   if (current !== text) {
     ta.value = text;
     if (typeof autoResize === 'function') autoResize();
@@ -790,7 +799,7 @@ async function loadSession(sid){
   // against stale writes from slow responses racing to restore the previous draft).
   const _draft = S.session && S.session.composer_draft;
   if (_draft && (typeof _restoreComposerDraft === 'function')) {
-    _restoreComposerDraft(_draft, sid);
+    _restoreComposerDraft(_draft, sid, {preserveActiveInput:currentSid===sid&&forceReload});
   }
 
   _resolveSessionModelForDisplaySoon(sid);
