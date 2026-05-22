@@ -12,6 +12,12 @@
 
 ## [Unreleased]
 
+## [v0.51.73] — 2026-05-16 — Release AW (stage-366 — 1-PR safe-lane batch — #2357 compression reference card anchoring fix)
+
+### Fixed
+
+- **PR #2357** by @franksong2702 (fixes #2355) — Auto-compression reference cards no longer get mixed into the final answer turn after a session rotation. Pre-fix, `_insertCompressionLikeNodeByRawIdx()` appended the compression-reference node to the future assistant anchor turn's blocks, which projected the `[CONTEXT COMPACTION — REFERENCE ONLY]` card into the live tail. The fix inserts the node *before* the anchor segment so the reference card stays a sibling, not a child of the answer turn.
+
 ## [v0.51.72] — 2026-05-16 — Release AV (stage-365 — 2-PR safe-lane batch — #2354 recovered pending turn context fix + #2348 Thinking card interim-text echo suppression)
 
 ### Fixed
