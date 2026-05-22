@@ -13,6 +13,27 @@
 ## [Unreleased]
 
 
+## [v0.51.93] — 2026-05-19 — Release BQ (stage-386 — 10-PR full sweep batch — RFC Slice 4 runner/sidecar gate + workspace tree toggle width CSS variable + settled file:// markdown link rendering + prompt-cache coverage percentage fix + terminal shell shutdown reap + configured model picker provider preservation + profile-aware assistant display names + state.db reconciliation slice 1 + queued-message cross-session drain fix + stale-stream writeback supersede)
+
+### Fixed
+
+- **PR #2580** by @Michaelyklam (refs #2571) — Centralize the workspace-tree toggle slot width into a `--file-tree-toggle-width` CSS variable at `:root`, referenced from both `.file-tree-toggle` and `.file-tree-toggle-placeholder` so a future width adjustment can't silently desync the two rules. Closes the followup issue filed against PR #2563 / v0.51.92.
+- **PR #2576** by @dobby-d-elf (closes #470) — Preserve labeled `file://` links in settled markdown by rewriting them to `/api/media?path=...&inline=1` before the sanitizer drops them. The streamed and settled markdown paths are now symmetric on local-file anchors, while raw `file://` image sources continue to be blocked.
+- **PR #2579** by @starship-s (refs #2419, #2421) — Fix the prompt-cache hit percentage to display the fraction of the prompt served from cache (`cache_read / prompt_total`) instead of the meaningless `cache_read / (cache_read + cache_write)`. New `api/usage.py` `prompt_cache_hit_percent()` helper matches Hermes Agent's log convention; UI labels updated across all locales.
+- **PR #2582** by @Michaelyklam (refs #2577) — Harden embedded workspace-terminal shell cleanup so graceful WebUI shutdowns close/reap every active PTY shell and the spawned shell receives a Linux parent-death signal (`PR_SET_PDEATHSIG`) if the WebUI process dies. The terminal close path now waits again after `SIGKILL` so timed-out shells don't remain unreaped.
+- **PR #2583** by @dobby-d-elf — Make assistant display names properly profile-aware. The saved assistant-name preference applies only to the literal `default` profile; named profiles use their own profile name. Centralizes `assistantDisplayName()` resolution across composer placeholder, `document.title` via `syncTopbar()`, message role labels via `_assistantRoleHtml()`, browser notifications, cancel-copy fallback, and empty-state on session delete.
+- **PR #2584** by @wirtsi (closes #2585) — Prevent queued follow-up messages from draining into the wrong chat when the user switches sessions during the 120ms `setBusy(false)` drain window. The drain-time guard re-queues against `sid` (not the currently-viewed session) and `_sendInProgressSid` captures the activeSid at the commit point so the re-entrant `send()` path no longer reads a stale `S.session.session_id`.
+- **PR #2587** by @AJV20 — Allow a still-running stream that was mistakenly marked interrupted by stale-pending recovery to replace its own recovery marker when it later finishes, while continuing to block stale writeback after any newer turn appends transcript content. Three new tests in `tests/test_session_sidecar_repair.py` cover the supersede-allowed and the two refuse cases.
+- **PR #2588** by @Michaelyklam (refs #2569) — Preserve the configured provider when choosing a configured model from the composer picker. `_getOptionProviderId()` now reads `data-provider` from temporary `<option data-custom="1">` rows (created by `selectModelFromDropdown` for configured models outside the native catalog), so the next send routes through the correct provider instead of falling back to whatever provider was already active.
+
+### Changed
+
+- **PR #2581** by @LumenYoung (refs #2194) — First recovery slice from the closed reconciliation PR #2194. Routes streaming session reconstruction and sidebar metadata through the reconciled state.db/session-summary path with a metadata-only fast path for sidebar polls and a single-snapshot reuse on the streaming hot path. Includes the reviewer-requested `_new_turn_context_from_messages` extraction so both legacy and streaming paths share the `_drop_checkpointed_current_user_from_context` + casual-fresh-chat suppression behavior (refs #1217 / #2308). 923 LOC across `api/models.py`, `api/routes.py`, `api/streaming.py`, `static/sessions.js` + four new test files; second-pass agent diff review LGTM after the streaming-path regression was caught and fixed.
+
+### Documentation
+
+- **PR #2575** by @Michaelyklam (refs #1925) — Advance the runtime-adapter RFC to the Slice 4 runner/sidecar planning gate after #2560 shipped the queue-staging clarification. The RFC now marks queue routing as staged by default, defines Slice 4a as a docs/test contract before any runner code lands, and pins default-off feature-flagging, restart/reattach success criteria, control parity, profile/workspace payload isolation, and explicit non-goals for legacy-backend removal or server-side queue scheduler work.
+
 ## [v0.51.92] — 2026-05-19 — Release BP (stage-385 — 7-PR full sweep batch — RFC Slice 3c clarification + workspace tree icon alignment + project move cache refresh + auto-compression handoff metadata + Grok OAuth provider catalog + anonymous custom endpoint picker fallback + PWA standalone reload + pull-to-refresh)
 
 ### Fixed

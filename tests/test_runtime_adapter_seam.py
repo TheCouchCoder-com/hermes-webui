@@ -309,7 +309,22 @@ def test_rfc_distinguishes_goal_routing_from_queue_route_staging():
     rfc = (routes.Path(__file__).parent.parent / "docs" / "rfcs" / "hermes-run-adapter-contract.md").read_text(encoding="utf-8")
 
     assert "#2544 shipped the first Slice 3c implementation" in rfc
+    assert "#2560 shipped the queue-staging clarification" in rfc
     assert "route now uses `RuntimeAdapter.update_goal(...)`" in rfc
-    assert "`queue_message(...)` remains a staged protocol method" in rfc
+    assert "`queue_message(...)` as a staged protocol method only" in rfc
     assert "no new server-side queue endpoint" in rfc
-    assert "or queue scheduler should be added just for adapter symmetry" in rfc
+    assert "no server-side queue endpoint or queue\n  scheduler should be added merely for adapter symmetry" in rfc
+
+
+def test_rfc_defines_slice4_runner_contract_before_runner_code():
+    routes = importlib.import_module("api.routes")
+    rfc = (routes.Path(__file__).parent.parent / "docs" / "rfcs" / "hermes-run-adapter-contract.md").read_text(encoding="utf-8")
+
+    assert "#### Slice 4a: Runner contract gate" in rfc
+    assert "docs/test contract PR before any\nrunner code lands" in rfc
+    assert "feature-flagged, default-off" in rfc
+    assert "The runner, not the main WebUI request process, owns" in rfc
+    assert "restart only\n   `hermes-webui.service`" in rfc
+    assert "profile,\n   workspace, attachments, model/provider, toolset, and source metadata" in rfc
+    assert "no removal of the legacy in-process backend" in rfc
+    assert "no default-on runner mode" in rfc

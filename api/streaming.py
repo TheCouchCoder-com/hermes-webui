@@ -39,6 +39,8 @@ from api.compression_anchor import visible_messages_for_anchor
 from api.metering import meter
 from api.run_journal import RunJournalWriter
 from api.turn_journal import append_turn_journal_event_for_stream
+from api.usage import prompt_cache_hit_percent
+from api.models import get_state_db_session_messages, reconciled_state_db_messages_for_session
 
 # Global lock for os.environ writes. Per-session locks (_agent_lock) prevent
 # concurrent runs of the SAME session, but two DIFFERENT sessions can still
@@ -247,6 +249,13 @@ def _preferred_agent_display_name() -> str:
     return name or 'Hermes'
 
 
+def _preferred_agent_display_name_for_session(session) -> str:
+    profile = str(getattr(session, 'profile', '') or '').strip()
+    if profile and profile != 'default':
+        return profile[:1].upper() + profile[1:]
+    return _preferred_agent_display_name()
+
+
 def _cancelled_turn_hint(agent_name: str | None = None) -> str:
     name = str(agent_name or _preferred_agent_display_name()).strip() or 'Hermes'
     return f'The run was cancelled by the user before {name} finished. No provider failure occurred.'
@@ -398,14 +407,14 @@ def _session_has_cancel_marker(session) -> bool:
     return False
 
 
-def _cancelled_turn_content(message: str = 'Task cancelled.') -> str:
+def _cancelled_turn_content(message: str = 'Task cancelled.', agent_name: str | None = None) -> str:
     """Return cancelled-turn copy matching the verbose provider-error layout."""
     _message = str(message or 'Task cancelled.').strip()
     if not _message.endswith('.'):
         _message += '.'
     return (
         f"**Task cancelled:** {_message}\n\n"
-        f"*{_cancelled_turn_hint()}*"
+        f"*{_cancelled_turn_hint(agent_name)}*"
     )
 
 
@@ -422,9 +431,10 @@ def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.') -> Non
     session.pending_attachments = []
     session.pending_started_at = None
     if not _session_has_cancel_marker(session):
+        agent_name = _preferred_agent_display_name_for_session(session)
         session.messages.append({
             'role': 'assistant',
-            'content': _cancelled_turn_content(message),
+            'content': _cancelled_turn_content(message, agent_name),
             '_error': True,
             'provider_details': str(message or 'Task cancelled.').strip(),
             'provider_details_label': 'Cancellation details',
@@ -2331,21 +2341,22 @@ def _has_task_resume_compaction_marker(messages):
     return False
 
 
+def _new_turn_context_from_messages(messages, msg_text):
+    """Return provider-facing history for a new user turn from a message list."""
+    history = _drop_checkpointed_current_user_from_context(messages, msg_text)
+    if _is_casual_fresh_chat_message(msg_text) and _has_task_resume_compaction_marker(history):
+        return []
+    return history
+
+
 def _context_messages_for_new_turn(session, msg_text):
     """Return provider-facing history for a new user turn.
 
     Compacted agent sessions can carry a hidden "resume the active task" summary
-    long after the visible UI looks like normal chat.  A short greeting should
-    not silently reactivate that old task; explicit continuation prompts still
-    keep the full compacted context.
+    in context_messages. If the user starts a fresh casual greeting in that old
+    session, do not feed that stale active-task summary back to the model.
     """
-    history = _drop_checkpointed_current_user_from_context(
-        _session_context_messages(session),
-        msg_text,
-    )
-    if _is_casual_fresh_chat_message(msg_text) and _has_task_resume_compaction_marker(history):
-        return []
-    return history
+    return _new_turn_context_from_messages(_session_context_messages(session), msg_text)
 
 
 def _stream_writeback_is_current(session, stream_id):
@@ -2356,6 +2367,53 @@ def _stream_writeback_is_current(session, stream_id):
     must not later persist its stale result over the newer transcript.
     """
     return bool(stream_id) and getattr(session, 'active_stream_id', None) == stream_id
+
+
+def _stream_writeback_can_supersede_recovery_marker(session, msg_text):
+    """Allow a finishing worker to replace its own stale-repair marker.
+
+    The stale-pending repair path can occasionally run while the original worker
+    is still alive but temporarily missing from the in-memory stream registry. It
+    clears ``active_stream_id`` and appends a "Response interrupted" marker. If
+    the original worker later finishes, treating ``active_stream_id is None`` as
+    stale drops the real answer and leaves the misleading marker visible.
+
+    This is intentionally narrow: only a session with no active/pending turn and
+    whose last visible row is the recovery marker for this exact user prompt may
+    be superseded. If a newer turn has appended anything after the marker, the
+    normal stale-writeback guard still wins.
+    """
+    if getattr(session, 'active_stream_id', None):
+        return False
+    if getattr(session, 'pending_user_message', None):
+        return False
+    if getattr(session, 'pending_attachments', None):
+        return False
+    messages = list(getattr(session, 'messages', None) or [])
+    if len(messages) < 2:
+        return False
+    last = messages[-1]
+    if not isinstance(last, dict) or not last.get('_error'):
+        return False
+    if last.get('type') != 'interrupted':
+        return False
+    content = str(last.get('content') or '')
+    if 'Response interrupted' not in content or 'WebUI process restarted' not in content:
+        return False
+
+    expected = ' '.join(str(msg_text or '').split())
+    if not expected:
+        return False
+    for msg in reversed(messages[:-1]):
+        if not isinstance(msg, dict):
+            continue
+        if msg.get('_error'):
+            continue
+        if msg.get('role') != 'user':
+            continue
+        actual = ' '.join(str(msg.get('content') or '').split())
+        return actual == expected
+    return False
 
 
 def _merge_display_messages_after_agent_result(previous_display, previous_context, result_messages, msg_text):
@@ -2988,6 +3046,7 @@ def _run_agent_streaming(
             'estimated_cost': 0,
             'cache_read_tokens': 0,
             'cache_write_tokens': 0,
+            'cache_hit_percent': None,
             'context_length': 0,
             'threshold_tokens': 0,
             'last_prompt_tokens': 0,
@@ -3025,6 +3084,10 @@ def _run_agent_streaming(
                         pass
 
         _real_prompt_tokens = int(_usage.get('last_prompt_tokens') or 0)
+        _usage['cache_hit_percent'] = prompt_cache_hit_percent(
+            _usage.get('cache_read_tokens') or 0,
+            _usage.get('input_tokens') or 0,
+        )
         if _real_prompt_tokens and _real_prompt_tokens != _live_prompt_exact_tokens[0]:
             _live_prompt_exact_tokens[0] = _real_prompt_tokens
             _live_prompt_estimate_tokens[0] = _real_prompt_tokens
@@ -3957,8 +4020,21 @@ def _run_agent_streaming(
             # or has been zeroed out (e.g. via a buggy migration / manual file edit).
             # Truthy-check covers None, missing-attr, and 0 uniformly.
             _turn_started_at = _pending_started_at if _pending_started_at else time.time()
-            _previous_messages = list(s.messages or [])
-            _previous_context_messages = _context_messages_for_new_turn(s, msg_text)
+            _external_state_messages = get_state_db_session_messages(getattr(s, 'session_id', None))
+            _previous_messages = list(
+                reconciled_state_db_messages_for_session(
+                    s,
+                    state_messages=_external_state_messages,
+                ) or []
+            )
+            _previous_context_messages = _new_turn_context_from_messages(
+                reconciled_state_db_messages_for_session(
+                    s,
+                    prefer_context=True,
+                    state_messages=_external_state_messages,
+                ),
+                msg_text,
+            )
             _pre_compression_count = getattr(
                 getattr(agent, 'context_compressor', None),
                 'compression_count', 0,
@@ -4083,13 +4159,20 @@ def _run_agent_streaming(
                 return
             with _agent_lock:
                 if not ephemeral and not _stream_writeback_is_current(s, stream_id):
-                    logger.info(
-                        "Skipping stale stream writeback for session %s stream %s; active_stream_id=%s",
-                        getattr(s, 'session_id', session_id),
-                        stream_id,
-                        getattr(s, 'active_stream_id', None),
-                    )
-                    return
+                    if _stream_writeback_can_supersede_recovery_marker(s, msg_text):
+                        logger.info(
+                            "Superseding stale recovery marker for session %s stream %s",
+                            getattr(s, 'session_id', session_id),
+                            stream_id,
+                        )
+                    else:
+                        logger.info(
+                            "Skipping stale stream writeback for session %s stream %s; active_stream_id=%s",
+                            getattr(s, 'session_id', session_id),
+                            stream_id,
+                            getattr(s, 'active_stream_id', None),
+                        )
+                        return
                 _result_messages = result.get('messages') or _previous_context_messages
                 if cancel_event.is_set():
                     _finalize_cancelled_turn(s, ephemeral=False)
@@ -4474,6 +4557,15 @@ def _run_agent_streaming(
                 estimated_cost = getattr(agent, 'session_estimated_cost_usd', None)
                 cache_read_tokens = getattr(agent, 'session_cache_read_tokens', 0) or 0
                 cache_write_tokens = getattr(agent, 'session_cache_write_tokens', 0) or 0
+                prev_input_tokens = getattr(s, 'input_tokens', 0) or 0
+                prev_cache_read_tokens = getattr(s, 'cache_read_tokens', 0) or 0
+                turn_input_tokens = max(0, input_tokens - prev_input_tokens)
+                turn_cache_read_tokens = max(0, cache_read_tokens - prev_cache_read_tokens)
+                # Per-turn percent is computed server-side from persisted session
+                # counters so the message label uses the same denominator as the
+                # final usage payload even if the browser missed an intermediate event.
+                cache_hit_percent = prompt_cache_hit_percent(cache_read_tokens, input_tokens)
+                turn_cache_hit_percent = prompt_cache_hit_percent(turn_cache_read_tokens, turn_input_tokens)
                 if input_tokens > 0:
                     s.input_tokens = input_tokens
                 if output_tokens > 0:
@@ -4730,6 +4822,8 @@ def _run_agent_streaming(
                 'estimated_cost': estimated_cost,
                 'cache_read_tokens': cache_read_tokens,
                 'cache_write_tokens': cache_write_tokens,
+                'cache_hit_percent': cache_hit_percent,
+                'turn_cache_hit_percent': turn_cache_hit_percent,
                 'duration_seconds': round(_turn_duration_seconds, 3),
             }
             if _turn_tps is not None:
@@ -5555,7 +5649,10 @@ def cancel_stream(stream_id: str) -> bool:
                 if not _cancel_marker_exists:
                     _cs.messages.append({
                         'role': 'assistant',
-                        'content': _cancelled_turn_content('Task cancelled.'),
+                        'content': _cancelled_turn_content(
+                            'Task cancelled.',
+                            _preferred_agent_display_name_for_session(_cs),
+                        ),
                         '_error': True,
                         'provider_details': 'Task cancelled.',
                         'provider_details_label': 'Cancellation details',
