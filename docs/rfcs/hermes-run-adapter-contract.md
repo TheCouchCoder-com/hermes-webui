@@ -52,7 +52,7 @@ The immediate goal is not to build a sidecar. The immediate goal is to define th
 browser contract, classify current runtime state, and gate the first reversible
 journal slice.
 
-## Current Gate State — 2026-05-17
+## Current Gate State — 2026-05-18
 
 Slice 1 is now past the first active validation gate:
 
@@ -85,11 +85,19 @@ adapter-seam work:
 - #2487 shipped the Slice 3b approval/clarify gate, and #2496 shipped approval /
   clarify response routing through the adapter seam in v0.51.89.
 - #2509 shipped the Slice 3c queue/continue + goal gate in v0.51.90.
+- #2544 shipped the first Slice 3c implementation in v0.51.91. The goal
+  route now uses `RuntimeAdapter.update_goal(...)` only when
+  `HERMES_WEBUI_RUNTIME_ADAPTER=legacy-journal` is enabled, while preserving the
+  legacy-direct response shape and leaving post-turn goal evaluation in the
+  existing agent loop.
 
-The next gate is not the runner/sidecar yet. It is the Slice 3c implementation:
-add the queue/goal adapter methods and route accepted legacy control paths
-through them without moving goal evaluation, continuation scheduling, or
-execution ownership out of the existing agent loop.
+The next gate is still not the runner/sidecar by default. Slice 3c's goal route
+is shipped, and `queue_message(...)` remains a staged protocol method. Queue /
+continue routing needs an explicit follow-up contract because the legacy `/queue`
+path is browser-side queue/drain behavior today; no new server-side queue endpoint
+or queue scheduler should be added just for adapter symmetry. If maintainers want
+queue/continue to move before Slice 4, that follow-up should specify the exact
+legacy entry point, response shape, and ordering/idempotency contract first.
 
 ## Goals
 
@@ -354,12 +362,12 @@ class RuntimeAdapter:
     ) -> ControlResult: ...
 ```
 
-`queue_message` is named for the legacy `/api/session/queue` payload: it
-accepts follow-up chat text rather than arbitrary runtime input. The method name
-does not require the HTTP route to change; it documents the adapter-level control
-semantics that a later Slice 3c implementation should preserve. The method enters
-the protocol before route wiring so queue/continue can land as a separate, small
-control-routing follow-up instead of being coupled to goal routing.
+`queue_message` is named for the legacy queued-message payload shape: it accepts
+follow-up chat text rather than arbitrary runtime input. The method name does not
+require a new HTTP route. Today `/queue` is primarily browser-side queue/drain
+behavior; the adapter method enters the protocol so a later queue/continue slice
+has a typed control surface, but route wiring remains deliberately staged until
+the exact legacy entry point and ordering/idempotency contract are explicit.
 
 For `update_goal`, the `action` argument is the bounded adapter capability label.
 During the legacy-journal slice, the legacy goal parser still receives the full

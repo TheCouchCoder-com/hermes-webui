@@ -302,3 +302,14 @@ def test_chat_start_adapter_path_preserves_legacy_response_shape():
     assert 'response.setdefault("run_id", result.run_id)' not in adapter_branch
     assert 'response.setdefault("status", result.status)' not in adapter_branch
     assert 'response.setdefault("active_controls", result.active_controls)' not in adapter_branch
+
+
+def test_rfc_distinguishes_goal_routing_from_queue_route_staging():
+    routes = importlib.import_module("api.routes")
+    rfc = (routes.Path(__file__).parent.parent / "docs" / "rfcs" / "hermes-run-adapter-contract.md").read_text(encoding="utf-8")
+
+    assert "#2544 shipped the first Slice 3c implementation" in rfc
+    assert "route now uses `RuntimeAdapter.update_goal(...)`" in rfc
+    assert "`queue_message(...)` remains a staged protocol method" in rfc
+    assert "no new server-side queue endpoint" in rfc
+    assert "or queue scheduler should be added just for adapter symmetry" in rfc

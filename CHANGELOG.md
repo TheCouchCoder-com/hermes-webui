@@ -12,6 +12,25 @@
 
 ## [Unreleased]
 
+
+## [v0.51.92] — 2026-05-19 — Release BP (stage-385 — 7-PR full sweep batch — RFC Slice 3c clarification + workspace tree icon alignment + project move cache refresh + auto-compression handoff metadata + Grok OAuth provider catalog + anonymous custom endpoint picker fallback + PWA standalone reload + pull-to-refresh)
+
+### Fixed
+
+- **PR #2563** by @Michaelyklam (closes #2554) — Align workspace-tree file rows with sibling directory rows by reserving the same expand/collapse toggle slot for files via a new `.file-tree-toggle-placeholder` element. Expanded directories now show child files stepped in at the same icon column as child folders. Directory toggles and file interactions are unchanged; source-level regression coverage and before/after PNGs included.
+- **PR #2561** by @nanookclaw (closes #2551) — Refresh the authoritative `_allSessions` cache when the project picker moves a session to/from a project. Previous code mutated only the shallow sidebar row copy, so `renderSessionListFromCache()` re-read the unchanged cache and repainted a stale project dot until the next `/api/sessions` poll healed the UI. Both the "Removed from project" and "Moved to <project>" branches now write the new `project_id` into `_allSessions[idx]` before re-rendering.
+- **PR #2567** by @dso2ng (refs #2477) — Surface automatic-compression handoff metadata through the `compressed` SSE event so the active browser stream keeps its completion card even after the backend rotates the session id from the origin to a compressed continuation. The event now carries both `old_session_id` and `new_session_id`/`continuation_session_id`; the frontend `compressed` listener accepts either, and the automatic-compression detail line names the compressed continuation session so the done state isn't silently dropped.
+- **PR #2568** by @Michaelyklam (closes #2545) — Add the Hermes Agent `xai-oauth` provider to the WebUI's OAuth provider catalog so Grok OAuth accounts authenticated via the Hermes CLI appear in Settings → Providers and the `/api/models` picker. The provider is treated as CLI-managed OAuth (no WebUI API-key form) and uses the live Hermes CLI model catalog when available with a Grok 4.20 static fallback.
+- **PR #2550** by @espokaos-ops (refs #2542) — Keep anonymous custom OpenAI-compatible endpoints in the model picker even when the configured `/v1/models` probe fails. Lightweight relays and llama-server-style deployments that authenticate `/v1/chat/completions` but not `/v1/models` no longer have their provider group silently dropped from the picker. Users can type a model id manually in the free-form input when no live catalog is available.
+
+### Added
+
+- **PR #2548** by @espokaos-ops — Add a PWA-standalone reload affordance. A small refresh button appears in the app titlebar (visible only under `@media (display-mode: standalone), (display-mode: fullscreen)`) so users running the WebUI as an installed home-screen PWA can reload without re-launching the app. Adds a complementary pull-to-refresh gesture on the messages container with an 80px threshold and a smooth-scroll-to-top guard so accidental triggers while reading history feel intentional. 4-viewport screenshots (390/1280/1440/1920, light/dark, hover/idle) included under `docs/pr-media/2548/`.
+
+### Documentation
+
+- **PR #2560** by @Michaelyklam (refs #1925) — Clarify the RuntimeAdapter Slice 3c state after #2544 shipped. The RFC now distinguishes shipped `/api/goal` routing through `RuntimeAdapter.update_goal(...)` from the still-staged `queue_message(...)` protocol method, and explicitly warns not to add a new server-side queue endpoint or queue scheduler merely for adapter symmetry while `/queue` remains browser-side queue/drain behavior.
+
 ## [v0.51.91] — 2026-05-18 — Release BO (stage-384 — 5-PR full sweep batch — reasoning-replay history fix + archive-extract per-session inbox + fallback streaming warnings + sanitized custom-provider env hints + Slice 3c queue/goal adapter routing)
 
 ### Fixed

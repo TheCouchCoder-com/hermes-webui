@@ -692,6 +692,7 @@ _PROVIDER_DISPLAY = {
     "anthropic": "Anthropic",
     "openai": "OpenAI",
     "openai-codex": "OpenAI Codex",
+    "xai-oauth": "xAI Grok OAuth",
     "copilot": "GitHub Copilot",
     "zai": "Z.AI / GLM",
     "kimi-coding": "Kimi / Moonshot",
@@ -1207,6 +1208,9 @@ _PROVIDER_MODELS = {
     ],
     # xAI — prefix used in OpenRouter model IDs (x-ai/grok-4-20)
     "x-ai": [
+        {"id": "grok-4.20", "label": "Grok 4.20"},
+    ],
+    "xai-oauth": [
         {"id": "grok-4.20", "label": "Grok 4.20"},
     ],
 }
@@ -3852,6 +3856,18 @@ def get_available_models() -> dict:
                                 "models": models_for_group,
                             }
                         )
+                    elif pid == "custom" and cfg_base_url:
+                        # Anonymous custom endpoint: /v1/models probe may have
+                        # failed (e.g. llama-server, lightweight relay), but the
+                        # chat endpoint itself may still work.  Add the group
+                        # with an empty model list so the user can type a model
+                        # ID manually rather than being blocked by a silent
+                        # probe failure (#2542).
+                        groups.append({
+                            "provider": provider_name,
+                            "provider_id": pid,
+                            "models": [],
+                        })
         else:
             if default_model:
                 label = _get_label_for_model(default_model, groups)

@@ -160,6 +160,19 @@ def test_auto_compression_running_detail_avoids_duplicate_message_text():
     assert "${base}\\nElapsed:" not in helper
 
 
+def test_auto_compression_done_detail_surfaces_continuation_handoff():
+    src = _read("static/ui.js")
+    start = src.find("function _autoCompressionDetailText")
+    assert start != -1, "auto compression detail helper not found"
+    end = src.find("function _autoCompressionCardsHtml", start)
+    assert end != -1, "auto compression card helper not found after detail helper"
+    helper = src[start:end]
+
+    assert "continuationSessionId" in helper
+    assert "Continued in compressed session" in helper
+    assert "return [base,handoff].filter(Boolean).join('\\n');" in helper
+
+
 def test_auto_compression_live_card_keeps_elapsed_state_for_timer_refresh():
     src = _read("static/ui.js")
     start = src.find("function appendLiveCompressionCard")
@@ -208,7 +221,27 @@ def test_auto_compression_sse_keeps_inactive_and_malformed_paths_safe():
     assert guard in block
     assert block.index(guard) < block.index("setCompressionUi")
     assert "try{ d=JSON.parse(e.data||'{}')||{}; }catch(_){ d={}; }" in block
-    assert "if(d.session_id&&d.session_id!==activeSid) return;" in block
+    assert "const eventSid=d.old_session_id||d.session_id||activeSid;" in block
+    # The listener also accepts a rotated continuation session id so journal-
+    # replay reconnects after compression rotate land the done card.
+    # See Opus advisor followup on stage-385 (v0.51.92).
+    event_guard = "if(eventSid!==activeSid && d.new_session_id!==activeSid && d.continuation_session_id!==activeSid) return;"
+    assert event_guard in block
+
+
+def test_auto_compression_done_accepts_rotated_continuation_session_event():
+    block = _compressed_listener_block()
+
+    # Auto-compression can rotate the backend session id before the 'compressed'
+    # event is emitted. The browser stream still belongs to the pre-compression
+    # activeSid, so the listener must correlate on old_session_id and keep the
+    # continuation id as display metadata instead of dropping the event.
+    assert "const eventSid=d.old_session_id||d.session_id||activeSid;" in block
+    assert "const continuationSid=d.new_session_id||d.continuation_session_id||'';" in block
+    event_guard = "if(eventSid!==activeSid && d.new_session_id!==activeSid && d.continuation_session_id!==activeSid) return;"
+    assert event_guard in block
+    assert block.index("const eventSid=") < block.index(event_guard)
+    assert "continuationSessionId:continuationSid" in block
 
 
 def test_auto_compression_done_sse_refreshes_context_indicator_usage():
@@ -228,8 +261,26 @@ def test_auto_compression_done_payload_includes_live_usage_snapshot():
     assert end != -1, "compressed SSE payload end not found"
     block = src[start:end]
 
-    assert "'session_id': s.session_id" in block
+    assert "'session_id': _compression_origin_session_id" in block
+    assert "'old_session_id': _compression_origin_session_id" in block
+    assert "'new_session_id': _compression_continuation_session_id" in block
+    assert "'continuation_session_id': _compression_continuation_session_id" in block
     assert "'usage': _live_usage_snapshot()" in block
+
+
+def test_auto_compression_rotation_tracks_origin_and_continuation_ids_for_sse():
+    src = _read("api/streaming.py")
+    rotate_start = src.find("# ── Handle context compression side effects ──")
+    assert rotate_start != -1, "compression side-effect block not found"
+    rotate_end = src.find("# Stamp 'timestamp'", rotate_start)
+    assert rotate_end != -1, "compression side-effect block end not found"
+    block = src[rotate_start:rotate_end]
+
+    assert "_compression_origin_session_id = session_id" in block
+    assert "_compression_continuation_session_id = None" in block
+    assert "_compression_origin_session_id = old_sid" in block
+    assert "_compression_continuation_session_id = new_sid" in block
+    assert "'new_session_id': _compression_continuation_session_id" in block
 
 
 def test_auto_compression_card_reuses_compression_card_renderer():
