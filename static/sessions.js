@@ -1267,10 +1267,21 @@ function _messageComparableText(m){
   return String(m.content||'').trim();
 }
 
+function _stripAttachedFilesMarker(text){
+  return String(text||'').replace(/\n\n\[Attached files: [^\]]+\]$/,'').trim();
+}
+
 function _sameTranscriptMessage(a,b){
-  return !!(a&&b) &&
-    String(a.role||'')===String(b.role||'') &&
-    _messageComparableText(a)===_messageComparableText(b);
+  if(!(a&&b)) return false;
+  const role=String(a.role||'');
+  if(role!==String(b.role||'')) return false;
+  const aText=_messageComparableText(a);
+  const bText=_messageComparableText(b);
+  if(aText===bText) return true;
+  if(role==='user'){
+    return _stripAttachedFilesMarker(aText)===_stripAttachedFilesMarker(bText);
+  }
+  return false;
 }
 
 function _mergeInflightTailMessages(baseMessages, inflightMessages){
@@ -1481,12 +1492,12 @@ function _sessionSnapshotById(sid){
 function _pinnedSessionCount(){
   return (_allSessions||[]).filter(s=>s&&s.pinned&&!s.archived).length;
 }
-function _pinnedSessionsLimit(){
+function _getPinnedSessionsLimit(){
   const limit=parseInt(window._pinnedSessionsLimit||3,10);
   return (Number.isFinite(limit)&&limit>0)?limit:3;
 }
 function _pinnedSessionsLimitMessage(){
-  const limit=_pinnedSessionsLimit();
+  const limit=_getPinnedSessionsLimit();
   return `Only ${limit} conversations can be pinned. Unpin one before pinning another.`;
 }
 function _worktreeSessionCount(ids){
@@ -1799,7 +1810,7 @@ function _openSessionActionMenu(session, anchorEl){
       }
     ));
   }
-  const pinLimitReached=!session.pinned&&_pinnedSessionCount()>=_pinnedSessionsLimit();
+  const pinLimitReached=!session.pinned&&_pinnedSessionCount()>=_getPinnedSessionsLimit();
   menu.appendChild(_buildSessionAction(
     session.pinned?t('session_unpin'):t('session_pin'),
     pinLimitReached?_pinnedSessionsLimitMessage():(session.pinned?t('session_unpin_desc'):t('session_pin_desc')),

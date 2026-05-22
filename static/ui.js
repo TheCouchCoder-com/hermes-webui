@@ -992,8 +992,10 @@ async function populateModelDropdown(){
       }
       sel.appendChild(og);
     }
-    // Set default model from server if no localStorage preference
-    if(data.default_model && !(typeof _readPersistedModelState==='function'&&_readPersistedModelState()) && !localStorage.getItem('hermes-webui-model')){
+    // Set default model from server on fresh/blank boot. Loaded sessions keep
+    // their own persisted model and apply it via loadSession(). Do not let stale
+    // browser localStorage suppress the profile default.
+    if(data.default_model && !(S.session&&S.session.model)){
       _applyModelToDropdown(data.default_model, sel, data.active_provider||null);
     }
     if(typeof syncModelChip==='function') syncModelChip();
@@ -4295,6 +4297,20 @@ function _formatUpdateTargetStatus(label,info){
   const noun=info.release_based?'release':'update';
   return `${label}${release}: ${info.behind} ${noun}${info.behind>1?'s':''}`;
 }
+function _formatUpdateCheckError(label,info){
+  if(!info||!info.error) return null;
+  const detail=String(info.error).replace(/^fetch failed:?\s*/i,'').trim();
+  return detail ? `${label}: ${detail}` : label;
+}
+function _isSafeUpdateCompareUrl(url){
+  if(!url||!/^https?:\/\//i.test(url)) return false;
+  try{
+    const parsed=new URL(url);
+    return parsed.protocol==='https:'||parsed.protocol==='http:';
+  }catch(e){
+    return false;
+  }
+}
 function _renderUpdateBannerRow(target,label,info){
   const row=$('updateRow-'+target);
   const msg=$('updateMsg-'+target);
@@ -7130,7 +7146,10 @@ let _katexReady=false;
 
 function renderKatexBlocks(container){
   const root=container||document;
-  const blocks=root.querySelectorAll('.katex-block:not([data-rendered]),.katex-inline:not([data-rendered])');
+  const blocks=root.querySelectorAll(
+    '.katex-block:not([data-rendered]),.katex-inline:not([data-rendered]),'+
+    'equation-block:not([data-rendered]),equation-inline:not([data-rendered])'
+  );
   if(!blocks.length) return;
   if(!_katexReady){
     if(!_katexLoading){
@@ -7152,7 +7171,8 @@ function renderKatexBlocks(container){
   blocks.forEach(el=>{
     el.dataset.rendered='true';
     const src=el.textContent||'';
-    const displayMode=el.dataset.katex==='display';
+    const tagName=(el.tagName||'').toLowerCase();
+    const displayMode=el.dataset.katex==='display'||tagName==='equation-block';
     try{
       katex.render(src,el,{
         displayMode,

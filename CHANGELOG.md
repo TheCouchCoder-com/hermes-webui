@@ -14,6 +14,19 @@
 ## [Unreleased]
 
 
+## [v0.51.107] — 2026-05-21 — Release CE (stage-400 — 8-PR batch — pinned-sessions-limit getter rename + uploaded-file user-turn dedupe + active-run repair guard + incremental KaTeX streaming + profile default model on fresh boot + French locale completion + update-check error surfacing + release-update apply path)
+
+### Fixed
+
+- **PR #2718** by @eslicarrillo — Follow-up to v0.51.105's #2700: rename `_pinnedSessionsLimit()` to `_getPinnedSessionsLimit()` so the helper matches the rest of `sessions.js`'s `_get*()` naming convention for accessors. No behavior change.
+- **PR #2723** by @ai-ag2026 — Deduplicate uploaded-file user turns when the optimistic browser bubble uses plain text but the server-persisted pending turn includes the `[Attached files: ...]` suffix. Previously a turn with attachments could render twice (optimistic + persisted) in the visible transcript before reconciling.
+- **PR #2721** by @ai-ag2026 — During session repair on restart, treat sessions with a live in-flight run as active. The prior code path could prune restart-stale state for sessions that were actually mid-stream when the server bounced, dropping the resumable run. Now the active-stream check gates the prune so live runs survive a restart cleanly.
+- **PR #2710** by @Michaelyklam — Render streamed math (KaTeX) incrementally during a stream so completed expressions render in place as their closing delimiter arrives, instead of all-at-once at the end of the turn. Eliminates the visual flash where prose-with-math sat as raw `\\[...\\]` markup until the final render pass.
+- **PR #2709** by @starship-s — On a fresh boot with no persisted model in localStorage, prefer the active profile's configured default model over the static HTML option. Previously a clean install / first-load could surface the placeholder model until the user manually picked a different one, even when the profile had a default configured. Behavior note: the boot path now calls `_clearPersistedModelState()` on each load when no profile default is found, so a previously-persisted user pick is wiped on refresh — this is intentional (matches the PR's "profile default wins on fresh boot" intent and is ratified by `tests/test_model_default_boot_precedence.py`).
+- **PR #2722** by @victorwhale — Complete French (`fr`) locale coverage: +93 missing translation keys covering Settings, profile-ops, gateway tile, skills modal, session controls, and i18n test surfaces. Coverage 88.8% → 96.7%.
+- **PR #2717** by @ai-ag2026 — Surface update-check fetch errors in the UI instead of failing silently. The background `api/updates/check` request previously swallowed network failures, so an offline / blocked-CDN scenario showed no indication that the version banner couldn't render. Now the failure is logged and exposed to the System panel's update-status card.
+- **PR #2719** by @ai-ag2026 — Apply release-update target correctly when the user clicks "Check for updates" after a prior dismissal: clears the `sessionStorage` check-once stamp and forces banner re-evaluation. The prior path silently no-op'd because the once-per-tab guard fired before the explicit user click could re-trigger the fetch.
+
 ## [v0.51.106] — 2026-05-21 — Release CD (stage-399 — 3-PR batch — restamped state.db replay dedupe + context_messages dedupe so agent doesn't see duplicates + empty _partial bloat fix)
 
 ### Fixed
