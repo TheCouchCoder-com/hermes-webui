@@ -82,11 +82,14 @@ adapter-seam work:
 - #2479 shipped the first Slice 3a implementation in v0.51.86, routing Stop
   Generation through `RuntimeAdapter.cancel_run(...)` only when
   `HERMES_WEBUI_RUNTIME_ADAPTER=legacy-journal` is enabled.
+- #2487 shipped the Slice 3b approval/clarify gate, and #2496 shipped approval /
+  clarify response routing through the adapter seam in v0.51.89.
+- #2509 shipped the Slice 3c queue/continue + goal gate in v0.51.90.
 
-The next gate is not the runner/sidecar yet. It is the next control migration
-gate: approval and clarify must be specified together before implementation,
-because both are callback-backed, user-mediated pauses in the active agent loop
-and have the same state-lifetime/replay hazards.
+The next gate is not the runner/sidecar yet. It is the Slice 3c implementation:
+add the queue/goal adapter methods and route accepted legacy control paths
+through them without moving goal evaluation, continuation scheduling, or
+execution ownership out of the existing agent loop.
 
 ## Goals
 
@@ -354,7 +357,15 @@ class RuntimeAdapter:
 `queue_message` is named for the legacy `/api/session/queue` payload: it
 accepts follow-up chat text rather than arbitrary runtime input. The method name
 does not require the HTTP route to change; it documents the adapter-level control
-semantics that a later Slice 3c implementation should preserve.
+semantics that a later Slice 3c implementation should preserve. The method enters
+the protocol before route wiring so queue/continue can land as a separate, small
+control-routing follow-up instead of being coupled to goal routing.
+
+For `update_goal`, the `action` argument is the bounded adapter capability label.
+During the legacy-journal slice, the legacy goal parser still receives the full
+`text` payload and remains authoritative for details such as the body of
+`set <goal text>`. Future slices must not route goal semantics from `action`
+alone; doing so would drop the goal body and change `/api/goal` behavior.
 
 Required data classes / payload fields:
 
@@ -364,7 +375,7 @@ Required data classes / payload fields:
 | `RunStartResult` | `run_id`, `session_id`, `stream_id`, `status`, `started_at`, `cursor`, `active_controls` | `stream_id` may remain the legacy stream id during Slice 2. |
 | `RunStatus` | `run_id`, `session_id`, `status`, `last_event_id`, `terminal_state`, `active_controls`, `pending_approval_id`, `pending_clarify_id` | Backed by live legacy state plus journal/session metadata. |
 | `RunEventStream` | ordered events matching Artifact 1, resumable from cursor | Can be implemented by existing SSE + journal replay at first. |
-| `ControlResult` | `accepted`, `status`, `event_id`, `safe_message` | Controls may still call existing handlers in Slice 2. |
+| `ControlResult` | `accepted`, `status`, `event_id`, `safe_message`, optional internal `payload` | Controls may still call existing handlers in Slice 2. Public HTTP responses must not leak adapter-only fields unless a later RFC expands them. |
 
 The interface is intentionally narrower than a runner. It does not own `AIAgent`,
 tool execution, callback queues, cancellation flags, approval callbacks, or
@@ -438,13 +449,14 @@ execution-survives-WebUI-restart gate remains deferred to Slice 4.
 ### Slice 3: Control migration
 
 Status as of 2026-05-18: Slice 3a cancel routing shipped in v0.51.86 via #2479,
-and Slice 3b approval/clarify routing shipped in v0.51.89 via #2496 / #2507.
+Slice 3b approval/clarify routing shipped in v0.51.89 via #2496 / #2507, and
+the Slice 3c queue/continue + goal gate shipped in v0.51.90 via #2509.
 Cancel was the smallest control-plane migration because it already had one clear
 browser affordance, one active-run target, and an existing legacy handler to
 delegate to. Approval and clarify then proved the same protocol-translator shape
-for user-mediated callback controls. Queue/continue and goal remain intentionally
-held behind the next gate because they can change run lifecycle semantics rather
-than just resolve an already-pending control.
+for user-mediated callback controls. Queue/continue and goal are the final
+pre-runner control migration because they can change run lifecycle semantics
+rather than just resolve an already-pending control.
 
 Scope:
 

@@ -12,6 +12,19 @@
 
 ## [Unreleased]
 
+## [v0.51.91] — 2026-05-18 — Release BO (stage-384 — 5-PR full sweep batch — reasoning-replay history fix + archive-extract per-session inbox + fallback streaming warnings + sanitized custom-provider env hints + Slice 3c queue/goal adapter routing)
+
+### Fixed
+
+- **PR #2536** by @Michaelyklam (closes #2514, refs #2535) — Stop reasoning-only Thinking entries from being replayed into provider-facing history as blank assistant turns. Long WebUI sessions were accumulating duplicated stale Thinking blocks and inflated Activity/tool metadata on later turns when reasoning-only display entries (from interrupted/canceled turns) got reinserted into the restored conversation history. The fix keeps visible Thinking cards in the transcript while filtering them out of provider-facing replay. Settled compact Activity rerenders now also clear previously inserted Thinking rows before rebuilding the visible transcript.
+- **PR #2520** by @OneFat3 (refs #2247) — Route archive extraction (`/api/upload/extract`) through the per-session attachment inbox (`_session_attachment_dir`) instead of hardcoded `Path(s.workspace)`, matching the single-file upload path. Extracted archives now land at `<attachment_root>/<session_id>/<archive_stem>/` so session deletion cleanup covers them and per-session isolation is preserved when `HERMES_WEBUI_ATTACHMENT_DIR` is configured.
+- **PR #2505** by @cyberdyne187 — Surface provider fallback and rate-limit lifecycle notices as auto-clearing fallback warnings in the streaming composer status. The new bridge in `_agent_status_callback` matches agent lifecycle messages containing `rate limited` / `switching to fallback` / `falling back` / `fallback activated` / `trying fallback` and emits them as `warning` events with `type=fallback`, so the existing `static/messages.js` warning channel surfaces them with the correct auto-clear contract instead of letting them drop silently.
+- **PR #2556** by @Michaelyklam (closes #2541) — Sanitize auto-generated custom-provider API-key environment variable names so endpoint-derived provider ids such as `custom:gpu.local-8000` use POSIX-safe names like `CUSTOM_GPU_LOCAL_8000_API_KEY`. Runtime custom-provider key resolution now checks the sanitized env var first and falls back to the legacy punctuation-preserving name with a one-shot deprecation warning. Configured literal `api_key` values and explicit `key_env` config are unchanged.
+
+### Documentation
+
+- **PR #2544** by @Michaelyklam (refs #1925) — Implement the first Slice 3c RuntimeAdapter control routing. `RuntimeAdapter` / `LegacyJournalRuntimeAdapter` now expose `queue_message(...)` and `update_goal(...)` as protocol-translator delegates, and the `/api/goal` route uses `update_goal(...)` only when `HERMES_WEBUI_RUNTIME_ADAPTER=legacy-journal` is enabled while preserving the legacy-direct response shape. The change keeps `/queue`'s existing browser-side drain semantics and goal post-turn evaluation in the current agent loop; no runner/sidecar, WebUI-owned queue, goal scheduler, cached-agent table, or execution-survives-restart claim is introduced.
+
 ## [v0.51.90] — 2026-05-18 — Release BN (stage-383 — 10-PR full sweep batch — empty-gateway messaging history fix + previous-messaging-sessions setting + Kanban board switcher layout + UI/UX demo theme controls + Slice 3c queue/goal RFC gate + keyless custom endpoints + custom-provider remote model catalog parity + auto-compression elapsed timer + new-conversation cold-start guard + Kanban drag-drop detail open fix)
 
 ### Fixed
@@ -32,7 +45,6 @@
 
 - **PR #2511** by @franksong2702 (refs #2502 / #2503) — Update the `docs/ui-ux/` demo appearance controls to initialize as `class="dark" data-skin="slate"` instead of the deprecated `data-theme`-only buttons and legacy theme names. Brings the demo pages in line with the live Theme + Skin contract referenced from the new `docs/CONTRACTS.md` so contributors following the contract-index path don't land on stale demos.
 - **PR #2509** by @Michaelyklam (refs #1925) — Advance the runtime-adapter RFC after the Slice 3b approval/clarify seam shipped in v0.51.89. The RFC now marks Slice 3b as shipped and defines the next Slice 3c queue/continue + goal control gate: route those controls through `RuntimeAdapter.queue_message(...)` / `update_goal(...)` only after pinning stable response contracts, bounded unavailable-control behavior, replayable lifecycle/status evidence, ordering/idempotency expectations, and explicit non-goals for runner/sidecar ownership or a WebUI-owned queue/goal scheduler. Docs + adapter-seam regression test only — no runtime/control routing changes in this PR.
-
 ## [v0.51.89] — 2026-05-18 — Release BM (stage-382 — 6-PR full sweep batch — runtime adapter approval/clarify seam + SOUL.md memory panel + #1855 resolve_model_provider fast-path + PWA sidebar spinner fix + /model active-provider preference + contributor contract docs index)
 
 ### Changed

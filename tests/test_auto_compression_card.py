@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from api.streaming import _is_fallback_lifecycle_message
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -38,7 +40,7 @@ def test_auto_compression_running_sse_uses_active_session_running_card():
     assert "message:d.message||'Auto-compressing context...'" in block
 
 
-def test_auto_compression_running_sse_is_emitted_from_agent_lifecycle_status():
+def test_agent_status_callback_emits_compressing_and_warning_events():
     src = _read("api/streaming.py")
     start = src.find("def _agent_status_callback")
     assert start != -1, "agent status callback bridge not found"
@@ -46,6 +48,7 @@ def test_auto_compression_running_sse_is_emitted_from_agent_lifecycle_status():
     assert end != -1, "status callback block end marker not found"
     block = src[start:end]
 
+    # compressing events for compression lifecycle notices
     assert "put('compressing'" in block
     assert "'session_id': session_id" in block
     assert "'message': 'Auto-compressing context to continue...'" in block
@@ -53,9 +56,45 @@ def test_auto_compression_running_sse_is_emitted_from_agent_lifecycle_status():
     assert "'compressing'" in block
     assert "'compacting context'" in block
     assert "'context too large'" in block
+
+    # warning events with type:fallback for rate-limit/fallback lifecycle notices
+    assert "put('warning'" in block
+    assert "'type': 'fallback'" in block
+    assert "'rate limited'" in src
+    assert "'switching to fallback'" in src
+    assert "'falling back'" in src
+    assert "'fallback activated'" in src
+    assert "'trying fallback'" in src
+
+    # Verify callback is wired to agent
     assert "'status_callback' in _agent_params" in src
     assert "_agent_kwargs['status_callback'] = _agent_status_callback" in src
     assert "agent.status_callback = _agent_kwargs.get('status_callback')" in src
+
+
+def test_agent_status_callback_wiring():
+    src = _read("api/streaming.py")
+    assert "_agent_status_callback" in src
+    assert "_agent_kwargs['status_callback'] = _agent_status_callback" in src
+
+
+def test_fallback_lifecycle_message_predicate_matches_agent_emitters():
+    assert _is_fallback_lifecycle_message(
+        "lifecycle",
+        "Rate limited — switching to fallback provider...",
+    )
+    assert _is_fallback_lifecycle_message(
+        "lifecycle",
+        "Non-retryable error (HTTP 500) — trying fallback...",
+    )
+    assert not _is_fallback_lifecycle_message(
+        "tool",
+        "Rate limited — switching to fallback provider...",
+    )
+    assert not _is_fallback_lifecycle_message(
+        "lifecycle",
+        "Auto-compressing context to continue...",
+    )
 
 
 def test_auto_compression_completion_transition_is_preserved_after_running_listener():
