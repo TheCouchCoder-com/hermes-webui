@@ -14,6 +14,24 @@
 ## [Unreleased]
 
 
+## [v0.51.100] — 2026-05-20 — Release BX (stage-393 — 3-PR deep-review batch — lazy journal recovery retry + faster profile-switch + cross-tab session list SSE sync)
+
+### Fixed
+
+- **PR #2615** by @Isla-Liu — Self-heal stalled interrupted-turn markers by lazily retrying run-journal recovery on subsequent sidebar/full-load reads. When `_apply_core_sync_or_error_marker` lands in the "interrupted, no journal yet" branch, the session now carries `_pending_journal_recovery` metadata so the next `get_session()` call re-runs `_append_journaled_partial_output(..., dedupe_existing=True)` if a fresh journal has materialized in the meantime. Bounded by three independent ceilings: `_JOURNAL_RETRY_MAX_ATTEMPTS = 12` (attempts on sealed-but-unrecoverable journals), `_JOURNAL_RETRY_GIVEUP_SECONDS = 24 * 3600` (wall-clock cap that fires even when the journal never materializes), and an explicit "no stream id → demote immediately" branch. Per-session `threading.Lock` (non-blocking acquire) guards concurrent `get_session()` callers; second caller no-ops to `False`. Closes a real WSL2/network-FS class of bug where the recovery marker stuck on a transiently-missing journal and never self-healed without a server restart.
+
+### Changed
+
+- **PR #2633** by @dobby-d-elf — Make agent profile switching and initial app boot dramatically faster (~25× on the contributor's benchmark). Switch-time: applies the selected profile's defaults immediately (resolved via a per-profile `_profile_default_model_state(profile)` config read), refreshes the visible/current screen, schedules non-visible workspace/model metadata in the background after the current view settles. A `_profileSwitchGeneration` counter is checked at five `await` boundaries to abort stale switches when the user re-toggles mid-refresh. Boot-time: workspace and onboarding fetches run in parallel instead of serial; onboarding short-circuits with `Promise.resolve(false)` when `onboarding_completed` is true. Boot synthetic model options now carry `data-provider` metadata so a pre-catalog `/api/chat/start` doesn't fuzzy-fallback to the wrong provider. FLIP animation capture/play is index-pinned by a new positional test; `prefers-reduced-motion` is honored in both JS and CSS. Server-side `new_session()` resolves the requesting profile's `config.yaml` directly rather than the process-global, preventing cross-tagging when the URL omits `model`/`model_provider`.
+
+### Added
+
+- **PR #2637** by @dobby-d-elf — Push lightweight session-list invalidation events to connected browsers via a new in-process pub/sub bus (`api/session_events.py`) and SSE endpoint (`/api/sessions/events`). Triggered on every visible-session mutation: new (only after worktree creation or first-message reveal), delete, archive, move, pin, rename, duplicate, import, and cron-job completion. Per-subscriber `Queue(maxsize=1)` with latest-wins drain — under burst, browsers see the freshest payload, not a backlog. Disconnect cleanup runs in the handler's `finally:` block, scoped to the shared `_CLIENT_DISCONNECT_ERRORS` tuple so socket-failure modes beyond `BrokenPipeError` also trigger unsubscribe. Cron-scheduler integration uses a `_cron_profile_context_depth()` gate to avoid double-publish across manual vs scheduled cron run paths. **Follow-on issue filed:** the bus has no profile identity in its payload — a cron tick in profile A wakes the SSE handler for every browser regardless of which profile its session cookie selects, costing wasted `/api/sessions` round-trips on other-profile tabs (no data leak; the GET is profile-scoped). Filing tracker for a follow-up that snapshots the active profile at publish time.
+
+### Test infrastructure
+
+- HTTP integration tests for `/api/sessions/events`: handshake (200 + `text/event-stream`), event delivery driven by a side-effect POST, rapid open/close burst that survives a subsequent `/api/sessions` GET, and a source-level guard that the handler's `except _CLIENT_DISCONNECT_ERRORS:` clause stays wired to the shared tuple. Added as stage-393 follow-up to Opus advisor's blocking note on PR #2637 (the existing tests covered the in-process bus but never opened a real HTTP connection).
+
 ## [v0.51.99] — 2026-05-20 — Release BW (stage-392 — 5-PR batch — compact tool activity grouping + CLI sidebar scan cap + title-generation API key forwarding + post-compression replay dedup + clarify popup stability)
 
 ### Fixed

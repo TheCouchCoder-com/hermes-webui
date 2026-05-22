@@ -1476,6 +1476,7 @@ async function toggleModelDropdown(){
   if(typeof closeWsDropdown==='function') closeWsDropdown();
   if(typeof closeReasoningDropdown==='function') closeReasoningDropdown();
   if(typeof closeToolsetsDropdown==='function') closeToolsetsDropdown();
+  if(typeof window._ensureModelDropdownReady==='function') window._ensureModelDropdownReady();
   const ready=window._modelDropdownReady;
   if(ready&&typeof ready.then==='function'){
     try{await ready;}catch(_){}
@@ -2011,7 +2012,14 @@ if(typeof window!=='undefined') window._resetScrollDirectionTracker=_resetScroll
     if(progress>0.3) e.preventDefault();
   },{passive:false});
   el.addEventListener('touchend',function(){
-    if(_ptrState===2){ window.location.reload(); return; }
+    if(_ptrState===2){
+      if(typeof window.refreshSessionList==='function'){
+        Promise.resolve(window.refreshSessionList('pull', {force:true, refreshActive:true})).catch(()=>{}).finally(_ptrReset);
+      }else{
+        window.location.reload();
+      }
+      return;
+    }
     _ptrReset();
   },{passive:true});
   el.addEventListener('touchcancel',_ptrReset,{passive:true});
