@@ -3364,9 +3364,30 @@ def get_available_models() -> dict:
                         _cp_key_env = str(_cp.get("key_env") or "").strip()
                         if _cp_key_env:
                             _cp_api_key = str(os.getenv(_cp_key_env) or "").strip()
+
+                    # Check if user has configured models in config.yaml —
+                    # configured models take priority over live /v1/models
+                    # discovery (same as hermes-agent model_switch.py Section 4
+                    # patch). Without this check, ZenMux and similar aggregator
+                    # gateways would show hundreds of online models instead of
+                    # the user's curated list.
+                    _cp_configured_models = _cp.get("models")
+                    _cp_has_configured_models = (
+                        isinstance(_cp_configured_models, (dict, list))
+                        and len(_cp_configured_models) > 0
+                    )
                     _live_models = auto_detected_models_by_provider.get(_slug)
                     _live_error = None
-                    if _live_models is None:
+                    if _cp_has_configured_models:
+                        # Skip the live /v1/models probe when an allowlist
+                        # exists — the curated list wins and probe failures
+                        # should not surface as a user-facing diagnostic in
+                        # that case. Still respect any pre-warm result that
+                        # ``auto_detected_models_by_provider`` already
+                        # populated (cheap to keep).
+                        if _live_models is None:
+                            _live_models = []
+                    elif _live_models is None:
                         _live_models, _live_error = _read_custom_endpoint_models(
                             _cp_base_url,
                             _slug,
