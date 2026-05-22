@@ -14,6 +14,18 @@
 ## [Unreleased]
 
 
+## [v0.51.105] — 2026-05-21 — Release CC (stage-398 — 4-PR batch — hide suggestions preference + Docker agent version from copied source + runner-local adapter selection + configurable pinned session limit)
+
+### Added
+
+- **PR #2687** by @Michaelyklam (closes #2679) — Settings → Preferences gains a `Hide chat suggestions` toggle (config key `hide_empty_state_suggestions`). The empty new-chat screen normally shows three suggestion buttons as first-class tap targets, which causes accidental taps on mobile. Users who don't want the suggestions can hide them via the preference; the toggle persists across sessions and reloads. Default is OFF (suggestions remain visible) so existing users see no change.
+- **PR #2700** by @ai-ag2026 — Settings → Preferences gains a `Pinned conversations limit` numeric input. Builds on v0.51.96's #2614 3-cap by making the cap configurable (range 1–99, default 3, validated server-side via `_SETTINGS_INT_RANGES`). Backend validates the new cap on read, surfaces an error if a pin attempt would exceed it, and the right-click menu disables the pin item with an explanatory tooltip when the cap is reached. Default-3 keeps existing users on identical behavior.
+- **PR #2696** by @Michaelyklam — RuntimeAdapter slice 4c — feature-flagged runner backend selection. The existing `HERMES_WEBUI_RUNTIME_ADAPTER` env var gains a new `runner-local` mode that wires up a `RunnerRuntimeAdapter` factory and adds a restart/reattach harness gate before the runner backend is used at the dispatcher. No user-visible change in this slice — unset / `legacy-direct` keeps existing behavior intact, and no production caller wires the new adapter yet. The slice exists so future work can land a sidecar runner without changing the runtime contract for existing users.
+
+### Fixed
+
+- **PR #2703** by @Michaelyklam (closes #2691) — System panel now detects the Hermes Agent version in Docker two-container deployments where the WebUI sees a copied Agent source volume instead of a live git checkout. The new detection cascade reads `VERSION` if present, falls back to the package metadata (`hermes_cli`), and finally to a `.git` describe if either is available, so the System panel reports the right version even when both `VERSION` and `.git` are absent in the copied source.
+
 ## [v0.51.104] — 2026-05-21 — Release CB (stage-397 — 9-PR batch — i18n zh-CN/zh-TW cron status + geist-contrast skin polish + tablet hardware Enter + stale Codex slash model state + SSE reconnect jitter + cron run inline expansion + inflight send race + new-chat model provider sync + virtualized sidebar scroll-clamp resync + transcript cache invalidation on same-count content)
 
 ### Fixed

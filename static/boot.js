@@ -1152,6 +1152,11 @@ document.querySelectorAll('.suggestion').forEach(btn=>{
   btn.onclick=()=>{$('msg').value=btn.dataset.msg;send();};
 });
 
+function applyEmptyStateSuggestionPref(){
+  if(!$('emptyState')) return;
+  $('emptyState').classList.toggle('no-suggestions',window._hideEmptyStateSuggestions===true);
+}
+
 window.addEventListener('resize',()=>{
   _syncWorkspacePanelInlineWidth();
   syncWorkspacePanelState();
@@ -1431,6 +1436,8 @@ function applyBotName(){
     window._sendKey=s.send_key||'enter';
     window._showTokenUsage=!!s.show_token_usage;
     window._showQuotaChip=s.show_quota_chip===true;
+    window._hideEmptyStateSuggestions=s.hide_empty_state_suggestions===true;
+    applyEmptyStateSuggestionPref();
     window._showTps=!!s.show_tps;
     window._fadeTextEffect=!!s.fade_text_effect;
     window._showCliSessions=!!s.show_cli_sessions;
@@ -1444,6 +1451,7 @@ function applyBotName(){
     window._showThinking=s.show_thinking!==false;
     window._simplifiedToolCalling=s.simplified_tool_calling!==false;
     window._sidebarDensity=(s.sidebar_density==='detailed'?'detailed':'compact');
+    window._pinnedSessionsLimit=parseInt(s.pinned_sessions_limit||3,10)||3;
     window._busyInputMode=(s.busy_input_mode||'queue');
     window._sessionEndlessScrollEnabled=!!s.session_endless_scroll;
     window._botName=s.bot_name||'Hermes';
@@ -1520,6 +1528,8 @@ function applyBotName(){
     window._sendKey='enter';
     window._showTokenUsage=false;
     window._showQuotaChip=false;
+    window._hideEmptyStateSuggestions=false;
+    applyEmptyStateSuggestionPref();
     window._showTps=false;
     window._fadeTextEffect=false;
     window._showCliSessions=false;
@@ -1530,6 +1540,7 @@ function applyBotName(){
     window._simplifiedToolCalling=true;
     window._sessionJumpButtonsEnabled=false;
     window._sidebarDensity='compact';
+    window._pinnedSessionsLimit=3;
     window._busyInputMode='queue';
     window._sessionEndlessScrollEnabled=false;
     window._botName='Hermes';
