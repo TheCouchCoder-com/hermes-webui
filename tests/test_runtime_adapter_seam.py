@@ -470,6 +470,7 @@ def test_rfc_defines_slice4c_runner_backend_harness_gate():
     rfc = (routes.Path(__file__).parent.parent / "docs" / "rfcs" / "hermes-run-adapter-contract.md").read_text(encoding="utf-8")
 
     assert "#### Slice 4c: Feature-flagged runner backend and restart/reattach harness" in rfc
+    assert "Status as of 2026-05-21: shipped in v0.51.105 via #2696" in rfc
     assert "`HERMES_WEBUI_RUNTIME_ADAPTER=runner-local`" in rfc
     assert "`legacy-direct` remains the default" in rfc
     assert "No route-shape drift" in rfc
@@ -477,6 +478,22 @@ def test_rfc_defines_slice4c_runner_backend_harness_gate():
     assert "discard the first WebUI adapter instance" in rfc
     assert "No runtime-surrogate globals" in rfc
     assert "no live chat route switch to the runner backend before the restart/reattach" in rfc
+
+
+def test_rfc_defines_slice4d_supervised_runner_route_gate():
+    routes = importlib.import_module("api.routes")
+    rfc = (routes.Path(__file__).parent.parent / "docs" / "rfcs" / "hermes-run-adapter-contract.md").read_text(encoding="utf-8")
+
+    assert "#### Slice 4d: Supervised runner backend route gate" in rfc
+    assert "After `runner-local` selection exists" in rfc
+    assert "route-selection harness before live\nbrowser chat can use it" in rfc
+    assert "Route remains default-off" in rfc
+    assert "Restart/reattach harness proves ownership moved" in rfc
+    assert "No public response-shape drift" in rfc
+    assert "No runtime-surrogate globals" in rfc
+    assert "Explicit context payloads" in rfc
+    assert "active-run discovery, session-to-run lookup, command capability\n  metadata, artifact events, and provider/tool routing" in rfc
+    assert "WebUI remains the rich workbench while\n  only execution ownership moves" in rfc
 
 
 def test_runner_runtime_adapter_passes_explicit_start_payload_without_env_mutation(monkeypatch):

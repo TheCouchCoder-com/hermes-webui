@@ -36,6 +36,28 @@ _cache_lock = threading.Lock()
 _check_in_progress = False
 _apply_lock = threading.Lock()   # prevents concurrent stash/pull/pop on same repo
 CACHE_TTL = 1800  # 30 minutes
+_GIT_DIAGNOSTIC_MAX_CHARS = 300
+_CREDENTIAL_IN_URL_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)([^/@\s'\"]+)@")
+_GITHUB_TOKEN_RE = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
+_QUERY_SECRET_RE = re.compile(r"([?&](?:access_token|token|password|auth|key)=)[^&\s'\"]+", re.IGNORECASE)
+
+
+def _sanitize_git_diagnostic(output: str, *, limit: int = _GIT_DIAGNOSTIC_MAX_CHARS) -> str:
+    """Return a user-facing git diagnostic with credentials removed.
+
+    Git can echo remote URLs in failure output.  Keep the actionable error text,
+    but strip URL userinfo, common GitHub token shapes, and secret-looking query
+    parameter values before any message reaches the update-check API/UI.
+    """
+    if not output:
+        return ""
+    sanitized = _CREDENTIAL_IN_URL_RE.sub(r"\1<redacted>@", str(output))
+    sanitized = _GITHUB_TOKEN_RE.sub("<redacted>", sanitized)
+    sanitized = _QUERY_SECRET_RE.sub(r"\1<redacted>", sanitized)
+    sanitized = sanitized.strip()
+    if len(sanitized) > limit:
+        sanitized = sanitized[:limit].rstrip() + "…"
+    return sanitized
 
 
 def _active_stream_count() -> int:
@@ -460,7 +482,7 @@ def _check_repo(path, name):
         release_info = _check_repo_release(path, name)
         message = 'fetch failed'
         if fetch_out:
-            message = f'{message}: {fetch_out}'
+            message = f'{message}: {_sanitize_git_diagnostic(fetch_out)}'
         if release_info is not None:
             release_info = dict(release_info)
             release_info['error'] = message
