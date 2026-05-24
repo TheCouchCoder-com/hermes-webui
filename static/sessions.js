@@ -2970,6 +2970,11 @@ function _resyncSessionVirtualWindowAfterRender(list, expectedScrollTop, virtual
 function renderSessionListFromCache(){
   // Don't re-render while user is actively renaming a session (would destroy the input)
   if(_renamingSid) return;
+  // Keep the per-conversation actions menu stable while the user is trying to
+  // click it. Sidebar syncs, stream/unread updates, and panel-resync repairs can
+  // all call this while the fixed-position menu is open; rebuilding the row DOM
+  // here removes the anchor and makes the menu feel unclickable.
+  if(_sessionActionMenu) return;
   closeSessionActionMenu();
   // Purge stale INFLIGHT entries for sessions the server confirms are NOT
   // streaming. This runs on every list refresh to prevent memory leaks from
