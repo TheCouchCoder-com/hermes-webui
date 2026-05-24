@@ -13,6 +13,13 @@
 
 ## [Unreleased]
 
+## [v0.51.110] — 2026-05-22 — Release CH (stage-403 — 2-PR batch — default personality from config + sort configured providers to top)
+
+### Added
+
+- **PR #2747** by @s010mn — `new_session()` now reads `display.personality` from `config.yaml` as the default for new conversations. Previously every new session started with `personality=None` and required an explicit `/personality <name>` slash command. Values `'none'`, `'default'`, `'neutral'`, and empty string are treated as no-personality. Case-insensitive — `personality: Taleb` normalizes to `taleb`. Config-read is wrapped in try/except so malformed config falls back to the prior behavior rather than crashing session creation. The `/personality` slash command still works for per-session overrides.
+- **PR #2683** by @jasonjcwu — Sort providers so configured/custom entries appear first in both the model picker dropdown (`api/config.py::get_available_models`) and the Settings providers panel (`api/providers.py::get_providers`). Priority order: (1) the active provider, (2) `custom:*` providers from `custom_providers` config, (3) providers with configured API keys (credential pool or `config.yaml`), (4) all others alphabetical. Eliminates scrolling past 25+ unconfigured providers to find the one in active use.
+
 ## [v0.51.109] — 2026-05-22 — Release CG (stage-402 — 2-PR batch — sidebar action menu click stability + chat panel sidebar resync after navigation)
 
 ### Fixed
