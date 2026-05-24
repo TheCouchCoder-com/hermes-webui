@@ -53,6 +53,7 @@ def test_pin_limit_setting_is_exposed_and_wired_through_ui():
     assert "settings.pinned_sessions_limit" in PANELS_JS
     assert "window._pinnedSessionsLimit=parseInt(s.pinned_sessions_limit||3,10)||3" in BOOT_JS
     assert "function _getPinnedSessionsLimit()" in SESSIONS_JS
+    assert "function _pinnedSessionsLimit()" not in SESSIONS_JS
     assert "_pinnedSessionCount()>=_getPinnedSessionsLimit()" in SESSIONS_JS
 
 
