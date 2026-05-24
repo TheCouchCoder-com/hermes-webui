@@ -30,6 +30,35 @@ def test_check_repo_reports_release_gap_even_when_tag_fetch_fails(tmp_path):
     assert 'would clobber existing tag' in info['error']
 
 
+def test_check_repo_redacts_credentialed_fetch_failure(tmp_path):
+    """Update-check errors must not expose credentials from git remotes."""
+    (tmp_path / '.git').mkdir()
+    secret = 'ghp_' + 'A' * 36
+    raw_error = (
+        "fatal: unable to access "
+        f"'https://ash:{secret}@github.com/private/repo.git/': "
+        "Authentication failed"
+    )
+
+    def fake_git(args, cwd, timeout=10):
+        if args == ['fetch', 'origin', '--tags']:
+            return raw_error, False
+        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+            return '', True
+        raise AssertionError(f'unexpected git args: {args!r}')
+
+    with patch.object(updates, '_run_git', side_effect=fake_git):
+        info = updates._check_repo(tmp_path, 'webui')
+
+    assert info is not None
+    assert info['behind'] is None
+    assert info['stale_check'] is True
+    assert secret not in info['error']
+    assert 'ash:' not in info['error']
+    assert '<redacted>' in info['error']
+    assert 'Authentication failed' in info['error']
+
+
 def test_check_repo_fetch_failure_without_tags_is_not_up_to_date(tmp_path):
     """If release tags cannot be read, behind is unknown rather than zero."""
     (tmp_path / '.git').mkdir()

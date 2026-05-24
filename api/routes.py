@@ -10844,7 +10844,7 @@ def _persist_handoff_summary_to_state_db(sid: str, message: dict) -> bool:
 
     marker_payload = _extract_handoff_summary_payload(message)
     try:
-        with sqlite3.connect(str(db_path)) as conn:
+        with closing(sqlite3.connect(str(db_path))) as conn:
             try:
                 if marker_payload is not None:
                     cur = conn.execute(
