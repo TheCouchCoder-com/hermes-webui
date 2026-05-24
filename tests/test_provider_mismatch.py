@@ -1211,7 +1211,7 @@ class TestFrontendModelProviderState:
         )
         idx = src.find("function syncTopbar")
         assert idx != -1, "syncTopbar must exist"
-        block = src[idx:idx + 5200]
+        block = src[idx:idx + 6000]
         assert "missingModelIsRoutable=_providerDefersMissingModelFallback" in block
         assert "liveStillPending||missingModelIsRoutable" in block, (
             "syncTopbar must preserve routable custom:* selections instead of forcing fallback persistence"
