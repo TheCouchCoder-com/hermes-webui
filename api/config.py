@@ -713,6 +713,7 @@ _PROVIDER_DISPLAY = {
     "x-ai": "xAI",
     "nvidia": "NVIDIA NIM",
     "xiaomi": "Xiaomi",
+    "bedrock": "AWS Bedrock",
 }
 
 # Provider alias → canonical slug.  Users configure providers using the
@@ -1212,6 +1213,16 @@ _PROVIDER_MODELS = {
     ],
     "xai-oauth": [
         {"id": "grok-4.20", "label": "Grok 4.20"},
+    ],
+    # AWS Bedrock — static fallback list; live model list is fetched via
+    # hermes_cli.models.provider_model_ids("bedrock") when available (#2720).
+    "bedrock": [
+        {"id": "global.anthropic.claude-opus-4-7",                 "label": "Global Anthropic Claude Opus 4.7"},
+        {"id": "global.anthropic.claude-opus-4-6-v1",              "label": "Global Anthropic Claude Opus 4.6"},
+        {"id": "global.anthropic.claude-sonnet-4-6",               "label": "Global Anthropic Claude Sonnet 4.6"},
+        {"id": "global.anthropic.claude-opus-4-5-20251101-v1:0",   "label": "GLOBAL Anthropic Claude Opus 4.5"},
+        {"id": "global.anthropic.claude-sonnet-4-5-20250929-v1:0", "label": "Global Claude Sonnet 4.5"},
+        {"id": "global.anthropic.claude-haiku-4-5-20251001-v1:0",  "label": "Global Anthropic Claude Haiku 4.5"},
     ],
 }
 
@@ -3007,6 +3018,8 @@ def get_available_models() -> dict:
                 "MINIMAX_CN_API_KEY",
                 "XAI_API_KEY",
                 "MISTRAL_API_KEY",
+                "AWS_ACCESS_KEY_ID",
+                "AWS_SECRET_ACCESS_KEY",
             ):
                 val = os.getenv(k)
                 if val:
@@ -3046,6 +3059,10 @@ def get_available_models() -> dict:
                 detected_providers.add("opencode-zen")
             if all_env.get("OPENCODE_GO_API_KEY"):
                 detected_providers.add("opencode-go")
+            # AWS Bedrock uses IAM credentials rather than a single API key.
+            # Detect when both access key and secret are available (#2720).
+            if all_env.get("AWS_ACCESS_KEY_ID") and all_env.get("AWS_SECRET_ACCESS_KEY"):
+                detected_providers.add("bedrock")
             # LM Studio: detect via LM_API_KEY + LM_BASE_URL in ~/.hermes/.env
             if all_env.get("LM_API_KEY") and all_env.get("LM_BASE_URL"):
                 detected_providers.add("lmstudio")
@@ -4348,6 +4365,7 @@ _SETTINGS_DEFAULTS = {
     "show_previous_messaging_sessions": False,  # show older Telegram/Discord/etc. reset segments
     "sync_to_insights": False,  # mirror WebUI token usage to state.db for /insights
     "check_for_updates": True,  # check if webui/agent repos are behind upstream
+    "ignore_agent_updates": False,  # keep WebUI update notices but suppress Agent update checks
     "whats_new_summary_enabled": False,  # show an LLM-written What's New summary before diff links
     "theme": "dark",  # light | dark | system
     "skin": "default",  # accent color skin: default | ares | mono | slate | poseidon | sisyphus | charizard | sienna | catppuccin | nous
@@ -4355,6 +4373,11 @@ _SETTINGS_DEFAULTS = {
     "session_jump_buttons": False,  # show Start/End transcript jump pills
     "session_endless_scroll": False,  # auto-load older transcript pages while scrolling upward
     "pinned_sessions_limit": 3,  # maximum active pinned sessions shown in the sidebar
+    "inflight_state_max_sessions": 8,  # max active-stream recovery snapshots kept in browser localStorage
+    "inflight_state_max_messages": 24,  # max recent messages kept per recovery snapshot
+    "inflight_state_max_tool_calls": 48,  # max recent tool-call records kept per recovery snapshot
+    "inflight_state_max_string_chars": 60000,  # max string length kept inside a recovery snapshot field
+    "inflight_state_max_json_chars": 1500000,  # max serialized recovery snapshot payload before pruning
     "hidden_tabs": [],  # sidebar tab panel names hidden by user (e.g. ["tasks","kanban"]); chat and settings are always visible
     "language": "en",  # UI locale code; must match a key in static/i18n.js LOCALES
     "bot_name": os.getenv(
@@ -4485,6 +4508,11 @@ _SETTINGS_ENUM_VALUES = {
 }
 _SETTINGS_INT_RANGES = {
     "pinned_sessions_limit": (1, 99),
+    "inflight_state_max_sessions": (1, 25),
+    "inflight_state_max_messages": (1, 100),
+    "inflight_state_max_tool_calls": (1, 200),
+    "inflight_state_max_string_chars": (1000, 500000),
+    "inflight_state_max_json_chars": (100000, 4000000),
 }
 _SETTINGS_BOOL_KEYS = {
     "onboarding_completed",
@@ -4497,6 +4525,7 @@ _SETTINGS_BOOL_KEYS = {
     "show_previous_messaging_sessions",
     "sync_to_insights",
     "check_for_updates",
+    "ignore_agent_updates",
     "whats_new_summary_enabled",
     "sound_enabled",
     "rtl",

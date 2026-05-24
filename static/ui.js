@@ -733,6 +733,8 @@ window.addEventListener('visibilitychange',()=>{
 let _dynamicModelLabels={};
 window._configuredModelBadges=window._configuredModelBadges||{};
 const MODEL_STATE_KEY='hermes-webui-model-state';
+const PENDING_SESSION_MODEL_PREFIX='hermes-webui-pending-session-model:';
+const PENDING_SESSION_MODEL_MAX_AGE_MS=10*60*1000;
 
 // ── Smart model resolver ────────────────────────────────────────────────────
 // Finds the best matching option value in a <select> for a given model ID.
@@ -814,6 +816,71 @@ function _clearPersistedModelState(){
   localStorage.removeItem('hermes-webui-model');
   localStorage.removeItem(MODEL_STATE_KEY);
 }
+function _pendingSessionModelKey(sessionId){
+  return PENDING_SESSION_MODEL_PREFIX+String(sessionId||'');
+}
+function _rememberPendingSessionModel(sessionId, model, modelProvider){
+  const sid=String(sessionId||'').trim();
+  const value=String(model||'').trim();
+  if(!sid||!value) return;
+  const provider=modelProvider?String(modelProvider).trim():(_providerFromModelValue(value)||null);
+  try{
+    sessionStorage.setItem(_pendingSessionModelKey(sid), JSON.stringify({
+      model:value,
+      model_provider:provider||null,
+      saved_at:Date.now(),
+    }));
+  }catch(_){}
+}
+function _readPendingSessionModel(sessionId){
+  const sid=String(sessionId||'').trim();
+  if(!sid) return null;
+  try{
+    const raw=sessionStorage.getItem(_pendingSessionModelKey(sid));
+    if(!raw) return null;
+    const parsed=JSON.parse(raw);
+    const model=String(parsed&&parsed.model||'').trim();
+    if(!model){
+      sessionStorage.removeItem(_pendingSessionModelKey(sid));
+      return null;
+    }
+    const savedAt=Number(parsed.saved_at||0);
+    if(savedAt&&Date.now()-savedAt>PENDING_SESSION_MODEL_MAX_AGE_MS){
+      sessionStorage.removeItem(_pendingSessionModelKey(sid));
+      return null;
+    }
+    return {
+      model,
+      model_provider:parsed&&parsed.model_provider?String(parsed.model_provider):(_providerFromModelValue(model)||null),
+    };
+  }catch(_){
+    try{sessionStorage.removeItem(_pendingSessionModelKey(sid));}catch(__){}
+    return null;
+  }
+}
+function _clearPendingSessionModel(sessionId){
+  const sid=String(sessionId||'').trim();
+  if(!sid) return;
+  try{sessionStorage.removeItem(_pendingSessionModelKey(sid));}catch(_){}
+}
+function _applyPendingSessionModelForSession(sessionId){
+  if(!S.session||S.session.session_id!==sessionId) return false;
+  const pending=_readPendingSessionModel(sessionId);
+  if(!pending) return false;
+  const sameModel=String(S.session.model||'')===pending.model;
+  const sameProvider=String(S.session.model_provider||'')===String(pending.model_provider||'');
+  if(sameModel&&sameProvider){
+    _clearPendingSessionModel(sessionId);
+    return false;
+  }
+  S.session.model=pending.model;
+  S.session.model_provider=pending.model_provider||null;
+  const retry=_persistSessionModelCorrection(pending.model,pending.model_provider||null,{propagateErrors:true});
+  if(retry&&typeof retry.then==='function'){
+    retry.then(()=>_clearPendingSessionModel(sessionId)).catch(()=>{});
+  }
+  return true;
+}
 function _findModelInDropdown(modelId, sel, preferredProviderId){
   if(!modelId||!sel) return null;
   const options=Array.from(sel.options);
@@ -869,19 +936,38 @@ function _applyModelToDropdown(modelId, sel, preferredProviderId){
   }
   return null;
 }
+function _ensureModelOptionInDropdown(modelId, sel, preferredProviderId){
+  if(!modelId||!sel) return null;
+  const applied=_applyModelToDropdown(modelId,sel,preferredProviderId);
+  if(applied) return applied;
+  const opt=document.createElement('option');
+  opt.value=modelId;
+  opt.textContent=typeof getModelLabel==='function'?getModelLabel(modelId):modelId;
+  opt.dataset.custom='1';
+  const provider=preferredProviderId||_providerFromModelValue(modelId)||'';
+  if(provider) opt.dataset.provider=provider;
+  sel.appendChild(opt);
+  sel.value=modelId;
+  if(sel.id==='modelSelect'){
+    if(typeof syncModelChip==='function') syncModelChip();
+    _refreshOpenModelDropdown();
+  }
+  return modelId;
+}
 function _modelStateFromAppliedDropdown(sel, modelValue){
   const state=(typeof _modelStateForSelect==='function')
     ? _modelStateForSelect(sel,modelValue)
     : {model:modelValue,model_provider:null};
   return {model:state.model||modelValue,model_provider:state.model_provider||null};
 }
-function _persistSessionModelCorrection(model, provider){
+function _persistSessionModelCorrection(model, provider, opts){
   if(!S.session) return;
-  fetch(new URL('api/session/update',document.baseURI||location.href).href,{
+  const request=fetch(new URL('api/session/update',document.baseURI||location.href).href,{
     method:'POST',credentials:'include',
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({session_id:S.session.id||S.session.session_id,model:model,model_provider:provider||null})
-  }).catch(()=>{});
+  });
+  return opts&&opts.propagateErrors ? request : request.catch(()=>{});
 }
 function _applySessionModelFallback(sel){
   if(!sel) return null;
@@ -1478,10 +1564,9 @@ async function toggleModelDropdown(){
   if(typeof closeWsDropdown==='function') closeWsDropdown();
   if(typeof closeReasoningDropdown==='function') closeReasoningDropdown();
   if(typeof closeToolsetsDropdown==='function') closeToolsetsDropdown();
-  if(typeof window._ensureModelDropdownReady==='function') window._ensureModelDropdownReady();
-  const ready=window._modelDropdownReady;
-  if(ready&&typeof ready.then==='function'){
-    try{await ready;}catch(_){}
+  if(typeof window._ensureModelDropdownReady==='function'){
+    const ready=window._ensureModelDropdownReady();
+    if(ready&&typeof ready.catch==='function') ready.catch(()=>{});
   }
   if(dd.classList.contains('open')) return;
   renderModelDropdown();
@@ -2123,6 +2208,7 @@ function _startCompressionElapsedTimer(){if(!_compressionElapsedTimer)_compressi
 function _clearCompressionElapsedTimer(){if(_compressionElapsedTimer){clearInterval(_compressionElapsedTimer);_compressionElapsedTimer=null;}}
 let _activityElapsedTimer=null;
 let _activityElapsedTimerGroup=null;
+function _activityNowSeconds(){return Date.now()/1000;}
 function _activityElapsedStartedAt(group){
   if(!group)return null;
   const raw=(group.dataset&&group.dataset.turnStartedAt!==undefined&&group.dataset.turnStartedAt!=='')
@@ -2134,7 +2220,52 @@ function _activityElapsedStartedAt(group){
 function _activityElapsedLabel(group){
   const started=_activityElapsedStartedAt(group);
   if(!started)return'';
-  return _formatActiveElapsedTimer((Date.now()/1000)-started);
+  return _formatActiveElapsedTimer(_activityNowSeconds()-started);
+}
+function _activityMarkObserved(group, ts){
+  if(!group||group.getAttribute('data-live-tool-call-group')!=='1')return;
+  const stamp=Number(ts||_activityNowSeconds());
+  if(Number.isFinite(stamp)&&stamp>0) group.setAttribute('data-last-activity-at',String(stamp));
+}
+function _activityLastObservedAge(group){
+  const stamp=Number(group&&group.getAttribute('data-last-activity-at'));
+  if(!Number.isFinite(stamp)||stamp<=0)return null;
+  return Math.max(0,_activityNowSeconds()-stamp);
+}
+function _activityClockLabel(ts){
+  const stamp=Number(ts||_activityNowSeconds());
+  if(!Number.isFinite(stamp)||stamp<=0)return'';
+  try{return new Date(stamp*1000).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'});}catch(_){return'';}
+}
+function _activityStatusNode({kind='info',label='',detail='',status='done',ts=null,id=''}){
+  const row=document.createElement('div');
+  row.className=`agent-activity-status agent-activity-status-${kind} agent-activity-status-${status}`;
+  if(id) row.setAttribute('data-activity-event-id',id);
+  if(ts) row.setAttribute('data-activity-at',String(ts));
+  const iconMap={run:li('play',13),model:li('bot',13),waiting:'<span class="tool-card-running-dot"></span>',thinking:li('lightbulb',13),tool:li('wrench',13),done:li('check',13),warning:li('alert-triangle',13)};
+  row.innerHTML=`<span class="agent-activity-status-icon">${iconMap[kind]||li('clock',13)}</span><span class="agent-activity-status-copy"><span class="agent-activity-status-label">${esc(label)}</span>${detail?`<span class="agent-activity-status-detail">${esc(detail)}</span>`:''}</span><span class="agent-activity-status-time">${esc(_activityClockLabel(ts))}</span>`;
+  return row;
+}
+function _appendActivityEvent(group, event){
+  if(!group)return null;
+  const body=group.querySelector('.tool-call-group-body');
+  if(!body)return null;
+  const eventId=event&&event.id;
+  let row=eventId?body.querySelector(`.agent-activity-status[data-activity-event-id="${CSS.escape(eventId)}"]`):null;
+  const next=_activityStatusNode(event||{});
+  if(row){row.replaceWith(next);row=next;}
+  else{body.appendChild(next);row=next;}
+  _activityMarkObserved(group,event&&event.ts);
+  return row;
+}
+function _ensureLiveActivityBaseline(group){
+  if(!group||group.getAttribute('data-live-tool-call-group')!=='1')return;
+  const started=_activityElapsedStartedAt(group)||_activityNowSeconds();
+  if(!group.getAttribute('data-turn-started-at')) group.setAttribute('data-turn-started-at',String(started));
+  if(!group.getAttribute('data-last-activity-at')) group.setAttribute('data-last-activity-at',String(started));
+  _appendActivityEvent(group,{id:'run-started',kind:'run',label:'Run started',detail:'Observable activity will appear here as the agent works.',status:'done',ts:started});
+  const modelLabel=(S.session&&S.session.model)?getModelLabel(S.session.model):'';
+  if(modelLabel)_appendActivityEvent(group,{id:'run-model',kind:'model',label:`Model: ${modelLabel}`,detail:S.activeProfile&&S.activeProfile!=='default'?`Profile: ${S.activeProfile}`:'',status:'done',ts:started});
 }
 function _setActivityElapsedStartedAt(group){
   if(!group||group.getAttribute('data-live-tool-call-group')!=='1')return;
@@ -2155,8 +2286,10 @@ function _updateActiveActivityElapsedTimer(){
     group.removeAttribute('data-active-turn-elapsed');
   }
   if(durationEl){
-    durationEl.textContent=label?`Working ${label}`:'';
-    durationEl.style.display=label?'':'none';
+    const activeText=label?`Working for ${label}`:'';
+    const progressText=_activityLiveProgressLabel(group);
+    durationEl.textContent=[progressText, activeText].filter(Boolean).join(' · ');
+    durationEl.style.display=durationEl.textContent?'':'none';
   }
 }
 function _startActivityElapsedTimer(group){
@@ -2804,7 +2937,7 @@ function renderMd(raw){
     t=t.replace(/\x00C(\d+)\x00/g,(_,i)=>_code_stash[+i]);
     // Stash [label](url) links before autolink so the URL in href= is not re-linked
     const _link_stash=[];
-    t=t.replace(/\[([^\]]+)\]\(((?:https?|file):\/\/[^\)]+)\)/g,(_,lb,u)=>{_link_stash.push(`<a href="${_markdownHref(u)}" target="_blank" rel="noopener">${esc(lb)}</a>`);return `\x00L${_link_stash.length-1}\x00`;});
+    t=t.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|mailto:|tel:)[^\s\)]+)\)/g,(_,lb,u)=>{_link_stash.push(`<a href="${_markdownHref(u)}" target="_blank" rel="noopener">${esc(lb)}</a>`);return `\x00L${_link_stash.length-1}\x00`;});
     t=t.replace(/(https?:\/\/[^\s<>"')\]]+)/g,(url)=>{const trail=url.match(/[.,;:!?)]$/)?url.slice(-1):'';const clean=trail?url.slice(0,-1):url;return `<a href="${clean}" target="_blank" rel="noopener">${esc(clean)}</a>${trail}`;});
     t=t.replace(/\x00L(\d+)\x00/g,(_,i)=>_link_stash[+i]);
     t=t.replace(/\x00G(\d+)\x00/g,(_,i)=>_img_stash[+i]);
@@ -2897,7 +3030,7 @@ function renderMd(raw){
   // Stash existing <a> tags first to avoid re-linking already-linked URLs.
   const _a_stash=[];
   s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>)/g,m=>{_a_stash.push(m);return `\x00A${_a_stash.length-1}\x00`;});
-  s=s.replace(/\[([^\]]+)\]\(((?:https?|file):\/\/[^\)]+)\)/g,(_,label,url)=>`<a href="${_markdownHref(url)}" target="_blank" rel="noopener">${esc(label)}</a>`);
+  s=s.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|mailto:|tel:)[^\s\)]+)\)/g,(_,label,url)=>`<a href="${_markdownHref(url)}" target="_blank" rel="noopener">${esc(label)}</a>`);
   s=s.replace(/\x00A(\d+)\x00/g,(_,i)=>_a_stash[+i]);
   // Restore raw <pre> only after markdown rewrites so literal preformatted
   // content stays placeholder-protected, then let the sanitizer normalize tags.
@@ -2931,6 +3064,7 @@ function renderMd(raw){
     if(!compact) return false;
     if(/^(javascript|data|vbscript):/i.test(compact)) return false;
     if(/^https?:\/\//i.test(raw)) return true;
+    if(/^(mailto:|tel:)/i.test(raw)) return true;
     if(img && /^api\//i.test(raw)) return true;
     if(!img && (/^api\//i.test(raw) || /^#/.test(raw))) return true;
     return false;
@@ -3983,6 +4117,29 @@ function autoReadLastAssistant(){
 // ── Reconnect banner (B4/B5: reload resilience) ──
 const INFLIGHT_KEY = 'hermes-webui-inflight'; // localStorage key for in-flight session tracking
 const INFLIGHT_STATE_KEY = 'hermes-webui-inflight-state'; // localStorage snapshots for mid-stream reload recovery
+const INFLIGHT_STATE_DEFAULT_LIMITS = {
+  maxSessions:8,
+  messages:24,
+  toolCalls:48,
+  stringChars:60000,
+  jsonChars:1500000,
+};
+
+function _boundedInflightInt(value, fallback, min, max){
+  const n=parseInt(value,10);
+  if(!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+}
+function _getInflightStateLimits(){
+  const configured=(typeof window!=='undefined'&&window._inflightStateLimits&&typeof window._inflightStateLimits==='object')?window._inflightStateLimits:{};
+  return {
+    maxSessions:_boundedInflightInt(configured.maxSessions, INFLIGHT_STATE_DEFAULT_LIMITS.maxSessions, 1, 25),
+    messages:_boundedInflightInt(configured.messages, INFLIGHT_STATE_DEFAULT_LIMITS.messages, 1, 100),
+    toolCalls:_boundedInflightInt(configured.toolCalls, INFLIGHT_STATE_DEFAULT_LIMITS.toolCalls, 1, 200),
+    stringChars:_boundedInflightInt(configured.stringChars, INFLIGHT_STATE_DEFAULT_LIMITS.stringChars, 1000, 500000),
+    jsonChars:_boundedInflightInt(configured.jsonChars, INFLIGHT_STATE_DEFAULT_LIMITS.jsonChars, 100000, 4000000),
+  };
+}
 
 function _readInflightStateMap(){
   try{
@@ -3993,13 +4150,75 @@ function _readInflightStateMap(){
     return {};
   }
 }
+function _isStorageQuotaError(err){
+  return !!err && (
+    err.name==='QuotaExceededError' ||
+    err.name==='NS_ERROR_DOM_QUOTA_REACHED' ||
+    err.code===22 ||
+    err.code===1014
+  );
+}
+function _truncateInflightValue(value, maxChars){
+  const limits=_getInflightStateLimits();
+  const stringLimit=_boundedInflightInt(maxChars, limits.stringChars, 1000, 500000);
+  if(typeof value==='string'){
+    if(value.length<=stringLimit) return value;
+    return value.slice(0,stringLimit)+'\n\n[truncated for browser recovery storage]';
+  }
+  if(Array.isArray(value)) return value.map(v=>_truncateInflightValue(v, Math.max(2000, Math.floor(stringLimit/2))));
+  if(value&&typeof value==='object'){
+    const out={};
+    for(const [k,v] of Object.entries(value)) out[k]=_truncateInflightValue(v, stringLimit);
+    return out;
+  }
+  return value;
+}
+function _compactInflightState(state){
+  const limits=_getInflightStateLimits();
+  const messages=Array.isArray(state.messages)?state.messages.slice(-limits.messages):[];
+  const toolCalls=Array.isArray(state.toolCalls)?state.toolCalls.slice(-limits.toolCalls):[];
+  return _truncateInflightValue({
+    streamId:state.streamId||null,
+    messages,
+    uploaded:Array.isArray(state.uploaded)?state.uploaded.slice(-20):[],
+    toolCalls,
+  }, limits.stringChars);
+}
+function _writeInflightStateMap(all){
+  const limits=_getInflightStateLimits();
+  const entries=Object.entries(all||{})
+    .sort((a,b)=>Number(b[1]&&b[1].updated_at||0)-Number(a[1]&&a[1].updated_at||0))
+    .slice(0,limits.maxSessions);
+  const compact={};
+  for(const [sid,entry] of entries) compact[sid]=entry;
+  let json=JSON.stringify(compact);
+  if(json.length>limits.jsonChars){
+    const current=entries[0];
+    json=JSON.stringify(current?{[current[0]]:current[1]}:{});
+  }
+  if(json.length>limits.jsonChars){
+    localStorage.removeItem(INFLIGHT_STATE_KEY);
+    return false;
+  }
+  localStorage.setItem(INFLIGHT_STATE_KEY,json);
+  return true;
+}
 function saveInflightState(sid, state){
   if(!sid||!state) return;
+  const entry={..._compactInflightState(state),updated_at:Date.now()};
   try{
     const all=_readInflightStateMap();
-    all[sid]={...state,updated_at:Date.now()};
-    localStorage.setItem(INFLIGHT_STATE_KEY, JSON.stringify(all));
-  }catch(_){ }
+    all[sid]=entry;
+    _writeInflightStateMap(all);
+  }catch(err){
+    if(!_isStorageQuotaError(err)) return;
+    try{
+      localStorage.removeItem(INFLIGHT_STATE_KEY);
+      _writeInflightStateMap({[sid]:entry});
+    }catch(_){
+      try{localStorage.removeItem(INFLIGHT_STATE_KEY);}catch(__){}
+    }
+  }
 }
 function loadInflightState(sid, streamId){
   if(!sid) return null;
@@ -4086,7 +4305,16 @@ function restoreLiveTurnHtmlForSession(sid){
 }
 
 function markInflight(sid, streamId) {
-  localStorage.setItem(INFLIGHT_KEY, JSON.stringify({sid, streamId, ts: Date.now()}));
+  const payload=JSON.stringify({sid, streamId, ts: Date.now()});
+  try{
+    localStorage.setItem(INFLIGHT_KEY, payload);
+  }catch(err){
+    if(!_isStorageQuotaError(err)) return;
+    try{
+      localStorage.removeItem(INFLIGHT_STATE_KEY);
+      localStorage.setItem(INFLIGHT_KEY, payload);
+    }catch(_){}
+  }
 }
 function clearInflight() {
   localStorage.removeItem(INFLIGHT_KEY);
@@ -4723,8 +4951,9 @@ function syncTopbar(){
       }
     } else {
       const applied=_applyModelToDropdown(currentModel,modelSel,S.session.model_provider||null);
-      // If the model isn't in the current provider list, reset to the configured
-      // default rather than silently retaining the previous chat's selection (#1771).
+      // If the session model is missing from the current provider list, inject
+      // a session-scoped option instead of displaying the previous/static
+      // selection. Only fall back if that repair path is unavailable.
       if(!applied){
         const deferModelCorrection=Boolean(S.session._modelResolutionDeferred);
         const missingModelIsRoutable=_providerDefersMissingModelFallback(S.session.model_provider||window._activeProvider||null);
@@ -4737,14 +4966,25 @@ function syncTopbar(){
           // _addLiveModelsToSelect() will re-apply S.session.model once done (#1169).
           // Named custom providers/OpenRouter can also route vendor-prefixed IDs
           // outside the static catalog, so preserve the user's explicit choice.
+          if(typeof _ensureModelOptionInDropdown==='function'){
+            const sessionOption=_ensureModelOptionInDropdown(currentModel,modelSel,S.session.model_provider||null);
+            if(sessionOption) currentModel=sessionOption;
+          }
         } else {
-          const fallback=_applySessionModelFallback(modelSel);
-          if(fallback&&!deferModelCorrection){
-            S.session.model=fallback.model;
-            S.session.model_provider=fallback.model_provider||null;
-            currentModel=fallback.model;
-            // Persist the correction so the session doesn't re-inject on next load.
-            _persistSessionModelCorrection(fallback.model,S.session.model_provider||null);
+          const sessionOption=(typeof _ensureModelOptionInDropdown==='function')
+            ? _ensureModelOptionInDropdown(currentModel,modelSel,S.session.model_provider||null)
+            : null;
+          if(sessionOption){
+            currentModel=sessionOption;
+          } else {
+            const fallback=_applySessionModelFallback(modelSel);
+            if(fallback&&!deferModelCorrection){
+              S.session.model=fallback.model;
+              S.session.model_provider=fallback.model_provider||null;
+              currentModel=fallback.model;
+              // Persist the correction so the session doesn't re-inject on next load.
+              _persistSessionModelCorrection(fallback.model,S.session.model_provider||null);
+            }
           }
         }
       }
@@ -4939,7 +5179,10 @@ function ensureActivityGroup(inner, opts){
   }else if(activityKey&&!group.getAttribute('data-activity-disclosure-key')){
     group.setAttribute('data-activity-disclosure-key',activityKey);
   }
-  if(live) _setActivityElapsedStartedAt(group);
+  if(live){
+    _setActivityElapsedStartedAt(group);
+    _ensureLiveActivityBaseline(group);
+  }
   _syncToolCallGroupSummary(group);
   if(live) _startActivityElapsedTimer(group);
   return group;
@@ -5818,7 +6061,7 @@ function renderMessages(options){
       thinkingText=content.filter(p=>p&&(p.type==='thinking'||p.type==='reasoning')).map(p=>p.thinking||p.reasoning||p.text||'').join('\n');
       content=content.filter(p=>p&&p.type==='text').map(p=>p.text||p.content||'').join('\n');
     }
-    if(!thinkingText && m.reasoning) thinkingText=m.reasoning;
+    if(!thinkingText && (m.reasoning_content || m.reasoning)) thinkingText=m.reasoning_content || m.reasoning;
     if(!thinkingText && typeof content==='string'){
       const thinkMatch=content.match(/^\s*<think>([\s\S]*?)<\/think>\s*/);
       if(thinkMatch){
@@ -6377,7 +6620,9 @@ function _syncToolCallGroupSummary(group){
   const label=group.querySelector('.tool-call-group-label');
   const durationEl=group.querySelector('.tool-call-group-duration');
   if(label){
-    if(toolCount) label.textContent=`Activity: ${toolCount} tool${toolCount===1?'':'s'}`;
+    if(group.getAttribute('data-live-tool-call-group')==='1'){
+      label.textContent=toolCount?`Activity: ${toolCount} tool${toolCount===1?'':'s'}`:'Activity · Running';
+    }else if(toolCount) label.textContent=`Activity: ${toolCount} tool${toolCount===1?'':'s'}`;
     else label.textContent='Activity';
     label.setAttribute('data-sweep-label', label.textContent);
   }
@@ -6411,9 +6656,14 @@ function _activityProgressLabelForToolName(name){
 
 function _activityLiveProgressLabel(group){
   if(!group||group.getAttribute('data-live-tool-call-group')!=='1') return '';
+  const idleAge=_activityLastObservedAge(group);
+  if(idleAge!==null&&idleAge>=90) return `No recent activity for ${_formatActiveElapsedTimer(idleAge)}`;
   const running=group.querySelector('.tool-card.tool-card-running .tool-card-name');
   const latest=running || Array.from(group.querySelectorAll('.tool-card-name')).pop();
-  return _activityProgressLabelForToolName(latest?latest.textContent:'');
+  const waiting=group.querySelector('.agent-activity-status-waiting .agent-activity-status-label');
+  if(latest) return _activityProgressLabelForToolName(latest.textContent);
+  if(waiting&&waiting.textContent) return waiting.textContent;
+  return 'Starting agent';
 }
 
 // ── Live tool card helpers (called during SSE streaming) ──
@@ -6479,6 +6729,19 @@ function appendLiveToolCard(tc){
   const anchor=children.filter(el=>el.matches('[data-live-assistant="1"],.tool-call-group,.tool-card-row,.agent-activity-thinking')).pop();
   const group=ensureActivityGroup(inner,{live:true,collapsed:true,anchor,activityKey:_activityKeyForLiveTurn()});
   const body=group.querySelector('.tool-call-group-body');
+  const toolName=_toolDisplayName(tc);
+  const toolEventId=tid?`tool-${tid}`:`tool-${String(tc.name||'tool').replace(/[^a-z0-9_-]/gi,'_')}`;
+  const toolDone=tc.done!==false;
+  _appendActivityEvent(group,{
+    id:toolEventId,
+    kind:'tool',
+    label:toolDone?`Tool finished: ${toolName}`:`Running tool: ${toolName}`,
+    detail:tc.preview||tc.snippet||'',
+    status:toolDone?(tc.is_error?'error':'done'):'waiting',
+    ts:_activityNowSeconds(),
+  });
+  const waiting=body.querySelector('.agent-activity-status[data-activity-event-id="thinking-placeholder"] .agent-activity-status-label');
+  if(waiting&&!toolDone) waiting.textContent='Waiting on tool result';
   // Update existing card in place (tool_complete after tool_start)
   if(tid){
     const existing=body.querySelector(`.tool-card-row[data-live-tid="${CSS.escape(tid)}"]`);
@@ -7303,6 +7566,7 @@ function appendThinking(text='', options){
     return;
   }
   const thinkingText=String(text||'').trim()||'Thinking…';
+  const cleanThinking=_sanitizeThinkingDisplayText(thinkingText);
   const allChildren=Array.from(blocks.children);
   const anchor=allChildren.filter(el=>
     el.id!=='toolRunningRow' &&
@@ -7311,6 +7575,20 @@ function appendThinking(text='', options){
   const group=ensureActivityGroup(blocks,{live:true,collapsed:true,anchor,activityKey:_activityKeyForLiveTurn()});
   const body=group&&group.querySelector('.tool-call-group-body');
   if(!body) return;
+  if(!cleanThinking||cleanThinking==='Thinking…'){
+    const label=body.querySelector('.tool-card.tool-card-running')?'Waiting on tool result':'Waiting on model';
+    const detail=body.querySelector('.tool-card-row')
+      ? 'The agent is running; tool results and response text will appear here.'
+      : 'No tool activity has been reported yet.';
+    _appendActivityEvent(group,{id:'thinking-placeholder',kind:'waiting',label,detail,status:'waiting',ts:_activityNowSeconds()});
+    const active=body.querySelector('.agent-activity-thinking[data-thinking-active="1"]');
+    if(active) active.removeAttribute('data-thinking-active');
+    _syncToolCallGroupSummary(group);
+    scrollIfPinned();
+    return;
+  }
+  const placeholder=body.querySelector('.agent-activity-status[data-activity-event-id="thinking-placeholder"]');
+  if(placeholder) placeholder.remove();
   let row=body.querySelector('.agent-activity-thinking[data-thinking-active="1"]');
   if(!row){
     const thinkingCards=Array.from(body.querySelectorAll('.agent-activity-thinking'));
@@ -7324,6 +7602,7 @@ function appendThinking(text='', options){
   }else{
     _renderThinkingInto(row,thinkingText);
   }
+  _activityMarkObserved(group);
   _syncToolCallGroupSummary(group);
   scrollIfPinned();
   if(_scrollPinned){
@@ -7638,6 +7917,12 @@ function _showWorkspaceRootContextMenu(e){
     catch(err){showToast(t('reveal_failed')+(err.message||err));}
   }));
 
+  menu.appendChild(_workspaceContextMenuItem(t('open_in_vscode'),async()=>{
+    menu.remove();
+    try{await api('/api/file/open-vscode',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:'.'})});}
+    catch(err){showToast(t('open_in_vscode_failed')+(err.message||err));}
+  }));
+
   menu.appendChild(_workspaceContextMenuItem(t('copy_file_path'),async()=>{
     menu.remove();
     try{
@@ -7882,6 +8167,15 @@ function _showFileContextMenu(e, item){
   revealItem.onmouseleave=()=>revealItem.style.background='';
   revealItem.onclick=async()=>{menu.remove();try{await api('/api/file/reveal',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:item.path})});}catch(err){showToast(t('reveal_failed')+(err.message||err));}};
   menu.appendChild(revealItem);
+
+  // Open in VS Code (#2735)
+  const vscodeItem=document.createElement('div');
+  vscodeItem.textContent=t('open_in_vscode');
+  vscodeItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
+  vscodeItem.onmouseenter=()=>vscodeItem.style.background='var(--hover-bg)';
+  vscodeItem.onmouseleave=()=>vscodeItem.style.background='';
+  vscodeItem.onclick=async()=>{menu.remove();try{await api('/api/file/open-vscode',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:item.path})});}catch(err){showToast(t('open_in_vscode_failed')+(err.message||err));}};
+  menu.appendChild(vscodeItem);
 
   // Copy file path — resolves the absolute on-disk path on the server (so the
   // user gets the full /home/.../workspace/foo.py rather than the relative

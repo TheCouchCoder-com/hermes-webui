@@ -955,6 +955,11 @@ $('modelSelect').onchange=async()=>{
   if(typeof closeModelDropdown==='function') closeModelDropdown();
   if(typeof _writePersistedModelState==='function') _writePersistedModelState(modelState.model,modelState.model_provider);
   else try{localStorage.setItem('hermes-webui-model',modelState.model)}catch{}
+  if(typeof _rememberPendingSessionModel==='function') _rememberPendingSessionModel(S.session.session_id,modelState.model,modelState.model_provider);
+  S.session.model=modelState.model;
+  S.session.model_provider=modelState.model_provider||null;
+  if(typeof syncModelChip==='function') syncModelChip();
+  syncTopbar();
   // Clarify scope: composer model changes are session-local, not the global default.
   if(typeof showToast==='function'){
     showToast(t('model_scope_toast')||'Applies to this conversation from your next message.', 3000);
@@ -965,10 +970,12 @@ $('modelSelect').onchange=async()=>{
     model:modelState.model,
     model_provider:modelState.model_provider||null,
   })});
-  S.session.model=modelState.model;
-  S.session.model_provider=modelState.model_provider||null;
-  if(typeof syncModelChip==='function') syncModelChip();
-  syncTopbar();
+  if(typeof _readPendingSessionModel==='function'&&typeof _clearPendingSessionModel==='function'){
+    const pending=_readPendingSessionModel(S.session.session_id);
+    if(!pending||(pending.model===modelState.model&&String(pending.model_provider||'')===String(modelState.model_provider||''))){
+      _clearPendingSessionModel(S.session.session_id);
+    }
+  }
   _applySessionContextMetadataUpdate(data);
   // Warn if selected model belongs to a different provider than what Hermes is configured for
   if(typeof _checkProviderMismatch==='function'){
@@ -1231,6 +1238,7 @@ const _SKINS=[
   {name:'Charizard',colors:['#FB923C','#F97316','#EA580C']},
   {name:'Sienna',   colors:['#D97757','#C06A49','#9A523A']},
   {name:'Catppuccin',colors:['#CBA6F7','#B4BEFE','#8839EF']},
+  {name:'Hepburn',   colors:['#c6246a','#ec5597','#f2abca']},
   {name:'Nous',     colors:['#4682B4','#3A6E9A','#2C5F88']},
   {name:'Geist Contrast', value:'geist-contrast', colors:['#000000','#ffffff','#FFF175']},
 ];
@@ -1452,6 +1460,13 @@ function applyBotName(){
     window._simplifiedToolCalling=s.simplified_tool_calling!==false;
     window._sidebarDensity=(s.sidebar_density==='detailed'?'detailed':'compact');
     window._pinnedSessionsLimit=parseInt(s.pinned_sessions_limit||3,10)||3;
+    window._inflightStateLimits={
+      maxSessions:parseInt(s.inflight_state_max_sessions||8,10)||8,
+      messages:parseInt(s.inflight_state_max_messages||24,10)||24,
+      toolCalls:parseInt(s.inflight_state_max_tool_calls||48,10)||48,
+      stringChars:parseInt(s.inflight_state_max_string_chars||60000,10)||60000,
+      jsonChars:parseInt(s.inflight_state_max_json_chars||1500000,10)||1500000,
+    };
     window._busyInputMode=(s.busy_input_mode||'queue');
     window._sessionEndlessScrollEnabled=!!s.session_endless_scroll;
     window._botName=s.bot_name||'Hermes';
@@ -1599,20 +1614,30 @@ function applyBotName(){
   // options are enough for first paint; the dynamic provider list can settle
   // after the saved session is visible.
   const _hydrateBootModelDropdown=()=>populateModelDropdown().then(()=>{
+    const sessionModelState=S.session&&S.session.model
+      ? {model:S.session.model,model_provider:S.session.model_provider||null}
+      : null;
     const savedState=(typeof _readPersistedModelState==='function')
       ? _readPersistedModelState()
       : (localStorage.getItem('hermes-webui-model')?{model:localStorage.getItem('hermes-webui-model'),model_provider:null}:null);
-    const savedModel=savedState&&savedState.model;
-    // Guardrail: prefer profile/server default on boot when available.
-    // Persisted browser model state should not override a valid default model.
-    const allowBootSavedModelOverride=!window._defaultModel;
-    if(savedModel && $('modelSelect') && allowBootSavedModelOverride){
+    // Active sessions are authoritative. On fresh boot without a restored
+    // session, keep the profile/server default ahead of stale browser model
+    // state when a default exists.
+    const stateToApply=sessionModelState||(!window._defaultModel?savedState:null);
+    const savedModel=stateToApply&&stateToApply.model;
+    if(savedModel && $('modelSelect')){
       const applied=(typeof _applyModelToDropdown==='function')
-        ? _applyModelToDropdown(savedModel,$('modelSelect'),savedState.model_provider||null)
+        ? (sessionModelState
+          ? _applyModelToDropdown(sessionModelState.model,$('modelSelect'),sessionModelState.model_provider||null)
+          : _applyModelToDropdown(savedState.model,$('modelSelect'),savedState.model_provider||null))
         : null;
-      if(!applied) $('modelSelect').value=savedModel;
-      // If the value didn't take (model not in list), clear the bad pref
-      if(!applied&&$('modelSelect').value!==savedModel){
+      if(!applied) $('modelSelect').value=stateToApply.model;
+      // If the value didn't take (model not in list), clear the bad pref only
+      // for persisted browser preferences. Active sessions remain authoritative.
+      if(!applied&&sessionModelState&&typeof _ensureModelOptionInDropdown==='function'){
+        _ensureModelOptionInDropdown(sessionModelState.model,$('modelSelect'),sessionModelState.model_provider||null);
+      }
+      else if(!applied&&!sessionModelState&&$('modelSelect').value!==stateToApply.model){
         if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
         else {
           localStorage.removeItem('hermes-webui-model');
@@ -1696,6 +1721,12 @@ function applyBotName(){
         return;
       }
       await loadSession(saved);
+      // Hard refresh starts from the static HTML model list. Hydrate the live
+      // catalog after the saved session is known, then re-apply that session's
+      // model before S._bootReady lets syncModelChip reveal the composer label.
+      // Otherwise the chip can display the static default (e.g. GPT-5.4 Mini)
+      // even though S.session already points at the Codex/current model.
+      if(S.session) await _startBootModelDropdown();
       // If the restored session has no messages it is an ephemeral scratch pad —
       // treat the page as a fresh start rather than resuming a blank conversation.
       // loadSession() already ran, so loadDir() has populated the workspace file tree.

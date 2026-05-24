@@ -29,7 +29,7 @@ try:
 except ImportError:
     _AGENT_DIR = None
 
-_update_cache = {'webui': None, 'agent': None, 'checked_at': 0}
+_update_cache = {'webui': None, 'agent': None, 'checked_at': 0, 'include_agent': True}
 _SUMMARY_CACHE_MAX = 16
 _summary_cache: OrderedDict = OrderedDict()
 _cache_lock = threading.Lock()
@@ -381,6 +381,18 @@ def _check_repo_release(path, name):
     current_tag = _current_release_tag(path)
     behind = _release_gap(tags, current_tag, latest_tag)
 
+    # If behind == 0 but HEAD has moved past the tag (e.g. the agent repo
+    # keeps committing to master between tagged releases), the release check
+    # would report "Up to date" even though hundreds of commits are missing.
+    # Detect this by comparing the short describe output (which includes the
+    # -N-gSHA suffix when HEAD is past a tag) against the bare tag name.
+    # When HEAD is ahead of the latest tag, fall through to _check_repo_branch
+    # so the real commit count is reported instead.  See #2653.
+    if behind == 0:
+        full_desc, ok = _run_git(['describe', '--tags', '--always'], path)
+        if ok and full_desc and full_desc != current_tag:
+            return None
+
     remote_url, _ = _run_git(['remote', 'get-url', 'origin'], path)
     remote_url = _normalize_remote_url(remote_url)
 
@@ -477,7 +489,14 @@ def _check_repo(path, name):
 
     # Fetch tags first so update prompts track published releases, not every
     # development commit that lands on master/main after the latest release.
-    fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--tags'], path, timeout=15)
+    #
+    # --force is required because the WebUI is a release-tracking consumer:
+    # it never pushes tags, so it should always defer to whatever the remote
+    # says a release tag points to. Without --force, a remote re-tag (e.g.
+    # after a squash-merge that re-points a release tag at a new SHA) jams
+    # the update path indefinitely with "would clobber existing tag" errors.
+    # See #2756.
+    fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--tags', '--force'], path, timeout=15)
     if not fetch_ok:
         release_info = _check_repo_release(path, name)
         message = 'fetch failed'
@@ -502,11 +521,21 @@ def _check_repo(path, name):
     return _check_repo_branch(path, name, fetch=False)
 
 
-def check_for_updates(force=False):
+def _ignored_agent_update_info() -> dict:
+    """Return a stable update-check payload for intentionally ignored Agent updates."""
+    return {'name': 'agent', 'behind': 0, 'ignored': True}
+
+
+def check_for_updates(force=False, *, include_agent=True):
     """Return cached update status for webui and agent repos."""
     global _check_in_progress
+    include_agent = bool(include_agent)
     with _cache_lock:
-        if not force and time.time() - _update_cache['checked_at'] < CACHE_TTL:
+        if (
+            not force
+            and _update_cache.get('include_agent') == include_agent
+            and time.time() - _update_cache['checked_at'] < CACHE_TTL
+        ):
             return dict(_update_cache)
         if _check_in_progress:
             return dict(_update_cache)  # another thread is already checking
@@ -515,12 +544,13 @@ def check_for_updates(force=False):
     try:
         # Run checks outside the lock (network I/O)
         webui_info = _check_repo(REPO_ROOT, 'webui')
-        agent_info = _check_repo(_AGENT_DIR, 'agent')
+        agent_info = _check_repo(_AGENT_DIR, 'agent') if include_agent else _ignored_agent_update_info()
 
         with _cache_lock:
             _update_cache['webui'] = webui_info
             _update_cache['agent'] = agent_info
             _update_cache['checked_at'] = time.time()
+            _update_cache['include_agent'] = include_agent
             return dict(_update_cache)
     finally:
         _check_in_progress = False
@@ -896,7 +926,10 @@ def apply_force_update(target: str) -> dict:
         if path is None or not (path / '.git').exists():
             return {'ok': False, 'message': 'Not a git repository'}
 
-        _, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags'], path, timeout=15)
+        # --force so a remote re-tag (e.g. squash-merge that re-points an
+        # existing release tag) doesn't jam the apply path with "would clobber
+        # existing tag". See #2756.
+        _, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=15)
         if not fetch_ok:
             return {
                 'ok': False,
@@ -953,7 +986,8 @@ def _apply_update_inner(target):
         return {'ok': False, 'message': 'Not a git repository'}
 
     # Fetch before attempting pull, so the remote ref is current.
-    _, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags'], path, timeout=15)
+    # --force so a remote re-tag doesn't block the update path (see #2756).
+    _, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=15)
     if not fetch_ok:
         return {
             'ok': False,

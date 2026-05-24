@@ -424,7 +424,7 @@ class TestSuccessfulUpdateReturnsRestartScheduled:
 
         result = upd.apply_update('webui')
         assert result['ok'] is True
-        assert ['fetch', 'origin', '--quiet', '--tags'] in ran
+        assert ['fetch', 'origin', '--quiet', '--tags', '--force'] in ran
         assert ['pull', '--ff-only', 'origin', 'v0.51.106'] in ran
         assert ['rev-parse', '--abbrev-ref', '@{upstream}'] not in ran
 

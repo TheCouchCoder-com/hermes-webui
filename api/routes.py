@@ -6,6 +6,7 @@ Extracted from server.py (Sprint 11) so server.py is a thin shell.
 import html as _html
 import copy
 import io
+import gzip
 import json
 import logging
 import os
@@ -231,7 +232,7 @@ def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict
                 if not skill_matches_platform(frontmatter):
                     continue
                 name = frontmatter.get("name", skill_dir.name)[:64]
-                if name in seen_names or name in disabled:
+                if name in seen_names:
                     continue
                 description = frontmatter.get("description", "")
                 if not description:
@@ -248,6 +249,7 @@ def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict
                         "name": name,
                         "description": description,
                         "category": _skill_category_from_path(skill_md, search_dirs),
+                        "disabled": name in disabled,
                     }
                 )
             except (UnicodeDecodeError, PermissionError) as e:
@@ -939,6 +941,11 @@ from api.config import (
     get_webui_session_save_mode,
     STREAM_GOAL_RELATED,
     PENDING_GOAL_CONTINUATION,
+    _get_config_path,
+    _load_yaml_config_file,
+    _save_yaml_config_file,
+    reload_config,
+    _cfg_lock,
 )
 from api.helpers import (
     require,
@@ -1253,8 +1260,37 @@ def _csrf_exempt_path(path: str) -> bool:
     return path in {"/api/auth/login", "/api/csp-report"}
 
 
+_CSRF_FAILURE_ATTR = "_hermes_csrf_failure_reason"
+
+
+def _set_csrf_failure_reason(handler, reason: str) -> bool:
+    try:
+        setattr(handler, _CSRF_FAILURE_ATTR, reason)
+    except Exception:
+        pass
+    return False
+
+
+def _clear_csrf_failure_reason(handler) -> None:
+    try:
+        if hasattr(handler, _CSRF_FAILURE_ATTR):
+            delattr(handler, _CSRF_FAILURE_ATTR)
+    except Exception:
+        pass
+
+
+def _csrf_rejection_error(handler) -> str:
+    reason = getattr(handler, _CSRF_FAILURE_ATTR, "")
+    if reason == "origin_mismatch":
+        return "Cross-origin mismatch - check reverse proxy headers"
+    if reason == "token_mismatch":
+        return "Session expired - reload the page"
+    return "Cross-origin request rejected"
+
+
 def _check_csrf(handler) -> bool:
     """Reject cross-origin or tokenless authenticated browser unsafe requests."""
+    _clear_csrf_failure_reason(handler)
     origin = handler.headers.get("Origin", "")
     referer = handler.headers.get("Referer", "")
     host = handler.headers.get("Host", "")
@@ -1264,7 +1300,7 @@ def _check_csrf(handler) -> bool:
     # Extract host:port from origin/referer
     m = _re.match(r"^https?://([^/]+)", target)
     if not m:
-        return False
+        return _set_csrf_failure_reason(handler, "origin_mismatch")
     origin_host = m.group(1)
     origin_scheme = m.group(0).split('://')[0].lower()  # 'http' or 'https'
     origin_name, origin_port = _normalize_host_port(origin_host)
@@ -1292,7 +1328,7 @@ def _check_csrf(handler) -> bool:
                 origin_allowed = True
                 break
     if not origin_allowed:
-        return False
+        return _set_csrf_failure_reason(handler, "origin_mismatch")
 
     from api.auth import CSRF_HEADER_NAME, is_auth_enabled, parse_cookie, verify_csrf_token
 
@@ -1300,7 +1336,9 @@ def _check_csrf(handler) -> bool:
         return True
     cookie_val = parse_cookie(handler)
     submitted = handler.headers.get(CSRF_HEADER_NAME) or handler.headers.get("X-CSRF-Token")
-    return verify_csrf_token(cookie_val or "", submitted or "")
+    if verify_csrf_token(cookie_val or "", submitted or ""):
+        return True
+    return _set_csrf_failure_reason(handler, "token_mismatch")
 
 
 def _client_ip_for_rate_limit(handler) -> str:
@@ -4063,17 +4101,18 @@ def handle_get(handler, parsed) -> bool:
             cli_messages = []
             state_db_messages = []
             sidecar_metadata_messages = None
+            _session_profile = getattr(s, 'profile', None) or None
             if is_messaging_session:
                 cli_messages = get_cli_session_messages(sid)
             elif load_messages:
-                state_db_messages = get_state_db_session_messages(sid)
+                state_db_messages = get_state_db_session_messages(sid, profile=_session_profile)
             elif not is_messaging_session:
                 # Metadata-only callers still need the same append-only
                 # reconciliation contract as full loads. A raw state.db summary
                 # can count stale rows that the merge intentionally filters out,
                 # which makes sidebar polling think the transcript is always
                 # newer than the loaded conversation.
-                state_db_messages = get_state_db_session_messages(sid)
+                state_db_messages = get_state_db_session_messages(sid, profile=_session_profile)
                 sidecar_metadata_session = Session.load(sid)
                 sidecar_metadata_messages = (
                     getattr(sidecar_metadata_session, "messages", []) or []
@@ -4237,6 +4276,13 @@ def handle_get(handler, parsed) -> bool:
                 )
             if cli_meta and _is_messaging_session_record(cli_meta):
                 raw = _merge_cli_sidebar_metadata(raw, cli_meta)
+                # ``message_count`` in /api/session is the display coordinate
+                # space used for pagination and the header badge. Messaging
+                # state.db metadata can include raw duplicate transport rows that
+                # _merged_session_messages_for_display() intentionally dedupes;
+                # keep the raw count available as ``actual_message_count`` but
+                # do not let it make the frontend expect phantom messages.
+                raw["message_count"] = _merged_message_count
             # Signal to the frontend that older messages were omitted.
             # For msg_before paging, compare against the filtered set,
             # not the full list — otherwise we signal truncation even when
@@ -4579,6 +4625,7 @@ def handle_get(handler, parsed) -> bool:
         settings = load_settings()
         if not settings.get("check_for_updates", True):
             return j(handler, {"disabled": True})
+        include_agent_updates = not bool(settings.get("ignore_agent_updates"))
         qs = parse_qs(parsed.query)
         force = qs.get("force", ["0"])[0] == "1"
         # ?simulate=1 returns fake behind counts for UI testing (localhost only)
@@ -4600,7 +4647,8 @@ def handle_get(handler, parsed) -> bool:
                     },
                     "agent": {
                         "name": "agent",
-                        "behind": 1,
+                        "behind": 1 if include_agent_updates else 0,
+                        "ignored": not include_agent_updates,
                         "current_sha": "aaa0001",
                         "latest_sha": "bbb0002",
                         "branch": "master",
@@ -4612,7 +4660,7 @@ def handle_get(handler, parsed) -> bool:
             )
         from api.updates import check_for_updates
 
-        return j(handler, check_for_updates(force=force))
+        return j(handler, check_for_updates(force=force, include_agent=include_agent_updates))
 
     if parsed.path == "/api/chat/stream/status":
         stream_id = parse_qs(parsed.query).get("stream_id", [""])[0]
@@ -4944,7 +4992,7 @@ def handle_post(handler, parsed) -> bool:
         diag.stage("csrf")
     if not _csrf_exempt_path(parsed.path) and not _check_csrf(handler):
         try:
-            return j(handler, {"error": "Cross-origin request rejected"}, status=403)
+            return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
         finally:
             if diag:
                 diag.finish()
@@ -5809,6 +5857,9 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/file/path":
         return _handle_file_path(handler, body)
 
+    if parsed.path == "/api/file/open-vscode":
+        return _handle_file_open_vscode(handler, body)
+
     # ── Workspace management (POST) ──
     if parsed.path == "/api/workspaces/add":
         return _handle_workspace_add(handler, body)
@@ -5858,6 +5909,9 @@ def handle_post(handler, parsed) -> bool:
         if require_perm(handler, 'manage_skills') is None:
             return True
         return _handle_skill_delete(handler, body)
+
+    if parsed.path == "/api/skills/toggle":
+        return _handle_skill_toggle(handler, body)
 
     # ── Memory (POST) ──
     if parsed.path == "/api/memory/write":
@@ -6585,7 +6639,7 @@ def handle_post(handler, parsed) -> bool:
 def handle_patch(handler, parsed) -> bool:
     """Handle all PATCH routes. Returns True if handled, False for 404."""
     if not _check_csrf(handler):
-        return j(handler, {"error": "Cross-origin request rejected"}, status=403)
+        return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
     body = read_body(handler)
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_patch
@@ -6603,7 +6657,7 @@ def handle_patch(handler, parsed) -> bool:
 def handle_delete(handler, parsed) -> bool:
     """Handle all DELETE routes. Returns True if handled, False for 404."""
     if not _check_csrf(handler):
-        return j(handler, {"error": "Cross-origin request rejected"}, status=403)
+        return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
     body = read_body(handler)
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_delete
@@ -6638,6 +6692,20 @@ _STATIC_MIME = {
 # MIME types that are text-based and should carry charset=utf-8
 _TEXT_MIME_TYPES = {"text/css", "application/javascript", "text/html", "image/svg+xml", "text/plain"}
 
+# MIME types worth gzipping. Image and font formats (png/jpg/webp/woff2) are
+# already compressed; gzip would only add CPU and a few bytes of framing.
+_COMPRESSIBLE_MIME = {
+    "text/css", "application/javascript", "text/html", "image/svg+xml",
+    "application/json", "text/plain",
+}
+
+# In-process cache for raw bytes, compressed bytes, and ETag. The cache is keyed
+# by absolute path and invalidated on (size, high-precision mtime) change, so a
+# redeploy is picked up without a process restart. Missing/random paths never
+# enter the cache; memory cost is bounded by the static/ tree's served files.
+_STATIC_CACHE: dict = {}
+_STATIC_CACHE_LOCK = threading.Lock()
+
 
 def _serve_static(handler, parsed):
     static_root = (Path(__file__).parent.parent / "static").resolve()
@@ -6653,13 +6721,63 @@ def _serve_static(handler, parsed):
     ext = static_file.suffix.lower()
     ct = _STATIC_MIME.get(ext.lstrip("."), "text/plain")
     ct_header = f"{ct}; charset=utf-8" if ct in _TEXT_MIME_TYPES else ct
+
+    # Look up or populate the per-file cache (raw, optional gzip, ETag).
+    # Keyed by absolute path; invalidated by (size, nanosecond mtime).
+    st = static_file.stat()
+    sig = (st.st_size, st.st_mtime_ns)
+    cache_key = str(static_file)
+    raw = gz = etag = None
+    with _STATIC_CACHE_LOCK:
+        cached = _STATIC_CACHE.get(cache_key)
+        if cached and cached[0] == sig:
+            _, raw, gz, etag = cached
+    if raw is None:
+        raw = static_file.read_bytes()
+        # Weak ETag: equality semantics, derived from filesystem identity.
+        etag = f'W/"{sig[0]:x}-{sig[1]:x}"'
+        gz = (gzip.compress(raw, compresslevel=6)
+              if ct in _COMPRESSIBLE_MIME and len(raw) > 1024
+              else None)
+        with _STATIC_CACHE_LOCK:
+            _STATIC_CACHE[cache_key] = (sig, raw, gz, etag)
+
+    # The page template substitutes __WEBUI_VERSION__ at request time (see the
+    # `/`/`/index.html`/`/session/` branch above), and static/sw.js's
+    # SHELL_ASSETS list relies on the same convention. So a fingerprinted URL
+    # is safe to cache aggressively: any redeploy changes the URL.
+    version_values = parse_qs(parsed.query, keep_blank_values=True).get("v", [""])
+    has_fingerprint = bool(version_values[0])
+    cache_control = (
+        "public, max-age=31536000, immutable" if has_fingerprint
+        else "public, max-age=300"
+    )
+
+    # 304 short-circuit on conditional GET.
+    if handler.headers.get("If-None-Match") == etag:
+        handler.send_response(304)
+        handler.send_header("ETag", etag)
+        handler.send_header("Cache-Control", cache_control)
+        if gz is not None:
+            handler.send_header("Vary", "Accept-Encoding")
+        handler.end_headers()
+        return True
+
+    accept_enc = (handler.headers.get("Accept-Encoding") or "").lower()
+    use_gzip = gz is not None and "gzip" in accept_enc
+    body = gz if use_gzip else raw
+
     handler.send_response(200)
     handler.send_header("Content-Type", ct_header)
-    handler.send_header("Cache-Control", "no-store")
-    raw = static_file.read_bytes()
-    handler.send_header("Content-Length", str(len(raw)))
+    handler.send_header("Content-Length", str(len(body)))
+    handler.send_header("ETag", etag)
+    handler.send_header("Cache-Control", cache_control)
+    if gz is not None:
+        handler.send_header("Vary", "Accept-Encoding")
+    if use_gzip:
+        handler.send_header("Content-Encoding", "gzip")
     handler.end_headers()
-    handler.wfile.write(raw)
+    handler.wfile.write(body)
     return True
 
 
@@ -7208,6 +7326,51 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
     return True
 
 
+def _html_preview_with_blank_base(raw: bytes) -> bytes:
+    base = '<base target="_blank">'
+    text = raw.decode("utf-8", errors="replace")
+    if re.search(r"<head(?:\s[^>]*)?>", text, flags=re.IGNORECASE):
+        text = re.sub(r"(<head\b[^>]*>)", r"\1" + base, text, count=1, flags=re.IGNORECASE)
+    elif re.search(r"<!doctype[^>]*>", text, flags=re.IGNORECASE):
+        text = re.sub(
+            r"(<!doctype[^>]*>)",
+            r"\1<head>" + base + "</head>",
+            text,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+    else:
+        text = "<head>" + base + "</head>" + text
+    return text.encode("utf-8")
+
+
+def _serve_inline_html_preview(handler, target: Path, cache_control: str, *, csp: str):
+    """Serve sandboxed workspace HTML preview with links targeting a new tab."""
+    try:
+        body = _html_preview_with_blank_base(target.read_bytes())
+    except PermissionError:
+        return bad(handler, "Permission denied", 403)
+    except Exception:
+        return bad(handler, "Could not read file", 500)
+
+    handler.send_response(200)
+    handler.send_header("Content-Type", "text/html; charset=utf-8")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.send_header("Accept-Ranges", "none")
+    handler.send_header("Cache-Control", cache_control)
+    handler.send_header("Content-Disposition", _content_disposition_value("inline", target.name))
+    handler.send_header("Content-Security-Policy", csp)
+    handler.send_header("X-Content-Type-Options", "nosniff")
+    handler.send_header("Referrer-Policy", "same-origin")
+    handler.send_header(
+        "Permissions-Policy",
+        "camera=(), microphone=(self), geolocation=(), clipboard-write=(self)",
+    )
+    handler.end_headers()
+    handler.wfile.write(body)
+    return True
+
+
 def _handle_media(handler, parsed):
     """Serve a local file by absolute path for inline display in the chat.
 
@@ -7513,8 +7676,10 @@ def _handle_file_raw(handler, parsed):
     # CSP sandbox directive applies the same isolation server-side: without
     # allow-same-origin, the document is treated as a unique opaque origin and
     # cannot read WebUI cookies, localStorage, or postMessage to the parent.
-    csp = "sandbox allow-scripts" if html_inline_ok else None
+    csp = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox" if html_inline_ok else None
     # _serve_file_bytes sends Content-Security-Policy when csp is set.
+    if html_inline_ok:
+        return _serve_inline_html_preview(handler, target, "no-store", csp=csp)
     return _serve_file_bytes(handler, target, mime, disposition, "no-store", csp=csp)
 
 
@@ -9927,6 +10092,90 @@ def _handle_file_path(handler, body):
         return bad(handler, _sanitize_error(e))
 
 
+def _handle_file_open_vscode(handler, body):
+    """Open a workspace file or folder in VS Code (#2735).
+
+    Reads optional ``vscode`` config block from config.yaml:
+
+        vscode:
+          command: code          # executable on PATH; defaults to "code"
+          host_path_prefix: /home/user/projects       # Docker host path
+          container_path_prefix: /app/workspace       # matching container path
+
+    If ``host_path_prefix`` and ``container_path_prefix`` are both set,
+    paths that begin with ``container_path_prefix`` are translated to the
+    host prefix before being handed to VS Code.  This lets users running
+    Hermes WebUI inside Docker still open files in their local editor.
+    """
+    try:
+        require(body, "session_id", "path")
+    except ValueError as e:
+        return bad(handler, str(e))
+    try:
+        s = get_session(body["session_id"])
+    except KeyError:
+        return bad(handler, "Session not found", 404)
+    try:
+        target = safe_resolve(Path(s.workspace), body["path"])
+        if not target.exists():
+            return bad(handler, f"File not found: {target}", 404)
+
+        target_str = str(target)
+
+        # Optional Docker host/container path translation
+        from api.config import get_config as _get_cfg  # noqa: PLC0415
+        vscode_cfg = _get_cfg().get("vscode", {})
+        if not isinstance(vscode_cfg, dict):
+            vscode_cfg = {}
+        container_prefix = vscode_cfg.get("container_path_prefix", "")
+        host_prefix = vscode_cfg.get("host_path_prefix", "")
+        if container_prefix and host_prefix and target_str.startswith(container_prefix):
+            target_str = host_prefix + target_str[len(container_prefix):]
+
+        cmd = vscode_cfg.get("command", "code")
+        # Resolve the command to an absolute path so subprocess.Popen finds it
+        # even when the server process inherits a minimal PATH (e.g. when
+        # launched via start.sh on macOS where /usr/local/bin may be absent).
+        resolved_cmd = shutil.which(cmd)
+        if resolved_cmd is None:
+            # Try common VS Code installation paths as fallback.
+            # macOS: /usr/local/bin/code (symlink) or app bundle CLI
+            # Linux: /usr/bin/code or snap
+            # Windows: user-install under %LOCALAPPDATA%, system-install under %PROGRAMFILES%
+            _local_app_data = os.environ.get("LOCALAPPDATA", "")
+            _prog_files = os.environ.get("PROGRAMFILES", "C:\\Program Files")
+            _prog_files_x86 = os.environ.get("PROGRAMFILES(X86)", "C:\\Program Files (x86)")
+            _vscode_fallbacks = [
+                # macOS
+                "/usr/local/bin/code",
+                "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code",
+                # Linux
+                "/usr/bin/code",
+                "/snap/bin/code",
+                # Windows (user install)
+                os.path.join(_local_app_data, "Programs", "Microsoft VS Code", "bin", "code.cmd"),
+                # Windows (system install)
+                os.path.join(_prog_files, "Microsoft VS Code", "bin", "code.cmd"),
+                os.path.join(_prog_files_x86, "Microsoft VS Code", "bin", "code.cmd"),
+            ]
+            for fb in _vscode_fallbacks:
+                if fb and Path(fb).exists():
+                    resolved_cmd = fb
+                    break
+        if resolved_cmd is None:
+            return bad(
+                handler,
+                f"VS Code command not found: {cmd!r}. "
+                "Install VS Code and ensure the 'code' CLI is on PATH, "
+                "or set vscode.command in config.yaml to the full path.",
+            )
+        subprocess.Popen([resolved_cmd, target_str])
+
+        return j(handler, {"ok": True, "path": body["path"]})
+    except (ValueError, PermissionError, OSError) as e:
+        return bad(handler, _sanitize_error(e))
+
+
 def _handle_workspace_add(handler, body):
     # Strip surrounding paired quotes BEFORE any further processing — macOS
     # Finder's "Copy as Pathname" wraps paths in single quotes, and users
@@ -11367,6 +11616,81 @@ def _handle_skill_delete(handler, body):
     skill_dir = matches[0].parent
     shutil.rmtree(str(skill_dir))
     return j(handler, {"ok": True, "name": body["name"]})
+
+
+def _normalize_names_list(names) -> list[str]:
+    """Normalize a config value (None/str/list) into a deduplicated str list."""
+    if names is None:
+        return []
+    if isinstance(names, str):
+        names = [names]
+    elif not isinstance(names, list):
+        names = list(names) if names else []
+    return list(dict.fromkeys(str(d).strip() for d in names if str(d).strip()))
+
+
+def _toggle_name_in_list(names, name: str, enabled: bool) -> list[str]:
+    """Add or remove *name* from *names*, returning a new list."""
+    names = _normalize_names_list(names)
+    if enabled:
+        return [d for d in names if d != name]
+    if name not in names:
+        names.append(name)
+    return names
+
+
+def _handle_skill_toggle(handler, body):
+    """Toggle a skill's enabled/disabled state in the active profile's config.yaml.
+
+    Writes through to ``skills.platform_disabled.webui`` when that key exists
+    so the toggle takes effect for WebUI sessions (the agent's
+    ``get_disabled_skill_names`` checks platform-specific lists first when
+    ``HERMES_SESSION_PLATFORM`` is set).
+    """
+    try:
+        require(body, "name", "enabled")
+    except ValueError as e:
+        return bad(handler, str(e))
+
+    name = body["name"].strip()
+    enabled = bool(body["enabled"])
+
+    # Validate the skill exists in the filesystem
+    skills_dir = _active_skills_dir()
+    search_dirs = _active_skill_search_dirs(skills_dir)
+    skill_dir, skill_md = _find_skill_in_dirs(name, search_dirs)
+    if not skill_md:
+        return bad(handler, f"Skill '{name}' not found", 404)
+
+    config_path = _get_config_path()
+    with _cfg_lock:
+        cfg = _load_yaml_config_file(config_path)
+
+        # Ensure skills section exists as a dict
+        if "skills" not in cfg or not isinstance(cfg["skills"], dict):
+            cfg["skills"] = {}
+        skills_cfg = cfg["skills"]
+
+        # Always update the global disabled list
+        skills_cfg["disabled"] = _toggle_name_in_list(
+            skills_cfg.get("disabled"), name, enabled
+        )
+
+        # Write-through to platform_disabled.webui if it exists so that the
+        # toggle takes effect for WebUI sessions (the agent checks the
+        # platform-specific list first when HERMES_SESSION_PLATFORM=webui).
+        platform_disabled = skills_cfg.get("platform_disabled")
+        if isinstance(platform_disabled, dict) and "webui" in platform_disabled:
+            platform_disabled["webui"] = _toggle_name_in_list(
+                platform_disabled["webui"], name, enabled
+            )
+
+        cfg["skills"] = skills_cfg
+        _save_yaml_config_file(config_path, cfg)
+
+    reload_config()  # outside with block — reload_config() acquires the lock itself
+
+    return j(handler, {"ok": True, "name": name, "enabled": enabled})
 
 
 def _handle_memory_write(handler, body):
