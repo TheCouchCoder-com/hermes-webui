@@ -175,6 +175,8 @@ const HTML_EXTS   = new Set(['.html','.htm']);
 const PDF_EXTS    = new Set(['.pdf']);
 const AUDIO_EXTS  = new Set(['.mp3','.wav','.m4a','.aac','.ogg','.oga','.opus','.flac']);
 const VIDEO_EXTS  = new Set(['.mp4','.mov','.m4v','.webm','.ogv','.avi','.mkv']);
+const MD_PREVIEW_RICH_RENDER_MAX_BYTES = 64 * 1024;
+const MD_PREVIEW_RICH_RENDER_MAX_LINES = 1500;
 // Binary formats that should download rather than preview
 const DOWNLOAD_EXTS = new Set([
   '.docx','.doc','.xlsx','.xls','.pptx','.ppt','.odt','.ods','.odp',
@@ -185,6 +187,31 @@ const DOWNLOAD_EXTS = new Set([
 ]);
 
 function fileExt(p){ const i=p.lastIndexOf('.'); return i>=0?p.slice(i).toLowerCase():''; }
+
+function markdownPreviewByteLength(content){
+  const text=String(content||'');
+  if(typeof Blob==='function') return new Blob([text]).size;
+  if(typeof TextEncoder==='function') return new TextEncoder().encode(text).length;
+  return unescape(encodeURIComponent(text)).length;
+}
+
+function markdownPreviewLineCount(content){
+  const text=String(content||'');
+  if(!text) return 1;
+  return text.split('\n').length;
+}
+
+function shouldRenderMarkdownPreviewAsPlainText(content){
+  return markdownPreviewByteLength(content)>MD_PREVIEW_RICH_RENDER_MAX_BYTES
+    || markdownPreviewLineCount(content)>MD_PREVIEW_RICH_RENDER_MAX_LINES;
+}
+
+function largeMarkdownPlainTextStatus(content){
+  const bytes=markdownPreviewByteLength(content);
+  const lines=markdownPreviewLineCount(content);
+  const sizeLabel=bytes>=1024?`${Math.round(bytes/1024)} KB`:`${bytes} B`;
+  return `Large markdown file (${sizeLabel}, ${lines} lines) shown as plain text. Click Edit to view raw.`;
+}
 
 let _previewCurrentPath = '';  // relative path of currently previewed file
 let _previewCurrentMode = '';  // 'code' | 'md' | 'image' | 'html' | 'pdf' | 'audio' | 'video'
@@ -317,8 +344,14 @@ async function openFile(path){
     // Markdown: fetch text, render with renderMd, display as formatted HTML
     try{
       const data=await api(`/api/file?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(path)}`);
-      showPreview('md');
       _previewRawContent = data.content;
+      if(shouldRenderMarkdownPreviewAsPlainText(data.content)){
+        showPreview('code');
+        $('previewCode').textContent=data.content;
+        setStatus(largeMarkdownPlainTextStatus(data.content));
+        return;
+      }
+      showPreview('md');
       $('previewMd').innerHTML=renderMd(data.content);
       requestAnimationFrame(()=>{if(typeof renderKatexBlocks==='function')renderKatexBlocks();});
     }catch(e){setStatus(t('file_open_failed'));}
