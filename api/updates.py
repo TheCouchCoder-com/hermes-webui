@@ -10,6 +10,7 @@ Skips repos that are not git checkouts (e.g. Docker baked images where
 """
 import hashlib
 import json
+import logging
 import os
 import re
 import subprocess
@@ -22,6 +23,8 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from api.config import REPO_ROOT, STREAMS, STREAMS_LOCK
+
+logger = logging.getLogger(__name__)
 
 # Lazy -- may be None if agent not found
 try:
@@ -269,9 +272,41 @@ def _detect_agent_version() -> str:
     return 'not detected'
 
 
-# Resolved once at import time — tags cannot change without a process restart.
-WEBUI_VERSION: str = _detect_webui_version()
-AGENT_VERSION: str = _detect_agent_version()
+# Version strings used to be resolved once at import time, but a `git pull`
+# outside the in-app update button (which re-execs the process) would leave
+# the badge frozen until the operator restarted the server.  Resolve lazily
+# through a short TTL cache instead so `from api.updates import WEBUI_VERSION`
+# inside a request handler picks up the new tag automatically.
+_VERSION_CACHE_TTL = 15.0
+_version_cache_lock = threading.Lock()
+_version_cache: dict[str, tuple[float, str]] = {}
+
+
+def _cached_version(key: str, resolver) -> str:
+    now = time.monotonic()
+    with _version_cache_lock:
+        entry = _version_cache.get(key)
+        if entry and entry[0] > now:
+            return entry[1]
+    value = resolver()
+    with _version_cache_lock:
+        _version_cache[key] = (now + _VERSION_CACHE_TTL, value)
+    return value
+
+
+def _reset_version_cache() -> None:
+    with _version_cache_lock:
+        _version_cache.clear()
+
+
+def __getattr__(name):
+    # PEP 562: dynamic attribute access so `from api.updates import WEBUI_VERSION`
+    # picks up a fresh git describe within _VERSION_CACHE_TTL of any manual pull.
+    if name == 'WEBUI_VERSION':
+        return _cached_version('webui', _detect_webui_version)
+    if name == 'AGENT_VERSION':
+        return _cached_version('agent', _detect_agent_version)
+    raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
 
 
 def _normalize_remote_url(remote_url):
@@ -483,9 +518,22 @@ def _check_repo_branch(path, name, *, fetch=True):
 
 
 def _check_repo(path, name):
-    """Check if a git repo is behind its latest release. Returns dict or None."""
+    """Check if a git repo is behind its latest release.
+
+    Returns a dict describing the result.  When the path is not a git checkout
+    (Docker baked image, source archive, etc.), the dict has ``unavailable=True``
+    so the frontend can show "Update check unavailable" instead of silently
+    falling through to "Up to date".
+    """
     if path is None or not (path / '.git').exists():
-        return None
+        logger.info('update check %s: unavailable (not_a_git_checkout)', name)
+        return {
+            'name': name,
+            'behind': None,
+            'unavailable': True,
+            'reason': 'not_a_git_checkout',
+            'message': 'Update check unavailable: this deployment is not a git checkout.',
+        }
 
     # Fetch tags first so update prompts track published releases, not every
     # development commit that lands on master/main after the latest release.
@@ -502,6 +550,7 @@ def _check_repo(path, name):
         message = 'fetch failed'
         if fetch_out:
             message = f'{message}: {_sanitize_git_diagnostic(fetch_out)}'
+        logger.info('update check %s: %s', name, message)
         if release_info is not None:
             release_info = dict(release_info)
             release_info['error'] = message
@@ -516,9 +565,25 @@ def _check_repo(path, name):
 
     release_info = _check_repo_release(path, name)
     if release_info is not None:
+        logger.info(
+            'update check %s: current=%s latest=%s behind=%s release_based=True',
+            name,
+            release_info.get('current_version'),
+            release_info.get('latest_version'),
+            release_info.get('behind'),
+        )
         return release_info
 
-    return _check_repo_branch(path, name, fetch=False)
+    branch_info = _check_repo_branch(path, name, fetch=False)
+    logger.info(
+        'update check %s: current=%s latest=%s behind=%s branch=%s release_based=False',
+        name,
+        branch_info.get('current_sha'),
+        branch_info.get('latest_sha'),
+        branch_info.get('behind'),
+        branch_info.get('branch'),
+    )
+    return branch_info
 
 
 def _ignored_agent_update_info() -> dict:
@@ -946,6 +1011,7 @@ def apply_force_update(target: str) -> dict:
 
         with _cache_lock:
             _update_cache['checked_at'] = 0
+        _reset_version_cache()
 
         _schedule_restart()
 
@@ -1078,6 +1144,7 @@ def _apply_update_inner(target):
     # Invalidate cache
     with _cache_lock:
         _update_cache['checked_at'] = 0
+    _reset_version_cache()
 
     # Schedule a self-restart so the updated code is loaded fresh.  A plain
     # git pull leaves stale Python modules in sys.modules — agent imports that

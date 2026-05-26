@@ -20,3 +20,22 @@ def test_update_error_formatter_strips_generic_fetch_prefix():
     """The UI should show the actionable git detail, not only 'fetch failed'."""
     assert "function _formatUpdateCheckError(label,info)" in UI_JS
     assert "replace(/^fetch failed" in UI_JS
+
+
+def test_ui_js_defines_update_check_unavailable_formatter():
+    """ui.js must expose _formatUpdateCheckUnavailable so the unavailable
+    payload from _check_repo (no .git) can be labelled in the UI."""
+    assert "function _formatUpdateCheckUnavailable(label,info)" in UI_JS
+    assert "info.unavailable" in UI_JS
+
+
+def test_unavailable_branch_lives_between_error_and_up_to_date():
+    """The unavailable branch must run AFTER errorParts (errors are more
+    actionable) but BEFORE the green up-to-date branch (so 'no .git' never
+    masquerades as success)."""
+    error_idx = PANELS_JS.index("errorParts.length")
+    unavailable_idx = PANELS_JS.index("unavailableParts.length")
+    up_to_date_idx = PANELS_JS.index("settings_up_to_date")
+    assert error_idx < unavailable_idx < up_to_date_idx, (
+        "expected order: errorParts → unavailableParts → up_to_date"
+    )

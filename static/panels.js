@@ -6882,12 +6882,22 @@ async function checkUpdatesNow(){
       const agentPart=formatUpdatePart('Agent',data.agent);
       if(webuiPart) parts.push(webuiPart);
       if(agentPart) parts.push(agentPart);
+      const unavailableParts=[];
+      const formatUnavailable=(typeof _formatUpdateCheckUnavailable==='function')
+        ? _formatUpdateCheckUnavailable
+        : ((label,info)=>info&&info.unavailable?label+': '+(info.message||'Update check unavailable.'):null);
+      const webuiUn=formatUnavailable('WebUI',data.webui);
+      const agentUn=formatUnavailable('Agent',data.agent);
+      if(webuiUn) unavailableParts.push(webuiUn);
+      if(agentUn) unavailableParts.push(agentUn);
       if(parts.length){
         if(status){status.textContent=t('settings_updates_available').replace('{count}',parts.join(', '));status.style.color='var(--accent)';}
         // Also trigger the update banner
         if(typeof _showUpdateBanner==='function') _showUpdateBanner(data);
       } else if(errorParts.length){
         if(status){status.textContent=t('settings_update_check_failed')+': '+errorParts.join(', ');status.style.color='var(--error)';}
+      } else if(unavailableParts.length){
+        if(status){status.textContent=unavailableParts.join('; ');status.style.color='var(--muted)';}
       } else {
         if(status){status.textContent=t('settings_up_to_date');status.style.color='var(--success)';}
         if(typeof _showUpdateBanner==='function') _showUpdateBanner(data);
