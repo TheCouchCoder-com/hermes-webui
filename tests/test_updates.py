@@ -9,6 +9,8 @@ def _fake_git_for_release_fetch_failure(args, cwd, timeout=10):
         return 'would clobber existing tag v0.50.294', False
     if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
         return 'v0.51.106\nv0.51.103', True
+    if args == ['ls-remote', '--tags', '--refs', 'origin', 'v*']:
+        return 'aaa1\trefs/tags/v0.51.106\naaa2\trefs/tags/v0.51.103', True
     if args == ['describe', '--tags', '--abbrev=0']:
         return 'v0.51.103', True
     if args == ['remote', 'get-url', 'origin']:
@@ -334,6 +336,8 @@ def test_check_repo_release_falls_through_when_head_is_past_tag(tmp_path):
     def fake_git(args, cwd, timeout=10):
         if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
             return 'v2026.5.16', True
+        if args == ['ls-remote', '--tags', '--refs', 'origin', 'v*']:
+            return 'aaa1\trefs/tags/v2026.5.16', True
         if args == ['describe', '--tags', '--abbrev=0']:
             return 'v2026.5.16', True
         # HEAD is 608 commits past the tag — describe includes a suffix.
@@ -357,6 +361,8 @@ def test_check_repo_release_not_affected_when_head_exactly_on_tag(tmp_path):
     def fake_git(args, cwd, timeout=10):
         if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
             return 'v2026.5.16\nv2026.5.10', True
+        if args == ['ls-remote', '--tags', '--refs', 'origin', 'v*']:
+            return 'aaa1\trefs/tags/v2026.5.16\naaa2\trefs/tags/v2026.5.10', True
         if args == ['describe', '--tags', '--abbrev=0']:
             return 'v2026.5.16', True
         # No -N-gSHA suffix: HEAD is exactly on the tag.
@@ -438,6 +444,8 @@ def test_select_apply_compare_ref_uses_tag_when_head_is_on_tag(tmp_path):
     def fake_git(args, cwd, timeout=10):
         if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
             return 'v2026.5.16\nv2026.5.10', True
+        if args == ['ls-remote', '--tags', '--refs', 'origin', 'v*']:
+            return 'aaa1\trefs/tags/v2026.5.16\naaa2\trefs/tags/v2026.5.10', True
         if args == ['describe', '--tags', '--abbrev=0']:
             return 'v2026.5.16', True
         if args == ['describe', '--tags', '--always']:
@@ -463,6 +471,8 @@ def test_select_apply_compare_ref_falls_through_when_head_is_past_tag(tmp_path):
     def fake_git(args, cwd, timeout=10):
         if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
             return 'v2026.5.16', True
+        if args == ['ls-remote', '--tags', '--refs', 'origin', 'v*']:
+            return 'aaa1\trefs/tags/v2026.5.16', True
         if args == ['describe', '--tags', '--abbrev=0']:
             # HEAD's nearest tag is v2026.5.16; HEAD is 608 commits past it.
             return 'v2026.5.16', True
@@ -572,6 +582,8 @@ def test_select_apply_compare_ref_case_d_older_tag_with_commits_and_newer_tag_ex
     def fake_git(args, cwd, timeout=10):
         if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
             return 'v2026.5.16\nv2026.5.10', True
+        if args == ['ls-remote', '--tags', '--refs', 'origin', 'v*']:
+            return 'aaa1\trefs/tags/v2026.5.16\naaa2\trefs/tags/v2026.5.10', True
         if args == ['describe', '--tags', '--abbrev=0']:
             # HEAD's nearest reachable tag (older one)
             return 'v2026.5.10', True
@@ -592,6 +604,167 @@ def test_select_apply_compare_ref_case_d_older_tag_with_commits_and_newer_tag_ex
         'should advance to the newer tag, not silently fall through to '
         'origin/<branch>. Regression for Opus-flagged drift in #2855.'
     )
+
+
+# ---------------------------------------------------------------------------
+# Fork update check (Option B): the release-tag path must restrict to tags
+# origin actually publishes. Local-only tags — inherited from a prior
+# `nesquena` remote, or dragged in by a sync-merge of an upstream-tagged
+# commit — must NOT be reported as "available updates", because origin
+# can't serve them. When origin has zero v* tags (TheCouchCoder-com/hermes-webui
+# pre-first-release), the check must fall through to the branch-tip
+# comparison so every merge to master surfaces as an update.
+# ---------------------------------------------------------------------------
+
+
+def test_release_tags_filters_local_to_origin_published(tmp_path):
+    """Local tags not present on origin must be filtered out of _release_tags."""
+
+    def fake_git(args, cwd, timeout=10):
+        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+            # Local repo holds an upstream tag (v0.51.128 — pulled in by a sync
+            # merge) plus the fork's own published tag (v0.51.130).
+            return 'v0.51.130\nv0.51.128\nv0.51.127', True
+        if args == ['ls-remote', '--tags', '--refs', 'origin', 'v*']:
+            # Origin (the fork) only publishes its own release tag.
+            return 'aaa1\trefs/tags/v0.51.130', True
+        raise AssertionError(f'unexpected git args: {args!r}')
+
+    with patch.object(updates, '_run_git', side_effect=fake_git):
+        tags = updates._release_tags(tmp_path)
+
+    assert tags == ['v0.51.130'], (
+        'Sync-merged upstream tags must not leak into the update check — '
+        'only tags origin actually publishes should be considered.'
+    )
+
+
+def test_release_tags_returns_empty_when_origin_has_no_tags(tmp_path):
+    """Fork pre-first-release: origin has no v* tags → return [] so branch check runs."""
+
+    def fake_git(args, cwd, timeout=10):
+        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+            # Local clone inherited upstream tags through sync merges.
+            return 'v0.51.128\nv0.51.127', True
+        if args == ['ls-remote', '--tags', '--refs', 'origin', 'v*']:
+            return '', True  # fork hasn't pushed any release tag yet
+        raise AssertionError(f'unexpected git args: {args!r}')
+
+    with patch.object(updates, '_run_git', side_effect=fake_git):
+        tags = updates._release_tags(tmp_path)
+
+    assert tags == [], (
+        'When origin publishes no v* tags, _release_tags must return [] so '
+        'the caller falls through to the branch-tip check instead of '
+        'reporting upstream tags origin cannot serve.'
+    )
+
+
+def test_release_tags_falls_back_to_local_when_origin_unreachable(tmp_path):
+    """ls-remote failure (no origin, offline) must preserve the legacy local view."""
+
+    def fake_git(args, cwd, timeout=10):
+        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+            return 'v0.51.128\nv0.51.127', True
+        if args == ['ls-remote', '--tags', '--refs', 'origin', 'v*']:
+            return 'fatal: could not read from remote repository', False
+        raise AssertionError(f'unexpected git args: {args!r}')
+
+    with patch.object(updates, '_run_git', side_effect=fake_git):
+        tags = updates._release_tags(tmp_path)
+
+    assert tags == ['v0.51.128', 'v0.51.127'], (
+        'When origin cannot be queried, fall back to the local-tag view so '
+        'deployments without a reachable remote still get a best-effort answer.'
+    )
+
+
+def test_check_repo_release_falls_through_for_sync_merged_upstream_tag(tmp_path):
+    """HEAD's nearest tag is a sync-merged upstream tag origin does not publish.
+
+    Pre-fix: _release_gap returned 1 (current not in tags) and the banner
+    reported "1 update available, latest=v0.51.130" — a *downgrade*. Post-fix:
+    _check_repo_release returns None so the branch check runs and reports an
+    honest commits-behind count against origin/master.
+    """
+    (tmp_path / '.git').mkdir()
+
+    def fake_git(args, cwd, timeout=10):
+        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+            return 'v0.51.135\nv0.51.130', True
+        if args == ['ls-remote', '--tags', '--refs', 'origin', 'v*']:
+            return 'aaa1\trefs/tags/v0.51.130', True  # only fork tag published
+        if args == ['describe', '--tags', '--abbrev=0']:
+            return 'v0.51.135', True  # HEAD's nearest tag is the upstream one
+        raise AssertionError(f'unexpected git args: {args!r}')
+
+    with patch.object(updates, '_run_git', side_effect=fake_git):
+        result = updates._check_repo_release(tmp_path, 'webui')
+
+    assert result is None, (
+        "When HEAD's nearest tag isn't origin-published (sync-merged upstream "
+        'tag), the release check must fall through to the branch check rather '
+        'than advertising a downgrade to the fork\'s latest tag.'
+    )
+
+
+def test_select_apply_compare_ref_falls_through_for_sync_merged_upstream_tag(tmp_path):
+    """Apply side must mirror the check-side fall-through to avoid silent downgrades."""
+    (tmp_path / '.git').mkdir()
+
+    def fake_git(args, cwd, timeout=10):
+        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+            return 'v0.51.135\nv0.51.130', True
+        if args == ['ls-remote', '--tags', '--refs', 'origin', 'v*']:
+            return 'aaa1\trefs/tags/v0.51.130', True
+        if args == ['describe', '--tags', '--abbrev=0']:
+            return 'v0.51.135', True
+        if args == ['rev-parse', '--abbrev-ref', '@{upstream}']:
+            return 'origin/master', True
+        raise AssertionError(f'unexpected git args: {args!r}')
+
+    with patch.object(updates, '_run_git', side_effect=fake_git):
+        ref = updates._select_apply_compare_ref(tmp_path)
+
+    assert ref == 'origin/master', (
+        'Apply path must fall through to origin/<branch> when HEAD sits on a '
+        'sync-merged upstream tag — advancing to the fork\'s older tag would '
+        'be a downgrade.'
+    )
+
+
+def test_origin_release_tags_returns_none_on_ls_remote_failure(tmp_path):
+    """_origin_release_tags returns None (not empty set) when ls-remote fails."""
+
+    def fake_git(args, cwd, timeout=10):
+        if args == ['ls-remote', '--tags', '--refs', 'origin', 'v*']:
+            return 'fatal: unable to access remote', False
+        raise AssertionError(f'unexpected git args: {args!r}')
+
+    with patch.object(updates, '_run_git', side_effect=fake_git):
+        result = updates._origin_release_tags(tmp_path)
+
+    assert result is None, (
+        'ls-remote failure must be distinguishable from "origin has no tags" '
+        '(empty set) so the caller can choose the appropriate fallback.'
+    )
+
+
+def test_origin_release_tags_parses_ls_remote_output(tmp_path):
+    """_origin_release_tags must parse standard ls-remote output."""
+
+    def fake_git(args, cwd, timeout=10):
+        if args == ['ls-remote', '--tags', '--refs', 'origin', 'v*']:
+            return (
+                'abc1234abc1234abc1234\trefs/tags/v0.51.130\n'
+                'def5678def5678def5678\trefs/tags/v0.51.131\n'
+            ), True
+        raise AssertionError(f'unexpected git args: {args!r}')
+
+    with patch.object(updates, '_run_git', side_effect=fake_git):
+        result = updates._origin_release_tags(tmp_path)
+
+    assert result == {'v0.51.130', 'v0.51.131'}
 
 
 def test_check_repo_returns_unavailable_when_no_git_directory(tmp_path):

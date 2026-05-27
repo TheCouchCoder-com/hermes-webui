@@ -411,6 +411,12 @@ class TestSuccessfulUpdateReturnsRestartScheduled:
                 return '', True
             if args[0] == 'tag':
                 return 'v0.51.106\nv0.51.105\nv0.51.104', True
+            if args[:2] == ['ls-remote', '--tags']:
+                return (
+                    'aaa1\trefs/tags/v0.51.106\n'
+                    'aaa2\trefs/tags/v0.51.105\n'
+                    'aaa3\trefs/tags/v0.51.104'
+                ), True
             if args[:2] == ['status', '--porcelain']:
                 return '', True
             if args[0] == 'pull':
