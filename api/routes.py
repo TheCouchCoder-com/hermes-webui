@@ -2561,6 +2561,15 @@ _LOGIN_LOCALE = {
         "invalid_pw": "\ube44\ubc00\ubc88\ud638\uac00 \uc62c\ubc14\ub974\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4",
         "conn_failed": "\uc5f0\uacb0 \uc2e4\ud328",
     },
+    "tr": {
+        "lang": "tr-TR",
+        "title": "Oturum a\u00e7",
+        "subtitle": "Devam etmek i\u00e7in \u015fifrenizi girin",
+        "placeholder": "\u015eifre",
+        "btn": "Oturum a\u00e7",
+        "invalid_pw": "Ge\u00e7ersiz \u015fifre",
+        "conn_failed": "Ba\u011flant\u0131 ba\u015far\u0131s\u0131z",
+    },
 }
 
 
@@ -6641,6 +6650,9 @@ def handle_patch(handler, parsed) -> bool:
     if not _check_csrf(handler):
         return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
     body = read_body(handler)
+    if parsed.path.startswith("/api/mcp/servers/"):
+        name = parsed.path[len("/api/mcp/servers/"):]
+        return _handle_mcp_server_toggle(handler, name, body)
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_patch
 
@@ -6659,6 +6671,9 @@ def handle_delete(handler, parsed) -> bool:
     if not _check_csrf(handler):
         return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
     body = read_body(handler)
+    if parsed.path.startswith("/api/mcp/servers/"):
+        name = parsed.path[len("/api/mcp/servers/"):]
+        return _handle_mcp_server_delete(handler, name)
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_delete
 
@@ -6669,6 +6684,17 @@ def handle_delete(handler, parsed) -> bool:
     _admin_id, _admin_act = _admin_user_id_from_path(parsed.path)
     if _admin_id is not None and _admin_act == '':
         return _handle_admin_user_delete(handler, _admin_id)
+    return False
+
+
+def handle_put(handler, parsed) -> bool:
+    """Handle all PUT routes. Returns True if handled, False for 404."""
+    if not _check_csrf(handler):
+        return j(handler, {"error": "Cross-origin request rejected"}, status=403)
+    body = read_body(handler)
+    if parsed.path.startswith("/api/mcp/servers/"):
+        name = parsed.path[len("/api/mcp/servers/"):]
+        return _handle_mcp_server_update(handler, name, body)
     return False
 
 # ── GET route helpers ─────────────────────────────────────────────────────────
@@ -12306,7 +12332,7 @@ def _handle_mcp_servers_list(handler):
     ]
     return j(handler, {
         "servers": result,
-        "toggle_supported": False,
+        "toggle_supported": True,
         "reload_required": True,
     })
 
@@ -12328,6 +12354,30 @@ def _handle_mcp_server_delete(handler, name):
     _save_yaml_config_file(_get_config_path(), cfg)
     reload_config()
     return j(handler, {"ok": True, "deleted": name})
+
+
+def _handle_mcp_server_toggle(handler, name, body):
+    """Toggle enabled state for an MCP server (PATCH /api/mcp/servers/{name})."""
+    from urllib.parse import unquote
+    name = unquote(name)
+    if not name:
+        return bad(handler, "name is required")
+    if "enabled" not in body:
+        return bad(handler, "enabled field is required")
+    enabled = bool(body["enabled"])
+    cfg = get_config()
+    servers = cfg.get("mcp_servers", {})
+    if not isinstance(servers, dict):
+        servers = {}
+    if name not in servers:
+        return bad(handler, f"MCP server '{name}' not found", 404)
+    if not isinstance(servers[name], dict):
+        return bad(handler, f"MCP server '{name}' has invalid config", 400)
+    servers[name]["enabled"] = enabled
+    cfg["mcp_servers"] = servers
+    _save_yaml_config_file(_get_config_path(), cfg)
+    reload_config()
+    return j(handler, {"ok": True, "name": name, "enabled": enabled})
 
 
 _MASKED_PLACEHOLDER = "••••••"
