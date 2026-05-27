@@ -593,3 +593,29 @@ def test_select_apply_compare_ref_case_d_older_tag_with_commits_and_newer_tag_ex
         'origin/<branch>. Regression for Opus-flagged drift in #2855.'
     )
 
+
+def test_check_repo_returns_unavailable_when_no_git_directory(tmp_path):
+    """When the path exists but has no .git, surface unavailable=True instead
+    of returning None — otherwise the frontend silently shows 'Up to date'."""
+    # tmp_path has no .git directory
+    info = updates._check_repo(tmp_path, 'webui')
+
+    assert info is not None, 'must return a structured payload, not None'
+    assert info['name'] == 'webui'
+    assert info['behind'] is None
+    assert info['unavailable'] is True
+    assert info['reason'] == 'not_a_git_checkout'
+    assert 'Update check unavailable' in info['message']
+
+
+def test_check_repo_returns_unavailable_when_path_is_none():
+    """A None path (agent dir unconfigured) must produce the same structured
+    unavailable payload so the agent row can also explain itself."""
+    info = updates._check_repo(None, 'agent')
+
+    assert info is not None
+    assert info['name'] == 'agent'
+    assert info['behind'] is None
+    assert info['unavailable'] is True
+    assert info['reason'] == 'not_a_git_checkout'
+

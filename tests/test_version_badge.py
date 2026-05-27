@@ -396,3 +396,96 @@ class TestServerVersionHeader:
         assert 'removeprefix' in src, (
             "server.py must use removeprefix('v') to strip the leading 'v' from the version tag"
         )
+
+
+# ---------------------------------------------------------------------------
+# 8. Dynamic version cache — module __getattr__ + TTL refresh
+# ---------------------------------------------------------------------------
+
+class TestVersionCacheRefresh:
+    """The version constants must reflect the live filesystem state after a
+    manual git pull, not be frozen at module import time."""
+
+    def _reset(self):
+        import api.updates as upd
+        upd._reset_version_cache()
+        # Defensive: a prior test (e.g. test_issue1633's with_runtime_version)
+        # may have assigned upd.WEBUI_VERSION directly, shadowing __getattr__.
+        # Remove the shadowing entry so this test's patched resolver fires.
+        upd.__dict__.pop('WEBUI_VERSION', None)
+        upd.__dict__.pop('AGENT_VERSION', None)
+
+    def test_webui_version_reflects_change_after_ttl_expires(self):
+        """A manual git pull (simulated as a change in resolver output) must
+        propagate through WEBUI_VERSION once the cache TTL elapses."""
+        import api.updates as upd
+
+        self._reset()
+        outputs = iter(['v1.0.0', 'v1.0.1'])
+
+        def fake_detect():
+            return next(outputs)
+
+        with patch.object(upd, '_detect_webui_version', side_effect=fake_detect), \
+                patch.object(upd, '_VERSION_CACHE_TTL', 0.0):
+            first = upd.WEBUI_VERSION
+            second = upd.WEBUI_VERSION
+        assert first == 'v1.0.0'
+        assert second == 'v1.0.1'
+
+    def test_webui_version_cached_within_ttl(self):
+        """Within the TTL window, repeated reads hit the cache and don't re-run git."""
+        import api.updates as upd
+
+        self._reset()
+        call_count = {'n': 0}
+
+        def fake_detect():
+            call_count['n'] += 1
+            return 'v2.0.0'
+
+        with patch.object(upd, '_detect_webui_version', side_effect=fake_detect), \
+                patch.object(upd, '_VERSION_CACHE_TTL', 60.0):
+            results = [upd.WEBUI_VERSION for _ in range(10)]
+        assert results == ['v2.0.0'] * 10
+        assert call_count['n'] == 1, (
+            f"expected exactly 1 call to _detect_webui_version, got {call_count['n']}"
+        )
+
+    def test_agent_version_uses_separate_cache_slot(self):
+        """WEBUI_VERSION and AGENT_VERSION must not share a cache key."""
+        import api.updates as upd
+
+        self._reset()
+        with patch.object(upd, '_detect_webui_version', return_value='v1.0.0'), \
+                patch.object(upd, '_detect_agent_version', return_value='v9.9.9'), \
+                patch.object(upd, '_VERSION_CACHE_TTL', 60.0):
+            assert upd.WEBUI_VERSION == 'v1.0.0'
+            assert upd.AGENT_VERSION == 'v9.9.9'
+
+    def test_module_getattr_raises_attribute_error_for_unknown(self):
+        """Module __getattr__ must raise AttributeError for unknown names so
+        hasattr() reports correctly and typos surface as real errors."""
+        import api.updates as upd
+        import pytest as _pytest
+        with _pytest.raises(AttributeError):
+            upd.NOT_A_REAL_ATTRIBUTE  # noqa: B018
+
+    def test_reset_version_cache_clears_cache(self):
+        """_reset_version_cache must force the next read to call the resolver."""
+        import api.updates as upd
+
+        self._reset()
+        call_count = {'n': 0}
+
+        def fake_detect():
+            call_count['n'] += 1
+            return f'v3.0.{call_count["n"]}'
+
+        with patch.object(upd, '_detect_webui_version', side_effect=fake_detect), \
+                patch.object(upd, '_VERSION_CACHE_TTL', 60.0):
+            first = upd.WEBUI_VERSION
+            upd._reset_version_cache()
+            second = upd.WEBUI_VERSION
+        assert first == 'v3.0.1'
+        assert second == 'v3.0.2'

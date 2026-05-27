@@ -4530,6 +4530,11 @@ function _formatUpdateCheckError(label,info){
   const detail=String(info.error).replace(/^fetch failed:?\s*/i,'').trim();
   return detail ? `${label}: ${detail}` : label;
 }
+function _formatUpdateCheckUnavailable(label,info){
+  if(!info||!info.unavailable) return null;
+  const detail=info.message?String(info.message).trim():'';
+  return detail ? `${label}: ${detail}` : `${label}: Update check unavailable.`;
+}
 function _isSafeUpdateCompareUrl(url){
   if(!url||!/^https?:\/\//i.test(url)) return false;
   try{
