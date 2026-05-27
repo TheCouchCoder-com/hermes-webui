@@ -409,6 +409,11 @@ class TestVersionCacheRefresh:
     def _reset(self):
         import api.updates as upd
         upd._reset_version_cache()
+        # Defensive: a prior test (e.g. test_issue1633's with_runtime_version)
+        # may have assigned upd.WEBUI_VERSION directly, shadowing __getattr__.
+        # Remove the shadowing entry so this test's patched resolver fires.
+        upd.__dict__.pop('WEBUI_VERSION', None)
+        upd.__dict__.pop('AGENT_VERSION', None)
 
     def test_webui_version_reflects_change_after_ttl_expires(self):
         """A manual git pull (simulated as a change in resolver output) must

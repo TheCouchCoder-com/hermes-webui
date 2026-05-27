@@ -38,13 +38,18 @@ def with_runtime_version():
     """Return a setter that forces a particular runtime WEBUI_VERSION."""
     # api.updates must be loaded for the lazy resolver to find it
     import api.updates as upd
-    original = upd.WEBUI_VERSION
 
     def _set(version: str):
         upd.WEBUI_VERSION = version
 
     yield _set
-    upd.WEBUI_VERSION = original
+    # api.updates exposes WEBUI_VERSION via PEP 562 __getattr__ (TTL cache).
+    # Setting upd.WEBUI_VERSION = X above puts X in the module's __dict__,
+    # which shadows __getattr__ for every subsequent attribute lookup —
+    # including tests in other files that patch _detect_webui_version and
+    # expect the patched resolver to fire. Delete the shadowing entry on
+    # teardown so the next test sees a live cache-backed value.
+    upd.__dict__.pop('WEBUI_VERSION', None)
 
 
 def _shape_cache():
