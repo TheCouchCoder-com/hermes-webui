@@ -363,12 +363,45 @@ def _detect_default_branch(path):
     return 'master'
 
 
+def _origin_release_tags(path):
+    """Return the set of v* tags published on origin, or None if origin cannot be queried.
+
+    Differentiates "origin has no v* tags" (empty set) from "we couldn't ask origin"
+    (None). _release_tags uses the former to fall through to the branch check and
+    the latter to preserve the legacy local-tag view.
+    """
+    out, ok = _run_git(['ls-remote', '--tags', '--refs', 'origin', 'v*'], path, timeout=10)
+    if not ok:
+        return None
+    tags = set()
+    for line in (out or '').splitlines():
+        parts = line.split('\t', 1)
+        if len(parts) != 2:
+            continue
+        ref = parts[1].strip()
+        if ref.startswith('refs/tags/'):
+            tags.add(ref[len('refs/tags/'):])
+    return tags
+
+
 def _release_tags(path):
-    """Return release tags newest-first, using the repo's version-sort order."""
+    """Return release tags published on origin, newest-first via the repo's version-sort.
+
+    Filtering to origin-published tags prevents stale local tags — inherited
+    from a prior remote, or pulled in via a sync-merge of upstream tags we
+    never pushed — from being reported as updates origin cannot serve. When
+    origin can't be queried (no origin, offline, permission denied), fall
+    back to the local-tag view so deployments without a reachable remote
+    still get a best-effort answer.
+    """
     out, ok = _run_git(['tag', '--list', 'v*', '--sort=-v:refname'], path)
     if not (ok and out):
         return []
-    return [line.strip() for line in out.splitlines() if line.strip()]
+    local_sorted = [line.strip() for line in out.splitlines() if line.strip()]
+    origin_tags = _origin_release_tags(path)
+    if origin_tags is None:
+        return local_sorted
+    return [t for t in local_sorted if t in origin_tags]
 
 
 def _current_release_tag(path):
@@ -420,19 +453,24 @@ def _select_apply_compare_ref(path):
     if tags:
         latest_tag = tags[0]
         current_tag = _current_release_tag(path)
-        behind = _release_gap(tags, current_tag, latest_tag)
-        # Mirror the check side exactly: only fall through when behind == 0
-        # AND HEAD has moved past its nearest tag (case A: bench between
-        # tagged releases). Otherwise the tag is correct — including the
-        # case where HEAD is on an older release tag with commits on top
-        # AND a newer tag exists (case D), where `behind > 0` means the
-        # user is genuinely behind the latest release and should advance
-        # to it. Pre-#2855 the apply path only consulted `latest_tag`
-        # without the `behind`/`current_tag` predicate, so case D fell
-        # through to `origin/<branch>` and the pull landed past the
-        # advertised tag. See #2846 + Opus pre-release review for #2855.
-        if not (behind == 0 and _head_is_past_latest_tag(path, current_tag)):
-            return latest_tag
+        # Mirror the check-side fall-through for sync-merged upstream tags:
+        # if HEAD's nearest tag isn't origin-published, "advance to the
+        # fork's latest tag" would be a downgrade. Drop to the branch ref
+        # so apply lands at the same place the check pointed at.
+        if not (current_tag and current_tag not in tags):
+            behind = _release_gap(tags, current_tag, latest_tag)
+            # Mirror the check side exactly: only fall through when behind == 0
+            # AND HEAD has moved past its nearest tag (case A: bench between
+            # tagged releases). Otherwise the tag is correct — including the
+            # case where HEAD is on an older release tag with commits on top
+            # AND a newer tag exists (case D), where `behind > 0` means the
+            # user is genuinely behind the latest release and should advance
+            # to it. Pre-#2855 the apply path only consulted `latest_tag`
+            # without the `behind`/`current_tag` predicate, so case D fell
+            # through to `origin/<branch>` and the pull landed past the
+            # advertised tag. See #2846 + Opus pre-release review for #2855.
+            if not (behind == 0 and _head_is_past_latest_tag(path, current_tag)):
+                return latest_tag
 
     upstream, ok = _run_git(['rev-parse', '--abbrev-ref', '@{upstream}'], path)
     if ok and upstream:
@@ -450,6 +488,15 @@ def _check_repo_release(path, name):
 
     latest_tag = tags[0]
     current_tag = _current_release_tag(path)
+
+    # If HEAD's nearest reachable tag isn't one origin publishes (e.g. an
+    # upstream tag dragged into our history by a sync-merge), the release
+    # math is upside down — reporting "behind by 1, latest=<fork tag>"
+    # would advertise a downgrade. Fall through to the branch check so the
+    # user sees an honest commits-behind count instead.
+    if current_tag and current_tag not in tags:
+        return None
+
     behind = _release_gap(tags, current_tag, latest_tag)
 
     # If behind == 0 but HEAD has moved past the tag (e.g. the agent repo
