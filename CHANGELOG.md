@@ -13,6 +13,39 @@
 
 ## [Unreleased]
 
+## [v0.51.128] — 2026-05-24 — Release CZ (stage-batch10 — 2-PR perf + correctness batch)
+
+### Fixed
+
+- **PR #2830** by @franksong2702 — Pin state synchronization between persisted index and in-memory sessions (closes #2821). Three coupled bugs:
+  - **Bug A (load-bearing):** `/api/session/pin` pre-snapshot used `getattr(session, "pinned", False)` which always returned `False` for dict-backed index rows from `all_sessions()`. With ~55-session profiles and LRU eviction churn, pinned counts routinely under-counted because the persisted snapshot was effectively empty. New `_session_field(session, field, default)` helper resolves both dict-backed and Session-object snapshots correctly.
+  - **Bug B:** Removed stale client-side `pinLimitReached` short-circuit in the sidebar action menu that could block pin clicks before the server saw them, based on `_allSessions` data that was stale mid-render. Server now enforces the cap; the toast surfaces the 400 response.
+  - **Bug C recovery:** Pin/unpin failure path (4xx response from `/api/session/pin`) now triggers `renderSessionList()` to refresh `_allSessions` from the server, so the sidebar never gets stuck on stale optimistic state.
+
+  Adds `tests/test_issue2821_session_pin_state_sync.py` (70 LOC) covering the `_session_field` helper, the persisted-pinned snapshot, the removed `pinLimitReached` reference, and the failure-catch refresh path. Companion fix to #2782 (server-side 404→200 transition for missing CLI-synced sessions) which remains out of scope.
+
+### Performance
+
+- **PR #2716** by @dobby-d-elf — Six independent perf nudges plus one correctness fix. nesquena-APPROVED on 2026-05-22 after a deep-review iteration; cherry-picked onto post-v0.51.127 master via 3-way apply with sibling-PR composition resolution.
+
+  - **Metadata-only `/api/session` correctness fix.** Refactors the prior inline reconciliation into `_metadata_only_message_summary(sid, profile=None)` helper that runs the full `merge_session_messages_append_only()` path. Pre-fix shortcut could over-count stale state.db replay rows that the merge intentionally filters out, producing false "transcript newer than loaded conversation" signals (same bug class as #2705 / #2686). The new helper threads `profile=` through to `get_state_db_session_messages` to preserve #2827's TLS-vs-thread profile fix on background-thread reads.
+  - **Batched persisted-session checks in sidebar indexing.** One `SESSION_DIR.glob('*.json')` snapshot per call replaces per-row `_index_entry_exists()` filesystem lookups during `all_sessions()` pruning. Fallback to the per-row helper preserved when the glob raises.
+  - **Deferred render-cache signature.** `cachedRenderSignature` closes over the lookup-time signature so the cache STORE path reuses it without recomputing. `_messageRenderCacheSignature()` continues to include the content hash per #2692, preserving the cache-invalidation invariant.
+  - **Hoisted assistant tool-activity index.** Footer-rendering loop now uses an `O(1)` Set lookup instead of `S.toolCalls.some(...)` per message — ~30× fewer comparisons for a 100-message conversation with 30 tool calls.
+  - **Workspace stale-session guards.** `loadDir` and `_refreshGitBadge` in `static/workspace.js` capture `sessionId` at call time and check it after each `await` (including the catch path of `_refreshGitBadge` — without it, a late 404 from the previous session would hide the git badge on the current session).
+  - **Background model-catalog prime.** `_startBootModelDropdown` fires fire-and-forget on boot via `setTimeout(0)` so the live catalog hydrates without blocking. The existing `await` on the saved-session restore path is preserved (re-applies the saved session's model after hydration so the chip never shows the stale static default).
+  - **Failed hydration retryable.** `window._modelDropdownReady = null; throw e;` lets the next caller refetch instead of being stuck on a permanent failure.
+
+  Adds 76 LOC of new tests across `test_session_metadata_fast_path.py`, `test_webui_state_db_reconciliation.py`, `test_session_index.py`, `test_issue1539_provider_removal_dropdown_invalidation.py`, `test_issue1785_workspace_preview_breadcrumb.py`, `test_parallel_session_switch.py`.
+
+### Notes
+
+- PR #2716 had been pending merge since 2026-05-22 due to a rebase blocker against the rapidly-advancing master (10+ intervening releases). Cherry-picked via `git apply --3way` of the PR's net delta vs its original merge-base (`f9302601`); 12 of 14 files applied cleanly. Two files had genuine conflicts requiring resolution: `api/routes.py` (took the PR's helper extraction AND added `profile=` threading to preserve #2827's fix), and `tests/test_webui_state_db_reconciliation.py` (kept BOTH master's pre-existing `test_api_session_reload_drops_stale_cached_user_tail_after_saved_assistant` AND the PR's new `test_metadata_fast_path_matches_reconciliation_for_restamped_replays` — they pin different invariants).
+- Opus pre-release advisor reviewed all 6 risk areas (helper extraction correctness, sibling-PR composition, `Session.load` profile-safety, test coverage, deferred Bug D, stale-line-number cleanup nit). Verdict: **SHIP AS-IS** — no MUST-FIX, no inline SHOULD-FIX. Two follow-up issues to file post-tag (Bug D startup index rebuild perf; multi-profile state.db test for the `profile=` threading invariant).
+- Full pytest: **6,434 passed / 6 skipped / 3 xpassed / 8 subtests passed** in 2m43s.
+- Agent self-verified the producer→consumer channel for `_metadata_only_message_summary` with unmocked invocation against a real session-load path (per skill rule Trigger A + E for mocked-consumer test patterns).
+- Closes: #2821 (pin state sync), and `get_state_db_session_summary` dead-code removed (#2716).
+
 ## [v0.51.127] — 2026-05-24 — Release CY (stage-batch9 — 7-PR low-risk batch — brick-class Linux + brick-class update apply + composer wide-screen + Turkish locale + MCP toggle + SSE settlement + Windows CI)
 
 ### Fixed

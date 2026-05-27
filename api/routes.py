@@ -77,6 +77,12 @@ _CSP_REPORT_RATE_LIMIT_MAX = 100
 _CSP_REPORT_MAX_BODY_BYTES = 64 * 1024
 
 
+def _session_field(session, field, default=None):
+    if isinstance(session, dict):
+        return session.get(field, default)
+    return getattr(session, field, default)
+
+
 # ── Profile-scoped session/project filtering (#1611, #1614) ────────────────
 #
 # Sessions and projects are stored in the WebUI sidecar without per-row
@@ -2034,6 +2040,37 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
             return merged_messages
         return sidecar_messages if len(sidecar_messages) > len(cli_messages) else cli_messages
     return sidecar_messages
+
+
+def _message_summary(messages) -> dict:
+    messages = list(messages or [])
+    last_message_at = 0.0
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        try:
+            last_message_at = max(last_message_at, float(msg.get("timestamp") or 0))
+        except (TypeError, ValueError):
+            pass
+    return {"message_count": len(messages), "last_message_at": last_message_at}
+
+
+def _metadata_only_message_summary(sid: str, profile: str | None = None) -> dict:
+    """Return the reconciled message summary used by metadata-only session loads.
+
+    Threads ``profile=`` through to ``get_state_db_session_messages`` so
+    background-thread reads land on the correct profile's state.db (per the
+    cookie-bound profile selector — fixes the same TLS-vs-thread race the
+    #2762 fix addressed for write paths).
+    """
+    sidecar_session = Session.load(sid)
+    sidecar_messages = []
+    if sidecar_session:
+        sidecar_messages = getattr(sidecar_session, "messages", []) or []
+    state_db_messages = get_state_db_session_messages(sid, profile=profile)
+    return _message_summary(
+        merge_session_messages_append_only(sidecar_messages, state_db_messages)
+    )
 
 
 def _session_requires_cli_metadata_lookup(session) -> bool:
@@ -4109,7 +4146,7 @@ def handle_get(handler, parsed) -> bool:
             is_messaging_session = _is_messaging_session_record(s) or _is_messaging_session_record(cli_meta)
             cli_messages = []
             state_db_messages = []
-            sidecar_metadata_messages = None
+            metadata_summary = None
             _session_profile = getattr(s, 'profile', None) or None
             if is_messaging_session:
                 cli_messages = get_cli_session_messages(sid)
@@ -4117,17 +4154,11 @@ def handle_get(handler, parsed) -> bool:
                 state_db_messages = get_state_db_session_messages(sid, profile=_session_profile)
             elif not is_messaging_session:
                 # Metadata-only callers still need the same append-only
-                # reconciliation contract as full loads. A raw state.db summary
-                # can count stale rows that the merge intentionally filters out,
-                # which makes sidebar polling think the transcript is always
-                # newer than the loaded conversation.
-                state_db_messages = get_state_db_session_messages(sid, profile=_session_profile)
-                sidecar_metadata_session = Session.load(sid)
-                sidecar_metadata_messages = (
-                    getattr(sidecar_metadata_session, "messages", []) or []
-                    if sidecar_metadata_session
-                    else []
-                )
+                # reconciliation contract as full loads so stale/replayed
+                # state.db rows do not make sidebar polling think the
+                # transcript is always newer. Helper threads profile= to
+                # honor #2827's TLS-vs-thread fix.
+                metadata_summary = _metadata_only_message_summary(sid, profile=_session_profile)
             _t2 = _time.monotonic()
             effective_model = (
                 _resolve_effective_session_model_for_display(s)
@@ -4157,12 +4188,16 @@ def handle_get(handler, parsed) -> bool:
                     sidecar_messages = getattr(s, "messages", []) or []
                     _all_msgs = merge_session_messages_append_only(cli_messages, sidecar_messages)
                 else:
-                    _metadata_sidecar = sidecar_metadata_messages
-                    if _metadata_sidecar is None:
-                        _metadata_sidecar = getattr(s, "messages", []) or []
-                    _all_msgs = merge_session_messages_append_only(_metadata_sidecar, state_db_messages)
+                    if metadata_summary is None:
+                        metadata_summary = _message_summary(getattr(s, "messages", []) or [])
+                    _summary_message_count = metadata_summary["message_count"]
+                    _summary_last_message_at = metadata_summary["last_message_at"]
+                    _all_msgs = []
             if not load_messages:
-                _summary_message_count = len(_all_msgs)
+                if metadata_summary is None:
+                    metadata_summary = _message_summary(_all_msgs)
+                    _summary_message_count = metadata_summary["message_count"]
+                    _summary_last_message_at = metadata_summary["last_message_at"]
                 if _summary_message_count == 0:
                     # Legacy session with no loaded sidecar and no state.db summary —
                     # fall back to the persisted metadata count from session JSON.
@@ -4175,14 +4210,6 @@ def handle_get(handler, parsed) -> bool:
                             _summary_message_count = max(0, int(metadata_count))
                     except (TypeError, ValueError):
                         pass
-                try:
-                    _summary_last_message_at = max(
-                        float((m or {}).get("timestamp") or 0)
-                        for m in _all_msgs
-                        if isinstance(m, dict)
-                    ) if _all_msgs else 0
-                except (TypeError, ValueError):
-                    _summary_last_message_at = 0
             else:
                 _summary_message_count = None
                 _summary_last_message_at = None
@@ -6234,8 +6261,8 @@ def handle_post(handler, parsed) -> bool:
             # Pre-snapshot from persisted index (acquires LOCK internally,
             # so must run outside our own LOCK acquire below).
             persisted_pinned_ids = {
-                getattr(existing, "session_id", None) for existing in all_sessions()
-                if getattr(existing, "pinned", False) and not getattr(existing, "archived", False)
+                _session_field(existing, "session_id", None) for existing in all_sessions()
+                if _session_field(existing, "pinned", False) and not _session_field(existing, "archived", False)
             }
             with LOCK:
                 # Final authoritative count: merge persisted-pinned with the
