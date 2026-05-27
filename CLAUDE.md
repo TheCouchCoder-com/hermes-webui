@@ -68,9 +68,14 @@ at `4edcb68` (~v0.51.10); recurring sync is automated by
 ### Cadence and mechanism
 
 - The workflow runs Mondays 06:00 UTC (`schedule: cron`) and on demand
-  (`workflow_dispatch`, optional `target_tag` input).
-- It picks the next un-merged upstream `v*` tag, creates
-  `sync/upstream-<tag>`, runs `git merge --no-ff`, then `pytest`.
+  (`workflow_dispatch`, optional `target_tag` input, optional `mode`
+  input — `next` (default) or `latest`).
+- Scheduled runs always use `next`: pick the next un-merged upstream
+  `v*` tag, create `sync/upstream-<tag>`, run `git merge --no-ff`, then
+  `pytest`. Manual dispatch can set `mode: latest` to skip ahead to the
+  newest un-merged tag in a single merge — use this only to catch up on
+  a backlog, and expect bigger conflicts (the stage-by-stage policy
+  below still applies to the default path).
 - **Clean merge + green tests** → ready-for-review PR with label
   `sync-upstream`.
 - **Conflicts or red tests** → draft PR with the partial state pushed

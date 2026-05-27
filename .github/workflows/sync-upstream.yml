@@ -4,8 +4,10 @@ name: Sync Upstream
 # - Runs daily 06:00 UTC, plus manual dispatch. Daily cadence paired with
 #   the daily Claude conflict-resolution routine keeps the fork close to
 #   upstream; weekly was too slow given upstream's ~3-tag/week pace.
-# - Picks the next un-merged upstream `v*` tag and merges it into a
-#   sync branch.
+# - Scheduled runs always pick the next un-merged upstream `v*` tag
+#   (stage-by-stage merging is the documented policy — see CLAUDE.md).
+# - Manual dispatch can opt into `mode: latest` to skip ahead to the
+#   newest upstream tag in one merge, for catching up on a backlog.
 # - If the merge applies cleanly AND tests pass, opens a ready-for-review
 #   PR. Otherwise opens a draft PR with the conflict / failure state so a
 #   human (or Claude) can resolve it.
@@ -19,9 +21,17 @@ on:
   workflow_dispatch:
     inputs:
       target_tag:
-        description: 'Specific upstream tag to merge (e.g. v0.51.15). Leave blank to pick the next un-merged tag.'
+        description: 'Specific upstream tag to merge (e.g. v0.51.15). Leave blank to use `mode`.'
         required: false
         type: string
+      mode:
+        description: 'Tag selection when `target_tag` is blank. `next` = next un-merged tag (default, stage-by-stage). `latest` = newest upstream tag, skipping intermediates.'
+        required: false
+        type: choice
+        default: next
+        options:
+          - next
+          - latest
 
 permissions:
   contents: write
@@ -50,10 +60,12 @@ jobs:
           git remote add upstream https://github.com/nesquena/hermes-webui.git
           git fetch upstream master --tags --prune
 
-      - name: Pick next un-merged upstream tag
+      - name: Pick upstream tag
         id: pick
         run: |
           set -euo pipefail
+          MODE="${{ inputs.mode }}"
+          MODE="${MODE:-next}"
           if [ -n "${{ inputs.target_tag }}" ]; then
             TAG="${{ inputs.target_tag }}"
             echo "Using user-specified tag: $TAG"
@@ -62,8 +74,14 @@ jobs:
             # `--no-merged master` alone would include ancient side-branch tags that
             # upstream itself never merged (e.g. v0.12); intersecting with
             # `--merged upstream/master` filters those out.
-            TAG=$(git tag --merged upstream/master --no-merged master --list 'v*' --sort=v:refname | head -n1 || true)
-            echo "Next un-merged upstream tag: ${TAG:-<none>}"
+            UNMERGED=$(git tag --merged upstream/master --no-merged master --list 'v*' --sort=v:refname || true)
+            if [ "$MODE" = "latest" ]; then
+              TAG=$(echo "$UNMERGED" | tail -n1)
+              echo "Latest un-merged upstream tag: ${TAG:-<none>}"
+            else
+              TAG=$(echo "$UNMERGED" | head -n1)
+              echo "Next un-merged upstream tag: ${TAG:-<none>}"
+            fi
           fi
           if [ -z "$TAG" ]; then
             echo "No upstream tags to merge. Exiting cleanly."
