@@ -4004,6 +4004,11 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/models/live":
         return _handle_live_models(handler, parsed)
 
+    # ── Auxiliary models (GET/POST) ──
+    if parsed.path == "/api/model/auxiliary":
+        from api.config import get_auxiliary_models
+        return j(handler, get_auxiliary_models())
+
     if parsed.path == "/api/dashboard/status":
         from api import dashboard_probe
 
@@ -5201,6 +5206,25 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
         except RuntimeError as e:
             return bad(handler, str(e), 500)
+
+    # ── Auxiliary model set (POST) ──
+    if parsed.path == "/api/model/set":
+        scope = str(body.get("scope") or "").strip()
+        task = str(body.get("task") or "").strip()
+        provider = str(body.get("provider") or "auto").strip()
+        model = str(body.get("model") or "").strip()
+        if scope == "auxiliary":
+            from api.config import set_auxiliary_model
+            try:
+                return j(handler, set_auxiliary_model(task, provider, model))
+            except Exception as exc:
+                return bad(handler, str(exc), status=400)
+        if scope == "main":
+            try:
+                return j(handler, set_hermes_default_model(model))
+            except ValueError as exc:
+                return bad(handler, str(exc), status=400)
+        return bad(handler, f"unknown scope: {scope}", status=400)
 
     # ── Providers (POST) ──
     if parsed.path == "/api/providers":
@@ -6621,8 +6645,10 @@ def handle_post(handler, parsed) -> bool:
         cookie_val = parse_cookie(handler)
         if cookie_val:
             invalidate_session(cookie_val)
+        body = json.dumps({"ok": True}).encode()
         handler.send_response(200)
         handler.send_header("Content-Type", "application/json")
+        handler.send_header("Content-Length", str(len(body)))
         handler.send_header("Cache-Control", "no-store")
         _security_headers(handler)
         clear_auth_cookie(handler)
@@ -6636,7 +6662,7 @@ def handle_post(handler, parsed) -> bool:
         _pc['hermes_profile']['httponly'] = True
         handler.send_header("Set-Cookie", _pc['hermes_profile'].OutputString())
         handler.end_headers()
-        handler.wfile.write(json.dumps({"ok": True}).encode())
+        handler.wfile.write(body)
         return True
 
     if parsed.path == "/api/auth/bootstrap":
@@ -6995,7 +7021,7 @@ def _handle_sse_stream(handler, parsed):
         handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
         handler.send_header("Cache-Control", "no-cache")
         handler.send_header("X-Accel-Buffering", "no")
-        handler.send_header("Connection", "keep-alive")
+        handler.send_header("Connection", "close")
         handler.end_headers()
         try:
             _replay_run_journal(handler, stream_id, _parse_run_journal_after_seq(qs))
@@ -7007,7 +7033,7 @@ def _handle_sse_stream(handler, parsed):
     handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
     handler.send_header("Cache-Control", "no-cache")
     handler.send_header("X-Accel-Buffering", "no")
-    handler.send_header("Connection", "keep-alive")
+    handler.send_header("Connection", "close")
     handler.end_headers()
     try:
         while True:
@@ -7138,7 +7164,7 @@ def _handle_terminal_output(handler, parsed):
     handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
     handler.send_header("Cache-Control", "no-cache")
     handler.send_header("X-Accel-Buffering", "no")
-    handler.send_header("Connection", "keep-alive")
+    handler.send_header("Connection", "close")
     handler.end_headers()
     try:
         while True:
@@ -7216,7 +7242,7 @@ def _handle_gateway_sse_stream(handler, parsed):
     handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
     handler.send_header('Cache-Control', 'no-cache')
     handler.send_header('X-Accel-Buffering', 'no')
-    handler.send_header('Connection', 'keep-alive')
+    handler.send_header('Connection', 'close')
     handler.end_headers()
 
     q = watcher.subscribe()
@@ -7249,7 +7275,7 @@ def _handle_session_events_stream(handler):
     handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
     handler.send_header('Cache-Control', 'no-cache')
     handler.send_header('X-Accel-Buffering', 'no')
-    handler.send_header('Connection', 'keep-alive')
+    handler.send_header('Connection', 'close')
     handler.end_headers()
 
     q = subscribe_session_events()
@@ -7335,6 +7361,7 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
         handler.send_response(416)
         handler.send_header("Content-Range", f"bytes */{file_size}")
         handler.send_header("Accept-Ranges", "bytes")
+        handler.send_header("Content-Length", "0")
         _security_headers(handler)
         handler.end_headers()
         return True
@@ -7445,10 +7472,12 @@ def _handle_media(handler, parsed):
     if is_auth_enabled():
         cv = parse_cookie(handler)
         if not (cv and verify_session(cv)):
+            body = b'{"error":"Authentication required"}'
             handler.send_response(401)
             handler.send_header("Content-Type", "application/json")
+            handler.send_header("Content-Length", str(len(body)))
             handler.end_headers()
-            handler.wfile.write(b'{"error":"Authentication required"}')
+            handler.wfile.write(body)
             return
 
     qs = parse_qs(parsed.query)
@@ -7682,6 +7711,15 @@ def _handle_folder_download(handler, parsed):
         _content_disposition_value("attachment", zip_name),
     )
     handler.send_header("Cache-Control", "no-store")
+    # Under HTTP/1.1 (Handler.protocol_version, see server.py post-#2836)
+    # a response with no Content-Length and no Transfer-Encoding requires
+    # Connection: close so the client knows the body ends at FIN. The ZIP
+    # is built on-the-fly so we cannot send Content-Length up front; mirror
+    # the SSE-endpoint pattern #2836 uses. Without this header the client
+    # hangs waiting for the next pipelined response after the central
+    # directory bytes finish. Caught by Opus pre-release advisor on
+    # stage-batch11.
+    handler.send_header("Connection", "close")
     handler.end_headers()
 
     written = 0
@@ -7807,7 +7845,7 @@ def _handle_approval_sse_stream(handler, parsed):
     handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
     handler.send_header('Cache-Control', 'no-cache')
     handler.send_header('X-Accel-Buffering', 'no')
-    handler.send_header('Connection', 'keep-alive')
+    handler.send_header('Connection', 'close')
     handler.end_headers()
 
     from api.streaming import _sse
@@ -7908,7 +7946,7 @@ def _handle_clarify_sse_stream(handler, parsed):
     handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
     handler.send_header('Cache-Control', 'no-cache')
     handler.send_header('X-Accel-Buffering', 'no')
-    handler.send_header('Connection', 'keep-alive')
+    handler.send_header('Connection', 'close')
     handler.end_headers()
 
     from api.streaming import _sse
@@ -8881,6 +8919,41 @@ def _start_chat_stream_for_session(
     return response
 
 
+def _runtime_runner_client_factory():
+    """Return the runner-local client when a supervised backend exists.
+
+    Slice 4d wires the `/api/chat/start` selection point without silently falling
+    back to the legacy in-process runtime when `runner-local` is explicitly
+    requested. The supervised runner backend itself is intentionally not created
+    in this helper yet; a later slice can replace this factory with the concrete
+    client while keeping the route contract stable.
+    """
+    raise NotImplementedError("runner-local chat backend is not configured")
+
+
+def _chat_start_response_from_run_start(result):
+    """Expose only the legacy browser-facing chat-start response fields."""
+    payload = dict(getattr(result, "payload", {}) or {})
+    response = {}
+    for key in (
+        "stream_id",
+        "session_id",
+        "pending_started_at",
+        "turn_id",
+        "title",
+        "effective_model",
+        "effective_model_provider",
+        "error",
+        "active_stream_id",
+        "_status",
+    ):
+        if key in payload:
+            response[key] = payload[key]
+    response.setdefault("stream_id", result.stream_id)
+    response.setdefault("session_id", result.session_id)
+    return response
+
+
 def _runtime_adapter_goal_action(goal_args: str) -> str:
     """Return the bounded RuntimeAdapter goal action for WebUI /goal args."""
     action = str(goal_args or "").strip().lower()
@@ -9090,10 +9163,12 @@ def _handle_chat_start(handler, body, diag=None):
         from api.runtime_adapter import (
             LegacyJournalRuntimeAdapter,
             StartRunRequest,
+            build_runtime_adapter,
             runtime_adapter_enabled,
+            runtime_adapter_runner_enabled,
         )
 
-        if runtime_adapter_enabled():
+        if runtime_adapter_enabled() or runtime_adapter_runner_enabled():
             def _legacy_start_run(request: StartRunRequest) -> dict:
                 return _start_chat_stream_for_session(
                     s,
@@ -9106,23 +9181,32 @@ def _handle_chat_start(handler, body, diag=None):
                     diag=diag,
                 )
 
-            adapter = LegacyJournalRuntimeAdapter(start_run_delegate=_legacy_start_run)
-            result = adapter.start_run(
-                StartRunRequest(
-                    session_id=s.session_id,
-                    message=msg,
-                    attachments=attachments,
-                    workspace=workspace,
-                    profile=getattr(s, "profile", None),
-                    provider=model_provider,
-                    model=model,
-                    source="webui",
-                    metadata={"route": "/api/chat/start"},
+            def _legacy_adapter_factory():
+                return LegacyJournalRuntimeAdapter(start_run_delegate=_legacy_start_run)
+
+            try:
+                adapter = build_runtime_adapter(
+                    legacy_adapter_factory=_legacy_adapter_factory,
+                    runner_client_factory=_runtime_runner_client_factory,
                 )
-            )
-            response = dict(result.payload)
-            response.setdefault("stream_id", result.stream_id)
-            response.setdefault("session_id", result.session_id)
+                if adapter is None:
+                    raise NotImplementedError("runtime adapter selection returned no adapter")
+                result = adapter.start_run(
+                    StartRunRequest(
+                        session_id=s.session_id,
+                        message=msg,
+                        attachments=attachments,
+                        workspace=workspace,
+                        profile=getattr(s, "profile", None),
+                        provider=model_provider,
+                        model=model,
+                        source="webui",
+                        metadata={"route": "/api/chat/start"},
+                    )
+                )
+            except NotImplementedError as exc:
+                return j(handler, {"error": str(exc)}, status=501)
+            response = _chat_start_response_from_run_start(result)
         else:
             response = _start_chat_stream_for_session(
                 s,
