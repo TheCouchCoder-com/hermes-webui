@@ -13,6 +13,27 @@
 
 ## [Unreleased]
 
+## [v0.51.130] — 2026-05-24 — Release DB (stage-batch12 — 3-PR profile-isolation + boot-precedence + workspace Artifacts tab)
+
+### Fixed
+
+- **PR #2827** by @Koraji95-coder — Profile state-sync TLS-vs-thread fix (closes #2762). When switching profiles via the WebUI cookie selector, session token-usage and title were being written to the *previously-active* profile's `state.db` instead of the cookie-switched one (sidecar messages + workspace files were already routed correctly; only the `state.db` sidecar sync leaked). Root cause: the cookie middleware sets `_tls.profile = '<cookie>'` on the HTTP request thread, but the daemon thread spawned in `_run_agent_streaming` doesn't inherit that TLS. When the streaming worker calls `sync_session_usage`, `_get_state_db → get_active_hermes_home → get_active_profile_name` finds no TLS profile, falls through to `_active_profile` (the process default), and opens the wrong DB. Fix plumbs the session's own `profile` field through `sync_session_usage(..., profile=...)` and `_get_state_db(profile=...)` rather than leaning on TLS that doesn't exist on the worker thread. Keeps the existing TLS path for callers that don't pass `profile=` explicitly, so external integrations don't regress. Also adds defensive `_validate_profile_name` rejecting `../etc`, leading-dash, whitespace, and over-long names (prevents path traversal via cookie tampering). Adds 11 regression tests covering explicit-profile honors, multi-thread profile preservation, unknown-profile-name fallback path, invalid-name refusal, and legacy-call-shape compatibility.
+
+- **PR #2726** by @starship-s — Boot model-default precedence follow-up (refines #2709). The original v0.51.105 fix correctly preferred the profile/server default on fresh boot, but the implementation had two over-broad side effects flagged in post-merge review: (1) boot unconditionally cleared the persisted browser model state, even on restored sessions where that state should remain authoritative, and (2) `populateModelDropdown()` reapplied the default on every repopulate when no session model was present, which clobbered the in-page selection during ordinary dropdown refreshes. Fix is to gate the default-reapply behind an opt-in `{preferProfileDefaultOnFreshBoot: true}` parameter so boot keeps profile-default precedence, restored sessions keep their session model, and non-boot dropdown refreshes preserve the loaded session's model or the current in-page selection. Browser model state is no longer deleted just because the profile default wins this boot. Expanded the regression test coverage with a Node `select` / DOM shim that exercises the real `populateModelDropdown()` path for boot-default, restored-session, current-selection, and removed-model scenarios (+306 LOC tests).
+
+### Added
+
+- **PR #2673** by @AJV20 — Workspace Artifacts tab (closes #2655). New tab in the workspace panel that lists likely files mentioned, edited, or created during the active session. Prioritizes structured tool-call paths (file_write, edit, patch, etc.), filters dependency/build noise (node_modules, `__pycache__`, `.git`, lock files), and refreshes while live tool calls arrive. Artifact entries open through the existing workspace file preview flow. The MVP is frontend-scoped — backend ingestion uses the existing tool-call event stream rather than a new persistence path — so the maintainer can evaluate the UX before deciding whether artifact tracking should grow into a backend-backed feature. Refreshes alongside the file tree in `loadDir()` via a `typeof renderSessionArtifacts==='function'` guard so it composes cleanly with #2716's session stale-guard pattern. Adds `tests/test_issue2655_frontend.py`.
+
+### Notes
+
+- **In-stage cherry-pick mechanics**: All 3 PRs were on stale-base merge-bases (master had advanced through 3 releases). Used `git apply --3way` of each PR's net delta vs its merge-base onto current stage HEAD, then resolved 2 small JS conflicts manually:
+  - `static/boot.js` (#2726 vs post-#2716 master): kept PR's parameterized `populateModelDropdown({preferProfileDefaultOnFreshBoot:true})` call (the whole point of #2726) on top of master's #2716 hydration flow.
+  - `static/workspace.js` (#2673 vs post-#2716 master): kept master's `sessionId`-capture stale-session guard (closure-scoped sessionId check after `await`) AND added PR's `renderSessionArtifacts()` call to refresh the new Artifacts tab when the file tree updates. Wrapped in `typeof === 'function'` guard for defense-in-depth.
+- **In-stage test fixes**: Patched 3 brittle source-string assertions to accept both pre-#2716 and post-#2716 JS shapes (variable names changed during the cherry-pick, semantics preserved). Patched 1 schema mismatch in `tests/test_issue2762_state_sync_profile_kwarg.py::_read_session` helper — it queried `sessions.session_id` but the real `state.db` schema has `sessions.id` as primary key. Fix is mechanical: `SELECT id AS session_id` + `WHERE id = ?` so the helper queries the actual schema.
+- Full pytest: pending re-run on this finalized stage. Touched-tests gate: 41 passed (covering #2827 + #2726 + #2673 surface areas).
+- Agent self-verified: profile= kwarg threading on `_get_state_db` + `sync_session_usage`, production call site in `api/streaming.py:5078` passes `profile=getattr(s, 'profile', None)`, `populateModelDropdown` opt-in parameterization present, boot.js calls with `preferProfileDefaultOnFreshBoot:true`, workspace `renderSessionArtifacts()` defined + called.
+
 ## [v0.51.129] — 2026-05-24 — Release DA (stage-batch11 — 4-PR feature + perf batch)
 
 ### Performance
@@ -4282,6 +4303,11 @@ This release is the first under the May 2 2026 auto-rebase + auto-fix policy: co
 - **`/btw` stream handler hardened** — `_streamDone=true` now set *before* `src.close()` in `done` and `apperror` handlers (defensive ordering); `_ensureBtwRow()` in `done` gated on session match (`S.session.session_id === parentSid`) to prevent btw bubble leaking into a different session if the user switches mid-stream; `stream_end` handler also sets `_streamDone=true` for defense-in-depth. 14 new regression tests added. (`static/messages.js`, `tests/test_reasoning_chip_btw_fixes.py`) [#935]
 - **`/reasoning` toast aligned with BRAIN prefix** — success toast now reads `🧠 Reasoning effort: <level>` consistent with the command's other toasts. (`static/commands.js`) [#939]
 - **Bootstrap Python discovery finds `.venv/` layout** — `discover_launcher_python` now checks both `venv/` and `.venv/` inside the agent directory, covering installations that use a leading-dot venv layout. (`bootstrap.py`) [#941]
+
+## v0.50.185 — 2026-04-24
+
+### Fixed
+- **`/btw` `stream_end` now sets `_streamDone`** — defense-in-depth improvement per Opus code review: the `stream_end` SSE handler now sets `_streamDone=true` before closing the connection, guarding against any server flow that emits `stream_end` without a preceding `done`/`apperror` event. (`static/messages.js`)
 
 ## v0.50.184 — 2026-04-24
 
