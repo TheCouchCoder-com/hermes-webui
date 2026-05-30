@@ -228,6 +228,71 @@ function closeMobileSidebar(){
   if(overlay)overlay.classList.remove('visible');
 }
 
+const _PWA_SIDEBAR_SWIPE_EDGE=28;
+const _PWA_SIDEBAR_SWIPE_TRIGGER=72;
+const _PWA_SIDEBAR_SWIPE_MAX_VERTICAL=48;
+let _pwaSidebarSwipe=null;
+
+function _isPwaStandalone(){
+  try{
+    return document.documentElement.classList.contains('pwa-standalone')
+      || window.matchMedia('(display-mode: standalone)').matches
+      || window.navigator.standalone===true;
+  }catch(_){return false;}
+}
+
+function _isInteractiveSwipeTarget(target){
+  try{return !!(target&&target.closest&&target.closest('input,textarea,select,button,a,[contenteditable="true"],.topbar-chips,.composer-left,.sidebar,.rightpanel'));}
+  catch(_){return false;}
+}
+
+function _openMobileSidebarFromGesture(){
+  if(_isDesktopWidth())return;
+  const sidebar=document.querySelector('.sidebar');
+  const overlay=$('mobileOverlay');
+  if(!sidebar)return;
+  const layout=document.querySelector('.layout');
+  if(layout)layout.classList.remove('sidebar-collapsed');
+  sidebar.classList.remove('sidebar-collapsed');
+  try{document.documentElement.removeAttribute('data-sidebar-collapsed');}catch(_){}
+  sidebar.classList.add('mobile-open');
+  if(overlay)overlay.classList.add('visible');
+}
+
+function _onPwaSidebarSwipeStart(e){
+  if(!_isPwaStandalone()||_isDesktopWidth())return;
+  if(e.pointerType==='mouse'||(e.pointerType&&e.pointerType!=='touch'&&e.pointerType!=='pen'))return;
+  if(document.querySelector('.sidebar')?.classList.contains('mobile-open'))return;
+  const clientX=Number(e.clientX)||0;
+  if(clientX>_PWA_SIDEBAR_SWIPE_EDGE)return;
+  if(_isInteractiveSwipeTarget(e.target))return;
+  _pwaSidebarSwipe={startX:clientX,startY:Number(e.clientY)||0,active:true,opened:false};
+}
+
+function _onPwaSidebarSwipeMove(e){
+  const swipe=_pwaSidebarSwipe;
+  if(!swipe||!swipe.active||swipe.opened)return;
+  const dx=(Number(e.clientX)||0)-swipe.startX;
+  const dy=(Number(e.clientY)||0)-swipe.startY;
+  if(dx<0||Math.abs(dy)>_PWA_SIDEBAR_SWIPE_MAX_VERTICAL*1.5){_pwaSidebarSwipe=null;return;}
+  if(dx>=_PWA_SIDEBAR_SWIPE_TRIGGER&&Math.abs(dy)<=_PWA_SIDEBAR_SWIPE_MAX_VERTICAL&&dx>Math.abs(dy)*1.5){
+    if(e.cancelable)e.preventDefault();
+    swipe.opened=true;
+    _openMobileSidebarFromGesture();
+  }
+}
+
+function _onPwaSidebarSwipeEnd(){_pwaSidebarSwipe=null;}
+function _onPwaSidebarSwipeCancel(){_pwaSidebarSwipe=null;}
+
+function _installPwaSidebarSwipeGesture(){
+  window.addEventListener('pointerdown', _onPwaSidebarSwipeStart, {passive:true});
+  window.addEventListener('pointermove', _onPwaSidebarSwipeMove, {passive:false});
+  window.addEventListener('pointerup', _onPwaSidebarSwipeEnd, {passive:true});
+  window.addEventListener('pointercancel', _onPwaSidebarSwipeCancel, {passive:true});
+}
+_installPwaSidebarSwipeGesture();
+
 // ── Desktop sidebar collapse toggle ────────────────────────────────────────
 // Two discoverability paths into the same state:
 //   (1) Click the already-active rail icon → collapse / expand the sidebar.

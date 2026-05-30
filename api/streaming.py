@@ -10,6 +10,7 @@ import mimetypes
 import os
 import queue
 import re
+import sys
 import threading
 import time
 import traceback
@@ -189,9 +190,10 @@ def _clarify_timeout_seconds(default: int = 120) -> int:
 _CANCEL_MARKER_PATTERNS = ('task cancelled', 'task canceled', 'response interrupted')
 
 
-_WEBUI_VISIBLE_PROGRESS_PROMPT = """
-WebUI progress contract:
-- For multi-step work that uses tools, provide brief user-visible progress updates as normal assistant content before continuing with tool calls.
+_WEBUI_PROGRESS_PROMPT = """
+WebUI progress guidance:
+- Match the normal Hermes messaging style; do not add extra status updates solely because this is a browser session.
+- For long multi-step work that uses tools, you may provide brief user-visible progress updates before continuing with tool calls.
 - Each update should say what you are about to check, what you just confirmed, or why the next tool call is needed.
 - Keep updates concise, factual, and in the user's language. One or two short sentences are enough.
 - Do not reveal hidden reasoning, chain-of-thought, private scratchpads, secrets, raw logs, or long tool output.
@@ -199,13 +201,124 @@ WebUI progress contract:
 """.strip()
 
 
-def _webui_ephemeral_system_prompt(personality_prompt: Optional[str]) -> str:
+def _webui_surface_context_prompt(surface_context: Optional[dict]) -> str:
+    """Return safe WebUI session metadata for the agent's ephemeral context.
+
+    Messaging gateways inject platform/channel context before each run. Browser
+    sessions do not have a chat platform wrapper, so provide an explicit, small
+    surface description here instead of relying on the model to infer where it
+    is running from the transcript alone.
+    """
+    if not isinstance(surface_context, dict):
+        return ""
+
+    lines = [
+        "WebUI session context:",
+        "- This browser session is not the same live transcript as Telegram, Discord, Slack, or other messaging surfaces.",
+        "- Use durable memory, saved sessions, and available tools for cross-surface recall instead of assuming those transcripts are in this browser chat.",
+    ]
+    fields = (
+        ("source", "Source"),
+        ("session_id", "Session ID"),
+        ("profile", "Profile"),
+        ("workspace", "Workspace"),
+    )
+    for key, label in fields:
+        raw = surface_context.get(key)
+        value = str(raw).strip() if raw is not None else ""
+        if value:
+            lines.append(f"- {label}: {value}")
+    return "\n".join(lines)
+
+
+def _webui_ephemeral_system_prompt(
+    personality_prompt: Optional[str],
+    surface_context: Optional[dict] = None,
+) -> str:
     """Build WebUI-only runtime instructions that are not persisted to history."""
     parts = []
     if personality_prompt:
         parts.append(str(personality_prompt).strip())
-    parts.append(_WEBUI_VISIBLE_PROGRESS_PROMPT)
+    surface_prompt = _webui_surface_context_prompt(surface_context)
+    if surface_prompt:
+        parts.append(surface_prompt)
+    parts.append(_WEBUI_PROGRESS_PROMPT)
     return "\n\n".join(part for part in parts if part)
+
+
+_SECRET_SHAPED_RE = re.compile(
+    r"(?i)(api[_-]?key|token|password|secret)\s*[:=]\s*[^\s]+|"
+    r"\b(?:sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b|"
+    r"[A-Za-z0-9_-]{24,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}"
+)
+
+def _redact_prefill_status_text(text: str) -> str:
+    """Return a short, non-secret diagnostic string for prefill status."""
+    clean = _SECRET_SHAPED_RE.sub("[REDACTED]", str(text or ""))
+    return " ".join(clean.split())[:240]
+
+
+def _valid_prefill_messages(value) -> list[dict]:
+    """Normalize a prefill payload to role/content messages."""
+    if not isinstance(value, list):
+        return []
+    messages: list[dict] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role")
+        content = item.get("content")
+        if role not in {"system", "user", "assistant"} or not isinstance(content, str) or not content.strip():
+            continue
+        messages.append({"role": role, "content": content})
+    return messages
+
+
+def _resolve_prefill_path(raw: str) -> Path:
+    path = Path(str(raw)).expanduser()
+    if not path.is_absolute():
+        try:
+            from api.config import _get_config_path
+            path = _get_config_path().parent / path
+        except Exception:
+            path = Path.cwd() / path
+    return path
+
+
+def _load_webui_prefill_context(
+    config_data: Optional[dict] = None,
+) -> dict:
+    """Load configured WebUI session prefill messages.
+
+    Supports the same bounded JSON-file shape used by Hermes Agent.  WebUI does
+    not execute a configured prefill script here; session recall that requires
+    code execution should go through the normal MCP/tool path instead of an
+    always-on per-turn subprocess before SSE starts.
+    """
+    cfg = config_data if isinstance(config_data, dict) else get_config()
+    file_raw = os.getenv("HERMES_PREFILL_MESSAGES_FILE", "") or str(cfg.get("prefill_messages_file") or "")
+    if file_raw:
+        path = _resolve_prefill_path(file_raw)
+        label = path.name or "prefill file"
+        if not path.exists():
+            return {"status": "error", "source": "file", "label": label, "messages": [], "message_count": 0, "error": "prefill file not found"}
+        try:
+            messages = _valid_prefill_messages(json.loads(path.read_text(encoding="utf-8")))
+            return {"status": "loaded", "source": "file", "label": label, "messages": messages, "message_count": len(messages)}
+        except Exception as exc:
+            return {"status": "error", "source": "file", "label": label, "messages": [], "message_count": 0, "error": _redact_prefill_status_text(str(exc))}
+    return {"status": "not_configured", "source": "none", "label": "", "messages": [], "message_count": 0}
+
+
+def _public_prefill_context_status(prefill_context: dict) -> dict:
+    """Strip message bodies before sending context status to the browser."""
+    return {
+        "status": prefill_context.get("status", "not_configured"),
+        "source": prefill_context.get("source", "none"),
+        "label": prefill_context.get("label", ""),
+        "message_count": int(prefill_context.get("message_count") or 0),
+        **({"error": prefill_context.get("error", "")} if prefill_context.get("error") else {}),
+    }
 
 
 def _has_new_assistant_reply(all_messages: list, prev_count: int) -> bool:
@@ -3896,6 +4009,12 @@ def _run_agent_streaming(
             # Read per-profile config at call time (not module-level snapshot)
             from api.config import get_config as _get_config
             _cfg = _get_config()
+            _prefill_context = _load_webui_prefill_context(_cfg)
+            _prefill_messages = _prefill_context.get('messages') or []
+            put('context_status', {
+                'session_id': session_id,
+                'prefill': _public_prefill_context_status(_prefill_context),
+            })
 
             # Per-profile toolsets — use _resolve_cli_toolsets() so MCP
             # server toolsets are included, matching native CLI behaviour.
@@ -4018,6 +4137,7 @@ def _run_agent_streaming(
                 fallback_model=_fallback_resolved,
                 session_id=session_id,
                 session_db=_session_db,
+                prefill_messages=_prefill_messages,
                 stream_delta_callback=on_token,
                 reasoning_callback=on_reasoning,
                 tool_progress_callback=on_tool,
@@ -4031,6 +4151,8 @@ def _run_agent_streaming(
             # but guard defensively to avoid TypeError on an older agent build.
             if 'reasoning_config' in _agent_params and _reasoning_config is not None:
                 _agent_kwargs['reasoning_config'] = _reasoning_config
+            if 'prefill_messages' not in _agent_params:
+                _agent_kwargs.pop('prefill_messages', None)
             if 'interim_assistant_callback' in _agent_params:
                 _agent_kwargs['interim_assistant_callback'] = on_interim_assistant
             if 'tool_start_callback' in _agent_params:
@@ -4084,6 +4206,7 @@ def _run_agent_streaming(
                     _fallback_resolved or {},
                     sorted(_toolsets) if _toolsets else [],
                     _reasoning_config or {},
+                    _public_prefill_context_status(_prefill_context),
                     # #1897: profile_home is part of the agent's identity because
                     # AIAgent caches `_cached_system_prompt` from `load_soul_md()`
                     # at construction time, sourced from HERMES_HOME. Same-session
@@ -4143,6 +4266,8 @@ def _run_agent_streaming(
                         agent.reasoning_callback = _agent_kwargs.get('reasoning_callback')
                     if hasattr(agent, 'clarify_callback'):
                         agent.clarify_callback = _agent_kwargs.get('clarify_callback')
+                    if hasattr(agent, 'prefill_messages'):
+                        agent.prefill_messages = list(_agent_kwargs.get('prefill_messages') or [])
                     if _session_db is not None:
                         # Close any previously held SessionDB connection before
                         # replacing it. Without this, each streaming request creates
@@ -4258,7 +4383,15 @@ def _run_agent_streaming(
             # (agent's own mechanism). This preserves any selected personality
             # while making long tool runs emit real user-visible interim text
             # through interim_assistant_callback instead of frontend guesses.
-            agent.ephemeral_system_prompt = _webui_ephemeral_system_prompt(_personality_prompt)
+            agent.ephemeral_system_prompt = _webui_ephemeral_system_prompt(
+                _personality_prompt,
+                surface_context={
+                    'source': 'webui',
+                    'session_id': session_id,
+                    'profile': getattr(s, 'profile', None),
+                    'workspace': s.workspace,
+                },
+            )
             _pending_started_at = getattr(s, 'pending_started_at', None)
             # Normal chat-start sets pending_started_at before spawning this thread;
             # fallback to now only for recovered/legacy flows where that marker is absent

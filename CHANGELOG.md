@@ -13,6 +13,38 @@
 
 ## [Unreleased]
 
+## [v0.51.131] — 2026-05-24 — Release DC (stage-batch13 — 6-PR notes-drawer + context-parity + PWA-swipe + locale polish)
+
+### Added
+
+- **PR #2868** by @AJV20 — Installed/mobile PWA sessions now support an edge swipe from the left side of the screen to open the mobile sidebar drawer, while preserving the existing hamburger and overlay controls. PWA-standalone-gated, edge X<28px, vertical-tolerance 48px, interactive-target exclusion. Defends against accidental triggers from text selection or button taps.
+
+- **PR #2527** by @AJV20 — Default-off, read-only Third-party notes drawer in the Memory panel. Lists configured note/knowledge MCP sources (Joplin, Obsidian, Notion, llm-wiki) when explicitly enabled via `webui_external_notes_sources` config or `HERMES_WEBUI_EXTERNAL_NOTES_SOURCES=1`. Automatic session recall unchanged. 4 API endpoints (`/api/notes/sources`, `/api/notes/search`, `/api/notes/item`, plus `external_notes_enabled` in memory_read response) all gated behind the feature flag.
+
+- **PR #2547** by @AJV20 — SSE stream runtime diagnostics in deep health checks: active stream count, subscriber totals, and offline buffered-event counts for stuck or slow WebUI chat investigations. Non-sensitive payload only.
+
+- **PR #2547** by @AJV20 — WebUI session prefill parity for bounded JSON files. Browser-originated chat turns can load configured prefill context from `prefill_messages_file`, pass it to Hermes Agent as ephemeral model context, and surface a compact context status event in the chat UI without exposing prefill message bodies. WebUI intentionally does not execute `prefill_messages_script`; executable recall should go through the existing MCP/tool surface. Backward-compatible: degrades gracefully on older agent builds that don't support the `prefill_messages` kwarg.
+
+### Changed
+
+- **PR #2547** by @AJV20 — Browser-surface session context is now attached to WebUI agent turns so the agent can distinguish a WebUI chat from messaging-platform transcripts. Context is ephemeral (not saved to history). WebUI progress guidance now preserves the normal Hermes messaging style instead of encouraging extra browser-only status chatter.
+
+### Fixed
+
+- **PR #2865** by @AJV20 — New WebUI sessions no longer persist `display.personality` into per-session `Session.personality`; only explicit personality changes remain durable, preventing stale global display defaults from overriding profile-scoped session behavior. Closes #2845.
+
+- **PR #2882** by @ycj — zh-CN (Simplified Chinese) session-time relative labels are now clearer: `${n}分钟前`, `${n}小时前`, `${n}天前`, and the more natural last-week phrasing `上周` instead of the previous bare-unit shorthand. Also corrects a small indentation glitch in the zh-TW (Traditional Chinese) locale. (Cherry-picked onto fresh stage with `Co-authored-by` attribution — original PR was based on stale master.)
+
+- **PR #2873** by @Charanis — The WebUI launcher (`ctl.sh` + `bootstrap.py`) now preserves environment variables that have already been resolved by the shell (for example `HERMES_WEBUI_PORT`, `HERMES_WEBUI_STATE_DIR`, `HERMES_WEBUI_HOST`) instead of letting a repo-level `.env` clobber them mid-launch. The `.env` keeps working as a default-only source for unset variables, gated by `HERMES_WEBUI_PRESERVE_ENV=1` set by the launcher subshell.
+
+### Notes
+
+- **6,503 pytest passed** (sequential mode; the test infrastructure uses a single test server that doesn't support xdist parallelism — known limitation, tracked separately).
+- **Opus Advisor verdict: SHIP-AS-IS.** Zero MUST-FIX. Three SHOULD-FIX items filed as follow-up issues (incomplete locale coverage for notes-drawer i18n keys, `_joplin_api_get` URL-token defense-in-depth, prefill `setattr` cache-reuse safety net).
+- **#2527 i18n coverage**: 10 of the 11 non-en locales currently ship the English string `'Third-party notes'` for the drawer header. Since the drawer is default-off, user impact is zero today; follow-up issue tracks proper translations before any default-on transition.
+
+
+
 ## [v0.51.130] — 2026-05-24 — Release DB (stage-batch12 — 3-PR profile-isolation + boot-precedence + workspace Artifacts tab)
 
 ### Fixed
