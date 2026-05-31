@@ -60,3 +60,15 @@ def test_update_apply_prevents_duplicate_apply_requests_while_in_flight():
     assert "if(window._updateApplyInFlight[target]) return;" in body
     assert "window._updateApplyInFlight[target]=true;" in body
     assert "window._updateApplyInFlight[target]=false;" in body
+
+
+def test_update_apply_rejects_zero_target_success_path():
+    """Update Now must not claim success when no webui/agent target is selected."""
+    src = _ui_js()
+    apply_start = src.index("async function applyUpdates(target)")
+    target_agent = src.index("if(window._updateData?.agent?.behind>0) await applyUpdates('agent');", apply_start)
+    zero_target_guard = src.find("if(!target)", apply_start, target_agent)
+
+    assert zero_target_guard >= 0, (
+        "applyUpdates must return before the success/restart flow when targets is empty"
+    )

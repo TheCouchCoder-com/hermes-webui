@@ -3,6 +3,7 @@ async function api(path,opts={}){
   const rel = path.startsWith('/') ? path.slice(1) : path;
   const url=new URL(rel,document.baseURI||location.href);
   const timeoutMs=Object.prototype.hasOwnProperty.call(opts,'timeoutMs')?opts.timeoutMs:30000;
+  const timeoutToast=opts.timeoutToast!==false;
   // Retry up to 2 times on network errors (e.g. stale keep-alive after long idle).
   // Server errors (4xx/5xx) and client-side timeouts are NOT retried.
   let lastErr;
@@ -15,6 +16,8 @@ async function api(path,opts={}){
     try{
       const fetchOpts={...opts};
       delete fetchOpts.timeoutMs;
+      delete fetchOpts.timeoutToast;
+
       const useTimeout=Number.isFinite(Number(timeoutMs))&&Number(timeoutMs)>0;
       if(useTimeout&&typeof AbortController!=='undefined'){
         controller=new AbortController();
@@ -69,7 +72,7 @@ async function api(path,opts={}){
         const err=(e&&e.name==='TimeoutError')?e:new Error('Request timed out. Please try again.');
         err.name='TimeoutError';
         err.timeout=true;
-        if(typeof showToast==='function') showToast('Request timed out. Please try again.',5000,'error');
+        if(timeoutToast&&typeof showToast==='function') showToast('Request timed out. Please try again.',5000,'error');
         throw err;
       }
       // Only retry on network errors (TypeError from fetch), not on HTTP errors
@@ -83,6 +86,23 @@ async function api(path,opts={}){
     }
   }
   throw lastErr;
+}
+
+function recordClientSSEError(source, details={}){
+  try{
+    const payload={
+      event:'sse_error',
+      source:String(source||'unknown'),
+      ready_state:details.ready_state,
+      session_id:details.session_id||null,
+      stream_id:details.stream_id||null,
+      visibility_state:(typeof document!=='undefined'&&document.visibilityState)||'unknown',
+      online:(typeof navigator!=='undefined'&&typeof navigator.onLine==='boolean')?navigator.onLine:null,
+      url_path:(typeof location!=='undefined'&&location.pathname)||'/',
+      reason:details.reason||'EventSource.onerror',
+    };
+    void api('/api/client-events/log',{method:'POST',body:JSON.stringify(payload),timeoutMs:3000,timeoutToast:false}).catch(()=>{});
+  }catch(_){}
 }
 
 // Persist/restore expanded directory state per workspace in localStorage
@@ -187,7 +207,7 @@ function _artifactCandidatesFromToolCall(tc){
     path = _normalizeArtifactPath(path);
     if(path) out.push({path, kind:source});
   };
-  if(args && typeof args === 'object'){
+  if(ARTIFACT_MUTATION_TOOLS.has(name) && args && typeof args === 'object'){
     for(const key of ['path','file_path','source','destination']) add(args[key]);
     if(Array.isArray(args.paths)) args.paths.forEach(p=>add(p));
     if(Array.isArray(args.edits)) args.edits.forEach(e=>add(e&&e.path));
@@ -238,10 +258,29 @@ function renderSessionArtifacts(){
   root.innerHTML = items.map(item => `<button type="button" class="workspace-artifact-item" data-artifact-path="${esc(item.path)}" onclick="openArtifactPath(this.dataset.artifactPath)"><div class="workspace-artifact-path">${esc(item.path)}</div><div class="workspace-artifact-meta">${esc(item.source || 'session')}</div></button>`).join('');
 }
 
-function openArtifactPath(path){
+async function _workspacePathExists(path){
+  if(!S.session||!path) return false;
+  const parts=String(path).split('/').filter(Boolean);
+  const name=parts.pop();
+  if(!name) return false;
+  const dir=parts.length?parts.join('/'):'.';
+  const data=await api(`/api/list?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(dir)}`);
+  return (data.entries||[]).some(entry=>entry&&((entry.path===path)||entry.name===name));
+}
+
+async function openArtifactPath(path){
   if(!path) return;
   switchWorkspacePanelTab('files');
   const rel = path.replace(/^~\//,'').replace(/^\.\//,'');
+  try{
+    if(!(await _workspacePathExists(rel))){
+      setStatus(t('file_open_failed'));
+      return;
+    }
+  }catch(_){
+    setStatus(t('file_open_failed'));
+    return;
+  }
   openFile(rel);
 }
 

@@ -1,7 +1,7 @@
 """
-Hermes Web UI -- Optional password authentication.
-Off by default. Enable by setting HERMES_WEBUI_PASSWORD env var
-or configuring a password in the Settings panel.
+Hermes Web UI -- optional authentication.
+Off by default. Enable by setting HERMES_WEBUI_PASSWORD, configuring a
+password in Settings, or registering passkeys and then going passwordless.
 """
 import hashlib
 import hmac
@@ -50,6 +50,7 @@ def _resolve_session_ttl() -> int:
 PUBLIC_PATHS = frozenset({
     '/login', '/health', '/favicon.ico', '/sw.js',
     '/api/auth/login', '/api/auth/status', '/api/auth/bootstrap',
+    '/api/auth/passkey/options', '/api/auth/passkey/login',
     '/manifest.json', '/manifest.webmanifest',
     '/session/manifest.json', '/session/manifest.webmanifest',
 })
@@ -124,6 +125,7 @@ def _save_sessions(sessions: dict) -> None:
 
 # Active sessions: token -> expiry timestamp (persisted across restarts via STATE_DIR)
 _sessions = _load_sessions()
+_SESSIONS_LOCK = threading.Lock()
 
 # ── Login rate limiter ──────────────────────────────────────────────────────
 # Two parallel buckets: per-IP and per-username (issue #2). The per-username
@@ -233,6 +235,14 @@ def _record_login_attempt(ip: str, username: str | None = None) -> None:
         if username:
             _login_attempts_user.setdefault(username.lower(), []).append(now)
             _save_login_attempts_to(_LOGIN_ATTEMPTS_USER_FILE, _login_attempts_user)
+
+
+def _clear_login_attempts(ip: str) -> None:
+    """Clear failed login attempts after a successful login (thread-safe)."""
+    with _LOGIN_ATTEMPTS_LOCK:
+        if ip in _login_attempts:
+            _login_attempts.pop(ip, None)
+            _save_login_attempts(_login_attempts)
 
 
 def _load_key(filename: str) -> bytes:
@@ -350,9 +360,14 @@ def get_password_hash() -> str | None:
         return result
 
 
-def is_auth_enabled() -> bool:
-    """True if auth is required: either a legacy single-password is configured,
-    or one or more multi-user records exist in .users.json (issue #2)."""
+def is_password_auth_enabled() -> bool:
+    """True if a password is configured (env var or settings), or one or more
+    multi-user records exist in .users.json (issue #2).
+
+    Fork note: upstream's helper only checks the legacy single-password path.
+    We extend it with the multi-user (has_users) check so that creating the
+    first admin via bootstrap flips auth on even when no shared password is set.
+    """
     if get_password_hash() is not None:
         return True
     try:
@@ -360,6 +375,56 @@ def is_auth_enabled() -> bool:
         return has_users()
     except Exception:
         return False
+
+
+def _passkey_feature_flag_enabled() -> bool:
+    """Return True if the passkey/WebAuthn surface is enabled for this deployment.
+
+    Passkey support is opt-in default-off behind a feature flag so deployments
+    that don't want the WebAuthn surface (or whose RP-ID setup isn't ready for
+    non-localhost hosts) can disable it entirely with no UI surface, no
+    endpoints, no credential storage. To enable:
+
+      - Set ``HERMES_WEBUI_PASSKEY=1`` in the environment, OR
+      - Set ``webui_passkey_enabled: true`` in the per-profile config.yaml
+
+    With the flag off, ``are_passkeys_enabled()`` always returns False even if
+    credentials were registered in the past, and ``/login`` shows password-only.
+    """
+    env_value = os.getenv("HERMES_WEBUI_PASSKEY", "")
+    if env_value:
+        return env_value.strip().lower() in {"1", "true", "yes", "on"}
+    try:
+        from api.config import get_config
+
+        cfg = get_config()
+        if isinstance(cfg, dict):
+            raw = cfg.get("webui_passkey_enabled")
+            if isinstance(raw, bool):
+                return raw
+            if isinstance(raw, str):
+                return raw.strip().lower() in {"1", "true", "yes", "on"}
+    except Exception:
+        pass
+    return False
+
+
+def are_passkeys_enabled() -> bool:
+    """True if the passkey feature flag is on AND at least one local passkey credential is registered."""
+    if not _passkey_feature_flag_enabled():
+        return False
+    try:
+        from api.passkeys import passkeys_available
+
+        return passkeys_available()
+    except Exception as exc:
+        logger.debug("Failed to inspect passkey availability: %s", exc)
+        return False
+
+
+def is_auth_enabled() -> bool:
+    """True if password auth or passkey-only auth is configured."""
+    return is_password_auth_enabled() or are_passkeys_enabled()
 
 
 def verify_password(plain: str) -> bool:
@@ -419,8 +484,9 @@ def create_session(user_id: str | None = None) -> str:
     accepted for backwards compatibility with legacy single-password code
     paths and tests."""
     token = secrets.token_hex(32)
-    _sessions[token] = {'user_id': user_id, 'expiry': time.time() + _resolve_session_ttl()}
-    _save_sessions(_sessions)
+    with _SESSIONS_LOCK:
+        _sessions[token] = {'user_id': user_id, 'expiry': time.time() + _resolve_session_ttl()}
+        _save_sessions(_sessions)
     sig = hmac.new(_signing_key(), token.encode(), hashlib.sha256).hexdigest()
     return f"{token}.{sig}"
 
@@ -428,11 +494,12 @@ def create_session(user_id: str | None = None) -> str:
 def _prune_expired_sessions():
     """Remove all expired session entries to prevent unbounded memory growth."""
     now = time.time()
-    expired = [t for t, entry in _sessions.items() if now > _session_expiry(entry)]
-    if expired:
-        for token in expired:
-            _sessions.pop(token, None)
-        _save_sessions(_sessions)
+    with _SESSIONS_LOCK:
+        expired = [t for t, entry in _sessions.items() if now > _session_expiry(entry)]
+        if expired:
+            for token in expired:
+                _sessions.pop(token, None)
+            _save_sessions(_sessions)
 
 
 def verify_session(cookie_value: str) -> bool:
@@ -456,12 +523,14 @@ def _session_record_for_cookie(cookie_value):
     )
     if not valid:
         return None
-    entry = _sessions.get(token)
-    if entry is None:
-        return None
-    if time.time() > _session_expiry(entry):
-        _sessions.pop(token, None)
-        return None
+    with _SESSIONS_LOCK:
+        entry = _sessions.get(token)
+        if entry is None:
+            return None
+        if time.time() > _session_expiry(entry):
+            _sessions.pop(token, None)
+            _save_sessions(_sessions)
+            return None
     return (token, entry)
 
 
@@ -613,9 +682,10 @@ def invalidate_session(cookie_value) -> None:
     """Remove a session token."""
     if cookie_value and '.' in cookie_value:
         token = cookie_value.rsplit('.', 1)[0]
-        if token in _sessions:
-            _sessions.pop(token, None)
-            _save_sessions(_sessions)
+        with _SESSIONS_LOCK:
+            if token in _sessions:
+                _sessions.pop(token, None)
+                _save_sessions(_sessions)
 
 
 def invalidate_sessions_for_user(user_id: str) -> int:

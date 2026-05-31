@@ -5,8 +5,10 @@ All business logic lives in api/*.
 """
 import logging
 import os
+import re
 import socket
 import sys
+import threading
 import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -111,9 +113,58 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
+_CSP_CONNECT_BASE = (
+    "'self' http://127.0.0.1:* http://localhost:* "
+    "ws://127.0.0.1:* ws://localhost:*"
+)
+_CSP_EXTRA_CONNECT_RE = re.compile(
+    r"^(?:https?|wss?)://(?:\*\.)?[A-Za-z0-9._~-]+(?::(?P<port>\d{1,5}|\*))?$"
+)
+
+
+def _valid_csp_extra_connect_source(source: str) -> bool:
+    match = _CSP_EXTRA_CONNECT_RE.fullmatch(source)
+    if not match:
+        return False
+    port = match.group("port")
+    if not port or port == "*":
+        return True
+    try:
+        return 1 <= int(port) <= 65535
+    except ValueError:
+        return False
+
+
+def _csp_extra_connect_src() -> str:
+    raw = os.getenv("HERMES_WEBUI_CSP_CONNECT_EXTRA", "").strip()
+    if not raw:
+        return ""
+    sources = raw.split()
+    if not sources or any(not _valid_csp_extra_connect_source(src) for src in sources):
+        logger.warning("Ignoring invalid HERMES_WEBUI_CSP_CONNECT_EXTRA value")
+        return ""
+    return " " + " ".join(sources)
+
+
+def _build_csp_report_only_policy() -> str:
+    connect_src = _CSP_CONNECT_BASE + _csp_extra_connect_src()
+    return (
+        "default-src 'self'; "
+        "base-uri 'self'; "
+        "object-src 'none'; "
+        "frame-ancestors 'self'; "
+        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+        "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+        "img-src 'self' data: blob:; "
+        "font-src 'self' data:; "
+        "media-src 'self' data: blob:; "
+        f"connect-src {connect_src}; "
+        "report-uri /api/csp-report; report-to csp-endpoint"
+    )
+
 from api.auth import check_auth
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
-from api.helpers import j, get_profile_cookie
+from api.helpers import j, get_profile_cookie, _CLIENT_DISCONNECT_ERRORS
 from api.profiles import set_request_profile, clear_request_profile
 from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put
 from api.startup import (
@@ -212,24 +263,11 @@ class Handler(BaseHTTPRequestHandler):
                 pass
     _ver_suffix = WEBUI_VERSION.removeprefix('v')
     server_version = ('HermesWebUI/' + _ver_suffix) if _ver_suffix != 'unknown' else 'HermesWebUI'
-    _CSP_REPORT_ONLY = (
-        "default-src 'self'; "
-        "base-uri 'self'; "
-        "object-src 'none'; "
-        "frame-ancestors 'self'; "
-        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
-        "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
-        "img-src 'self' data: blob:; "
-        "font-src 'self' data:; "
-        "media-src 'self' data: blob:; "
-        "connect-src 'self' http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*; "
-        "report-uri /api/csp-report; report-to csp-endpoint"
-    )
     _CSP_REPORT_TO = '{"group":"csp-endpoint","max_age":10886400,"endpoints":[{"url":"/api/csp-report"}]}'
 
     @classmethod
     def csp_report_only_policy(cls) -> str:
-        return cls._CSP_REPORT_ONLY
+        return _build_csp_report_only_policy()
 
     def end_headers(self) -> None:
         self.send_header("Content-Security-Policy-Report-Only", self.csp_report_only_policy())
@@ -242,13 +280,28 @@ class Handler(BaseHTTPRequestHandler):
         """Structured JSON logs for each request."""
         import json as _json
         duration_ms = round((time.time() - getattr(self, '_req_t0', time.time())) * 1000, 1)
-        record = _json.dumps({
+        remote = '-'
+        try:
+            if getattr(self, 'client_address', None):
+                remote = str(self.client_address[0])
+        except Exception:
+            remote = '-'
+        forwarded_for = None
+        try:
+            forwarded_for = (self.headers.get('X-Forwarded-For') or '').split(',')[0].strip() or None
+        except Exception:
+            forwarded_for = None
+        record_data = {
             'ts': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+            'remote': remote,
             'method': getattr(self, 'command', None) or '-',
             'path': getattr(self, 'path', None) or '-',
             'status': int(code) if str(code).isdigit() else code,
             'ms': duration_ms,
-        })
+        }
+        if forwarded_for:
+            record_data['forwarded_for'] = forwarded_for
+        record = _json.dumps(record_data)
         print(f'[webui] {record}', flush=True)
 
     def do_GET(self) -> None:
@@ -263,9 +316,22 @@ class Handler(BaseHTTPRequestHandler):
             result = handle_get(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)
-        except Exception as e:
+        except _CLIENT_DISCONNECT_ERRORS:
+            # The browser/client closed the socket while we were writing the
+            # response. This is expected for probes, tab closes, and SSE
+            # reconnect races; do not convert it into a misleading server 500.
+            return
+        except Exception:
             print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc(), flush=True)
-            return j(self, {'error': 'Internal server error'}, status=500)
+            try:
+                j(self, {'error': 'Internal server error'}, status=500)
+            except _CLIENT_DISCONNECT_ERRORS:
+                # Client disconnected while we were sending the 500 — nothing to do.
+                pass
+            except Exception:
+                # Unexpected failure while sending the error response itself.
+                # Log it so we know something is wrong with our error handler.
+                traceback.print_exc()
         finally:
             clear_request_profile()
 
@@ -289,9 +355,22 @@ class Handler(BaseHTTPRequestHandler):
             result = route_func(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)
-        except Exception as e:
+        except _CLIENT_DISCONNECT_ERRORS:
+            # The browser/client closed the socket while we were writing the
+            # response. This is expected for probes, tab closes, and SSE
+            # reconnect races; do not convert it into a misleading server 500.
+            return
+        except Exception:
             print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc(), flush=True)
-            return j(self, {'error': 'Internal server error'}, status=500)
+            try:
+                j(self, {'error': 'Internal server error'}, status=500)
+            except _CLIENT_DISCONNECT_ERRORS:
+                # Client disconnected while we were sending the 500 — nothing to do.
+                pass
+            except Exception:
+                # Unexpected failure while sending the error response itself.
+                # Log it so we know something is wrong with our error handler.
+                traceback.print_exc()
         finally:
             clear_request_profile()
 
@@ -344,6 +423,63 @@ def _raise_fd_soft_limit(target: int = 4096) -> dict:
     except Exception as exc:
         return {"status": "error", "soft": soft, "hard": hard, "error": str(exc)}
     return {"status": "raised", "soft": desired, "hard": hard, "previous_soft": soft}
+
+
+_SHUTDOWN_AUDIT_LOGGED = False
+_SHUTDOWN_LOG_VALUE_RE = re.compile(r"[\x00-\x1f\x7f]+")
+
+
+def _shutdown_log_value(value, *, default: str = "unknown", max_len: int = 160) -> str:
+    """Return a bounded single-line value safe for shutdown diagnostics."""
+    if value is None:
+        return default
+    try:
+        text = str(value)
+    except Exception:
+        return default
+    text = _SHUTDOWN_LOG_VALUE_RE.sub("?", text).strip()
+    if not text:
+        return default
+    if len(text) > max_len:
+        text = f"{text[:max_len]}…"
+    return text
+
+
+def _log_shutdown_audit(reason: str = "serve_forever_exit") -> None:
+    """Log runtime context when the WebUI server is exiting."""
+    global _SHUTDOWN_AUDIT_LOGGED
+    if _SHUTDOWN_AUDIT_LOGGED:
+        return
+
+    active_sessions = []
+    try:
+        from api.models import LOCK, SESSIONS
+        with LOCK:
+            session_items = list(SESSIONS.items())
+        for sid, session in session_items:
+            stream_id = getattr(session, "active_stream_id", None)
+            if stream_id:
+                pending = bool(getattr(session, "pending_user_message", None))
+                active_sessions.append(
+                    "sid=%s stream=%s pending=%s"
+                    % (
+                        _shutdown_log_value(sid),
+                        _shutdown_log_value(stream_id),
+                        pending,
+                    )
+                )
+    except Exception:
+        logger.debug("Failed to collect active-session shutdown audit state", exc_info=True)
+
+    _SHUTDOWN_AUDIT_LOGGED = True
+    logger.info(
+        "[shutdown-audit] reason=%s pid=%s thread=%s(%s) active_sessions=[%s]",
+        _shutdown_log_value(reason),
+        os.getpid(),
+        _shutdown_log_value(threading.current_thread().name),
+        threading.current_thread().ident,
+        "; ".join(active_sessions) if active_sessions else "none",
+    )
 
 
 def main() -> None:
@@ -478,6 +614,7 @@ def main() -> None:
     try:
         httpd.serve_forever()
     finally:
+        _log_shutdown_audit()
         # Stop the gateway watcher on shutdown
         try:
             from api.gateway_watcher import stop_watcher

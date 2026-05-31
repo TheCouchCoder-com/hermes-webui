@@ -17,8 +17,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Hermes">
 <link rel="apple-touch-icon" sizes="512x512" href="static/apple-touch-icon.png">
-<script>(function(){var themes={light:1,dark:1,system:1},skins={default:1,ares:1,mono:1,slate:1,poseidon:1,sisyphus:1,charizard:1,sienna:1,catppuccin:1,hepburn:1,nous:1,'geist-contrast':1},legacy={slate:['dark','slate'],solarized:['dark','poseidon'],monokai:['dark','sisyphus'],nord:['dark','slate'],oled:['dark','default']},t=(localStorage.getItem('hermes-theme')||'dark').toLowerCase(),s=(localStorage.getItem('hermes-skin')||'').toLowerCase(),m=legacy[t],theme=m?m[0]:(themes[t]?t:'dark'),skin=skins[s]?s:(m?m[1]:'default');localStorage.setItem('hermes-theme',theme);localStorage.setItem('hermes-skin',skin);if(theme==='system')theme=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';if(theme==='dark')document.documentElement.classList.add('dark');if(skin!=='default')document.documentElement.dataset.skin=skin;})()</script>
-<script>(function(){var fs=localStorage.getItem('hermes-font-size');if(fs&&fs!=='default')document.documentElement.dataset.fontSize=fs;})()</script>
+<script>(function(){try{var themes={light:1,dark:1,system:1},skins={default:1,ares:1,mono:1,slate:1,poseidon:1,sisyphus:1,charizard:1,sienna:1,catppuccin:1,hepburn:1,nous:1,'geist-contrast':1,neon:1},legacy={slate:['dark','slate'],solarized:['dark','poseidon'],monokai:['dark','sisyphus'],nord:['dark','slate'],oled:['dark','default']},t=(localStorage.getItem('hermes-theme')||'dark').toLowerCase(),s=(localStorage.getItem('hermes-skin')||'').toLowerCase(),m=legacy[t],theme=m?m[0]:(themes[t]?t:'dark'),skin=skins[s]?s:(m?m[1]:'default');localStorage.setItem('hermes-theme',theme);localStorage.setItem('hermes-skin',skin);if(theme==='system')theme=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';if(theme==='dark')document.documentElement.classList.add('dark');if(skin!=='default')document.documentElement.dataset.skin=skin;}catch(e){document.documentElement.classList.add('dark');}})()</script>
+<script>(function(){try{var fs=localStorage.getItem('hermes-font-size');if(fs&&fs!=='default')document.documentElement.dataset.fontSize=fs;}catch(e){}})()</script>
 <!-- theme-color: surfaces the active app chrome color to native status bars (Safari status bar, PWA, native WKWebView wrappers). Updated dynamically by boot.js when theme/skin changes. The light/dark default values match style.css :root --sidebar / :root.dark --sidebar. -->
 <meta name="theme-color" content="#FAF7F0" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#141425" media="(prefers-color-scheme: dark)">
@@ -70,8 +70,8 @@
 })()</script>
 <link rel="stylesheet" href="static/style.css?v=__WEBUI_VERSION__">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" integrity="sha384-LJcOxlx9IMbNXDqJ2axpfEQKkAYbFjJfhXexLfiRJhjDU81mzgkiQq8rkV0j6dVh" crossorigin="anonymous">
-  <!-- KaTeX math rendering CSS (loaded eagerly to prevent layout shift) -->
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.css" integrity="sha384-5TcZemv2l/9On385z///+d7MSYlvIEw9FuZTIdZ14vJLqWphw7e7ZPuOiCHJcFCP" crossorigin="anonymous">
+  <!-- KaTeX math rendering CSS (loaded eagerly from vendored assets to prevent font CSP noise) -->
+  <link rel="stylesheet" href="static/vendor/katex/0.16.22/katex.min.css">
   <!-- streaming-markdown: incremental DOM-building markdown parser for live streams -->
   <!-- Self-hosted from npm:streaming-markdown@0.2.15 — no CDN dependency.           -->
   <!-- sha384 of smd.min.js @0.2.15: sha384-T6r95ocN9t3W8tUK2Fa6FPaO7bJryyjyW0WCalrUnpgtm2qXr5xcN4vwPYEJ6vHa -->
@@ -206,7 +206,7 @@
           </button>
         </div>
       </div>
-      <div class="session-search sidebar-search"><svg class="sidebar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg><input id="sessionSearch" placeholder="Filter conversations..." data-i18n-placeholder="filter_conversations" oninput="filterSessions()" autocomplete="off"></div>
+      <div class="session-search sidebar-search"><div class="session-search-field"><svg class="sidebar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg><input id="sessionSearch" placeholder="Filter conversations..." data-i18n-placeholder="filter_conversations" oninput="filterSessions()" autocomplete="off"><button type="button" id="sessionSearchClear" class="session-search-clear has-tooltip has-tooltip--bottom-right" aria-label="Clear conversation filter" data-tooltip="Clear conversation filter" onclick="clearSessionSearch()" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div></div>
       <div class="session-list" id="sessionList"></div>
     </div>
     <!-- Tasks (cron) panel -->
@@ -749,6 +749,7 @@
             <div class="reasoning-option" data-effort="medium">Medium</div>
             <div class="reasoning-option" data-effort="high">High</div>
             <div class="reasoning-option" data-effort="xhigh">Extra High</div>
+            <div class="reasoning-option" data-effort="max">Max</div>
           </div>
           <div class="composer-toolsets-dropdown" id="composerToolsetsDropdown">
             <div class="toolsets-dropdown-desc" id="toolsetsDropdownDesc"></div>
@@ -1121,6 +1122,13 @@
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_voice_mode">Show the voice-mode button (audio waveform) next to the dictation mic. Lets you speak naturally — Hermes auto-sends after a pause and reads replies aloud. Requires a browser that supports both speech recognition and TTS.</div>
             </div>
             <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsRawAudio" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_raw_audio">Send raw audio instead of transcribing</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_raw_audio">Record and send the original audio file to the agent instead of converting it to text first. The agent can then transcribe it or process the raw audio (emotion, background noise, custom STT). Like Telegram's voice message behavior.</div>
+            </div>
+            <div class="settings-field">
               <label for="settingsTtsVoice" data-i18n="settings_label_tts_voice">Voice</label>
               <select id="settingsTtsVoice" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
                 <option value="">Default system voice</option>
@@ -1321,6 +1329,18 @@
             </div>
             <button class="sm-btn" id="btnDisableAuth" onclick="disableAuth()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:#e8a030;border-color:rgba(232,160,48,.3);display:none" data-i18n="disable_auth">Disable Auth</button>
             <button class="sm-btn" id="btnSignOut" onclick="signOut()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:var(--accent);border-color:rgba(233,69,96,.3);display:none" data-i18n="sign_out">Sign Out</button>
+            <div class="settings-field" id="shutdownServerBlock" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
+              <label data-i18n="settings_label_shutdown">Stop the Hermes WebUI server</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:8px" data-i18n="settings_desc_shutdown">Gracefully stops the local WebUI server. Useful if you launched via <code>./ctl.sh start</code> and want to stop without switching to a terminal. You'll need to relaunch the server (<code>./ctl.sh start</code> or the native app) before the WebUI is reachable again.</div>
+              <button class="sm-btn" id="btnShutdownServer" onclick="shutdownServer()" style="width:100%;padding:8px;font-weight:600;color:#e74c3c;border-color:rgba(231,76,60,.3)" data-i18n="settings_btn_shutdown">Stop server</button>
+            </div>
+            <div class="settings-field" id="passkeysSettingsBlock" style="display:none;margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
+              <label>Passkeys</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Register this browser or device for passwordless sign-in. Once at least one passkey exists, you can remove the password and sign in with passkeys only.</div>
+              <button class="sm-btn" id="btnRegisterPasskey" onclick="registerPasskey()" style="width:100%;padding:8px;font-weight:600">Add passkey</button>
+              <button class="sm-btn" id="btnGoPasswordless" onclick="goPasswordless()" style="display:none;margin-top:8px;width:100%;padding:8px;font-weight:600;color:#e8a030;border-color:rgba(232,160,48,.3)">Go passwordless</button>
+              <div id="passkeyList" style="margin-top:8px;font-size:12px;color:var(--muted)">No passkeys registered.</div>
+            </div>
             <div class="settings-field" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
               <label for="settingsDashboardMode">Official Hermes Dashboard</label>
               <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Show a nav-rail link when the official <code>hermes dashboard</code> is reachable. Public reverse-proxy URLs are stored as browser-only links and are never server-probed.</div>
