@@ -125,6 +125,7 @@ def _save_sessions(sessions: dict) -> None:
 
 # Active sessions: token -> expiry timestamp (persisted across restarts via STATE_DIR)
 _sessions = _load_sessions()
+_SESSIONS_LOCK = threading.Lock()
 
 # ── Login rate limiter ──────────────────────────────────────────────────────
 # Two parallel buckets: per-IP and per-username (issue #2). The per-username
@@ -234,6 +235,14 @@ def _record_login_attempt(ip: str, username: str | None = None) -> None:
         if username:
             _login_attempts_user.setdefault(username.lower(), []).append(now)
             _save_login_attempts_to(_LOGIN_ATTEMPTS_USER_FILE, _login_attempts_user)
+
+
+def _clear_login_attempts(ip: str) -> None:
+    """Clear failed login attempts after a successful login (thread-safe)."""
+    with _LOGIN_ATTEMPTS_LOCK:
+        if ip in _login_attempts:
+            _login_attempts.pop(ip, None)
+            _save_login_attempts(_login_attempts)
 
 
 def _load_key(filename: str) -> bytes:
@@ -475,8 +484,9 @@ def create_session(user_id: str | None = None) -> str:
     accepted for backwards compatibility with legacy single-password code
     paths and tests."""
     token = secrets.token_hex(32)
-    _sessions[token] = {'user_id': user_id, 'expiry': time.time() + _resolve_session_ttl()}
-    _save_sessions(_sessions)
+    with _SESSIONS_LOCK:
+        _sessions[token] = {'user_id': user_id, 'expiry': time.time() + _resolve_session_ttl()}
+        _save_sessions(_sessions)
     sig = hmac.new(_signing_key(), token.encode(), hashlib.sha256).hexdigest()
     return f"{token}.{sig}"
 
@@ -484,11 +494,12 @@ def create_session(user_id: str | None = None) -> str:
 def _prune_expired_sessions():
     """Remove all expired session entries to prevent unbounded memory growth."""
     now = time.time()
-    expired = [t for t, entry in _sessions.items() if now > _session_expiry(entry)]
-    if expired:
-        for token in expired:
-            _sessions.pop(token, None)
-        _save_sessions(_sessions)
+    with _SESSIONS_LOCK:
+        expired = [t for t, entry in _sessions.items() if now > _session_expiry(entry)]
+        if expired:
+            for token in expired:
+                _sessions.pop(token, None)
+            _save_sessions(_sessions)
 
 
 def verify_session(cookie_value: str) -> bool:
@@ -512,12 +523,14 @@ def _session_record_for_cookie(cookie_value):
     )
     if not valid:
         return None
-    entry = _sessions.get(token)
-    if entry is None:
-        return None
-    if time.time() > _session_expiry(entry):
-        _sessions.pop(token, None)
-        return None
+    with _SESSIONS_LOCK:
+        entry = _sessions.get(token)
+        if entry is None:
+            return None
+        if time.time() > _session_expiry(entry):
+            _sessions.pop(token, None)
+            _save_sessions(_sessions)
+            return None
     return (token, entry)
 
 
@@ -669,9 +682,10 @@ def invalidate_session(cookie_value) -> None:
     """Remove a session token."""
     if cookie_value and '.' in cookie_value:
         token = cookie_value.rsplit('.', 1)[0]
-        if token in _sessions:
-            _sessions.pop(token, None)
-            _save_sessions(_sessions)
+        with _SESSIONS_LOCK:
+            if token in _sessions:
+                _sessions.pop(token, None)
+                _save_sessions(_sessions)
 
 
 def invalidate_sessions_for_user(user_id: str) -> int:
