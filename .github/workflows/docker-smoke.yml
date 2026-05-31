@@ -10,10 +10,12 @@ name: Docker smoke
 #
 # Scope (intentionally small for v1):
 #   - 3 compose variants (single, two-container, three-container)
-#   - For multi-container variants, rebuild the local Dockerfile and re-tag
-#     it as ghcr.io/nesquena/hermes-webui:latest BEFORE `up` so the PR's
-#     changes to docker_init.bash / Dockerfile actually execute. Without this
-#     the multi-container variants would pull the previous release from GHCR
+#   - For multi-container variants, the image is built from the PR's local
+#     Dockerfile (via the build-image job + GHA layer cache) and tagged
+#     ghcr.io/thecouchcoder-com/hermes-webui:latest — the name those compose
+#     files reference — BEFORE `up`, so the PR's changes to
+#     docker_init.bash / Dockerfile actually execute. Without this the
+#     multi-container variants would pull the previous release from GHCR
 #     and silently miss every PR-level regression.
 #   - Pre-flight `docker compose config` job to catch schema/interpolation drift.
 #   - Reaper before each smoke run + trap on EXIT for orphan defence.
@@ -83,7 +85,7 @@ jobs:
         with:
           context: .
           load: true
-          tags: ghcr.io/nesquena/hermes-webui:latest
+          tags: ghcr.io/thecouchcoder-com/hermes-webui:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -107,12 +109,16 @@ jobs:
       # Restore the cached Docker image from the build-image job.
       # Read-only: the build-image job already populated the GHA cache, so the
       # smoke variants only need cache-from (no redundant cache-to re-export).
+      # This builds and tags ghcr.io/thecouchcoder-com/hermes-webui:latest —
+      # the image the multi-container compose files reference — straight from
+      # the layer cache, so the PR's Dockerfile changes are exercised without a
+      # from-scratch rebuild on every variant.
       - name: Restore Docker image from cache
         uses: docker/build-push-action@v6
         with:
           context: .
           load: true
-          tags: ghcr.io/nesquena/hermes-webui:latest
+          tags: ghcr.io/thecouchcoder-com/hermes-webui:latest
           cache-from: type=gha
 
       - name: Resolve compose file + project name
@@ -152,16 +158,6 @@ jobs:
           for n in $(docker network ls --format '{{.Name}}' | grep "^hermes-smoke-" || true); do
             docker network rm "$n" || true
           done
-
-      - name: Build local Dockerfile
-        # We always build the local Dockerfile so the PR's changes are tested,
-        # even on the multi-container variants whose compose files reference
-        # ghcr.io/thecouchcoder-com/hermes-webui:latest. Without this retag,
-        # multi-container smoke runs would try to pull from GHCR (we don't
-        # publish a `:latest` tag) and fail before the PR's code is exercised.
-        run: |
-          set -euo pipefail
-          docker build -t ghcr.io/thecouchcoder-com/hermes-webui:latest .
 
       - name: Prepare ephemeral host paths
         id: paths
