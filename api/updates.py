@@ -531,6 +531,14 @@ def _head_contains_ref(path, ref):
     return bool(ok)
 
 
+def _can_fast_forward_to(path, ref):
+    """Return True when ``ref`` is a descendant of HEAD (``git pull --ff-only`` can reach it)."""
+    if not ref:
+        return False
+    _, ok = _run_git(['merge-base', '--is-ancestor', 'HEAD', ref], path)
+    return bool(ok)
+
+
 def _select_apply_compare_ref(path):
     """Return the same remote ref family that the update check reports.
 
@@ -550,6 +558,7 @@ def _select_apply_compare_ref(path):
     if tags:
         latest_tag = tags[0]
         current_tag = _current_release_tag(path)
+<<<<<<< HEAD
         # Mirror the check-side fall-through for sync-merged upstream tags:
         # if HEAD's nearest tag isn't origin-published, "advance to the
         # fork's latest tag" would be a downgrade. Drop to the branch ref
@@ -582,6 +591,26 @@ def _select_apply_compare_ref(path):
                 or (behind > 0 and _head_contains_ref(path, latest_tag))
             ):
                 return latest_tag
+=======
+        behind = _release_gap(tags, current_tag, latest_tag)
+        # Mirror the check side exactly: fall through to the branch comparison
+        # whenever the checkout has already moved past the release tag that the
+        # banner would otherwise advertise. The common case is behind == 0 and
+        # HEAD is past its nearest tag, but main-tracking checkouts can also
+        # have behind > 0 after fetching a newer tag that HEAD already contains
+        # (#3140). In both cases applying the tag would no-op, move backwards,
+        # or fail fast-forward; branch comparison is the truthful update path.
+        if (
+            behind == 0 and _head_is_past_latest_tag(path, current_tag)
+        ) or (
+            behind > 0 and _head_contains_ref(path, latest_tag)
+        ) or (
+            behind > 0 and not _can_fast_forward_to(path, latest_tag)
+        ):
+            pass
+        else:
+            return latest_tag
+>>>>>>> v0.51.186
 
     upstream, ok = _run_git(['rev-parse', '--abbrev-ref', '@{upstream}'], path)
     if ok and upstream:
@@ -625,6 +654,12 @@ def _check_repo_release(path, name):
     # Fall through to the branch check so the banner compares against the
     # configured upstream instead of advertising a tag that cannot fast-forward.
     if behind > 0 and _head_contains_ref(path, latest_tag):
+        return None
+
+    # Patch releases can land on a side branch while day-to-day installs track
+    # main past an older tag. A positive tag-name gap then advertises an update
+    # that `git pull --ff-only <latest-tag>` cannot reach.
+    if behind > 0 and not _can_fast_forward_to(path, latest_tag):
         return None
 
     remote_url, _ = _run_git(['remote', 'get-url', 'origin'], path)
