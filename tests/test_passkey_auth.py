@@ -1,6 +1,9 @@
 import base64
 import json
 import hashlib
+import pytest
+
+pytest.importorskip("cryptography")
 
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
