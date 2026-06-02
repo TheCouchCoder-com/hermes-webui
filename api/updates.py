@@ -531,6 +531,14 @@ def _head_contains_ref(path, ref):
     return bool(ok)
 
 
+def _can_fast_forward_to(path, ref):
+    """Return True when ``ref`` is a descendant of HEAD (``git pull --ff-only`` can reach it)."""
+    if not ref:
+        return False
+    _, ok = _run_git(['merge-base', '--is-ancestor', 'HEAD', ref], path)
+    return bool(ok)
+
+
 def _select_apply_compare_ref(path):
     """Return the same remote ref family that the update check reports.
 
@@ -569,17 +577,24 @@ def _select_apply_compare_ref(path):
             # name they already include): applying it would move backwards or
             # fail fast-forward, so the branch comparison is the truthful path.
             #
+            # Case (#3257) — behind > 0 but `git pull --ff-only <latest-tag>`
+            # cannot fast-forward to it (the newest tag lives on a divergent
+            # side branch while this checkout tracks main past an older tag).
+            # Applying it would fail fast-forward, so fall through to branch.
+            #
             # Otherwise the tag is correct — including case D, where HEAD is on
             # an older release tag with commits on top AND a newer tag exists
-            # that HEAD does NOT contain (behind > 0, not an ancestor): the user
-            # is genuinely behind the latest release and should advance to it.
-            # Pre-#2855 the apply path only consulted `latest_tag` without the
-            # `behind`/`current_tag` predicate, so case D fell through to
-            # `origin/<branch>` and the pull landed past the advertised tag.
-            # See #2846, Opus pre-release review for #2855, and #3140.
+            # that HEAD does NOT contain (behind > 0, not an ancestor) and the
+            # checkout CAN fast-forward to it: the user is genuinely behind the
+            # latest release and should advance to it. Pre-#2855 the apply path
+            # only consulted `latest_tag` without the `behind`/`current_tag`
+            # predicate, so case D fell through to `origin/<branch>` and the
+            # pull landed past the advertised tag. See #2846, Opus pre-release
+            # review for #2855, #3140, and #3257.
             if not (
                 (behind == 0 and _head_is_past_latest_tag(path, current_tag))
                 or (behind > 0 and _head_contains_ref(path, latest_tag))
+                or (behind > 0 and not _can_fast_forward_to(path, latest_tag))
             ):
                 return latest_tag
 
@@ -625,6 +640,12 @@ def _check_repo_release(path, name):
     # Fall through to the branch check so the banner compares against the
     # configured upstream instead of advertising a tag that cannot fast-forward.
     if behind > 0 and _head_contains_ref(path, latest_tag):
+        return None
+
+    # Patch releases can land on a side branch while day-to-day installs track
+    # main past an older tag. A positive tag-name gap then advertises an update
+    # that `git pull --ff-only <latest-tag>` cannot reach.
+    if behind > 0 and not _can_fast_forward_to(path, latest_tag):
         return None
 
     remote_url, _ = _run_git(['remote', 'get-url', 'origin'], path)
