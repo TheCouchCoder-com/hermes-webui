@@ -558,7 +558,6 @@ def _select_apply_compare_ref(path):
     if tags:
         latest_tag = tags[0]
         current_tag = _current_release_tag(path)
-<<<<<<< HEAD
         # Mirror the check-side fall-through for sync-merged upstream tags:
         # if HEAD's nearest tag isn't origin-published, "advance to the
         # fork's latest tag" would be a downgrade. Drop to the branch ref
@@ -578,39 +577,26 @@ def _select_apply_compare_ref(path):
             # name they already include): applying it would move backwards or
             # fail fast-forward, so the branch comparison is the truthful path.
             #
+            # Case (#3257) — behind > 0 but `git pull --ff-only <latest-tag>`
+            # cannot fast-forward to it (the newest tag lives on a divergent
+            # side branch while this checkout tracks main past an older tag).
+            # Applying it would fail fast-forward, so fall through to branch.
+            #
             # Otherwise the tag is correct — including case D, where HEAD is on
             # an older release tag with commits on top AND a newer tag exists
-            # that HEAD does NOT contain (behind > 0, not an ancestor): the user
-            # is genuinely behind the latest release and should advance to it.
-            # Pre-#2855 the apply path only consulted `latest_tag` without the
-            # `behind`/`current_tag` predicate, so case D fell through to
-            # `origin/<branch>` and the pull landed past the advertised tag.
-            # See #2846, Opus pre-release review for #2855, and #3140.
+            # that HEAD does NOT contain (behind > 0, not an ancestor) and the
+            # checkout CAN fast-forward to it: the user is genuinely behind the
+            # latest release and should advance to it. Pre-#2855 the apply path
+            # only consulted `latest_tag` without the `behind`/`current_tag`
+            # predicate, so case D fell through to `origin/<branch>` and the
+            # pull landed past the advertised tag. See #2846, Opus pre-release
+            # review for #2855, #3140, and #3257.
             if not (
                 (behind == 0 and _head_is_past_latest_tag(path, current_tag))
                 or (behind > 0 and _head_contains_ref(path, latest_tag))
+                or (behind > 0 and not _can_fast_forward_to(path, latest_tag))
             ):
                 return latest_tag
-=======
-        behind = _release_gap(tags, current_tag, latest_tag)
-        # Mirror the check side exactly: fall through to the branch comparison
-        # whenever the checkout has already moved past the release tag that the
-        # banner would otherwise advertise. The common case is behind == 0 and
-        # HEAD is past its nearest tag, but main-tracking checkouts can also
-        # have behind > 0 after fetching a newer tag that HEAD already contains
-        # (#3140). In both cases applying the tag would no-op, move backwards,
-        # or fail fast-forward; branch comparison is the truthful update path.
-        if (
-            behind == 0 and _head_is_past_latest_tag(path, current_tag)
-        ) or (
-            behind > 0 and _head_contains_ref(path, latest_tag)
-        ) or (
-            behind > 0 and not _can_fast_forward_to(path, latest_tag)
-        ):
-            pass
-        else:
-            return latest_tag
->>>>>>> v0.51.186
 
     upstream, ok = _run_git(['rev-parse', '--abbrev-ref', '@{upstream}'], path)
     if ok and upstream:

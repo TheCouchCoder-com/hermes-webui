@@ -702,7 +702,6 @@ def test_select_apply_compare_ref_case_d_older_tag_with_commits_and_newer_tag_ex
     )
 
 
-<<<<<<< HEAD
 # ---------------------------------------------------------------------------
 # Fork update check (Option B): the release-tag path must restrict to tags
 # origin actually publishes. Local-only tags — inherited from a prior
@@ -783,21 +782,11 @@ def test_check_repo_release_falls_through_for_sync_merged_upstream_tag(tmp_path)
     reported "1 update available, latest=v0.51.130" — a *downgrade*. Post-fix:
     _check_repo_release returns None so the branch check runs and reports an
     honest commits-behind count against origin/master.
-=======
-def test_check_repo_release_falls_through_when_latest_tag_is_not_ff_reachable(tmp_path):
-    """Main-tracking HEAD past an older tag cannot ff to a patch release tag.
-
-    Repro: installer puts agent on main at v2026.5.29+N-g..., maintainers cut
-    v2026.5.29.2 from a side branch. Tag gap is positive, but
-    ``git pull --ff-only v2026.5.29.2`` fails with diverging branches.
-    The release check must fall through to the upstream branch comparison.
->>>>>>> v0.51.186
     """
     (tmp_path / '.git').mkdir()
 
     def fake_git(args, cwd, timeout=10):
         if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
-<<<<<<< HEAD
             return 'v0.51.135\nv0.51.130', True
         if args == ['ls-remote', '--tags', '--refs', 'origin', 'v*']:
             return 'aaa1\trefs/tags/v0.51.130', True  # only fork tag published
@@ -815,10 +804,25 @@ def test_check_repo_release_falls_through_when_latest_tag_is_not_ff_reachable(tm
     )
 
 
-def test_select_apply_compare_ref_falls_through_for_sync_merged_upstream_tag(tmp_path):
-    """Apply side must mirror the check-side fall-through to avoid silent downgrades."""
-=======
+def test_check_repo_release_falls_through_when_latest_tag_is_not_ff_reachable(tmp_path):
+    """Main-tracking HEAD past an older tag cannot ff to a patch release tag.
+
+    Repro: installer puts agent on main at v2026.5.29+N-g..., maintainers cut
+    v2026.5.29.2 from a side branch. Tag gap is positive, but
+    ``git pull --ff-only v2026.5.29.2`` fails with diverging branches.
+    The release check must fall through to the upstream branch comparison.
+    """
+    (tmp_path / '.git').mkdir()
+
+    def fake_git(args, cwd, timeout=10):
+        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
             return 'v2026.5.29.2\nv2026.5.29', True
+        # The fork restricts the release channel to origin-published tags, so
+        # _check_repo_release queries ls-remote before doing the ff-reachability
+        # math. Publish both side-branch tags so they survive the filter and the
+        # ff-only fall-through (#3257) is the predicate actually under test.
+        if args == ['ls-remote', '--tags', '--refs', 'origin', 'v*']:
+            return 'aaa1\trefs/tags/v2026.5.29.2\nbbb2\trefs/tags/v2026.5.29', True
         if args == ['describe', '--tags', '--abbrev=0']:
             return 'v2026.5.29', True
         if args == ['describe', '--tags', '--always']:
@@ -835,14 +839,12 @@ def test_select_apply_compare_ref_falls_through_for_sync_merged_upstream_tag(tmp
     assert result is None
 
 
-def test_select_apply_compare_ref_falls_through_when_latest_tag_is_not_ff_reachable(tmp_path):
-    """Apply path mirrors the ff-unreachable release-tag fall-through."""
->>>>>>> v0.51.186
+def test_select_apply_compare_ref_falls_through_for_sync_merged_upstream_tag(tmp_path):
+    """Apply side must mirror the check-side fall-through to avoid silent downgrades."""
     (tmp_path / '.git').mkdir()
 
     def fake_git(args, cwd, timeout=10):
         if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
-<<<<<<< HEAD
             return 'v0.51.135\nv0.51.130', True
         if args == ['ls-remote', '--tags', '--refs', 'origin', 'v*']:
             return 'aaa1\trefs/tags/v0.51.130', True
@@ -850,8 +852,30 @@ def test_select_apply_compare_ref_falls_through_when_latest_tag_is_not_ff_reacha
             return 'v0.51.135', True
         if args == ['rev-parse', '--abbrev-ref', '@{upstream}']:
             return 'origin/master', True
-=======
+        raise AssertionError(f'unexpected git args: {args!r}')
+
+    with patch.object(updates, '_run_git', side_effect=fake_git):
+        ref = updates._select_apply_compare_ref(tmp_path)
+
+    assert ref == 'origin/master', (
+        'Apply path must fall through to origin/<branch> when HEAD sits on a '
+        'sync-merged upstream tag — advancing to the fork\'s older tag would '
+        'be a downgrade.'
+    )
+
+
+def test_select_apply_compare_ref_falls_through_when_latest_tag_is_not_ff_reachable(tmp_path):
+    """Apply path mirrors the ff-unreachable release-tag fall-through."""
+    (tmp_path / '.git').mkdir()
+
+    def fake_git(args, cwd, timeout=10):
+        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
             return 'v2026.5.29.2\nv2026.5.29', True
+        # See the check-side test above: the fork filters the release channel to
+        # origin-published tags, so publish both so the ff-only fall-through is
+        # exercised rather than the origin-tag filter short-circuiting first.
+        if args == ['ls-remote', '--tags', '--refs', 'origin', 'v*']:
+            return 'aaa1\trefs/tags/v2026.5.29.2\nbbb2\trefs/tags/v2026.5.29', True
         if args == ['describe', '--tags', '--abbrev=0']:
             return 'v2026.5.29', True
         if args == ['describe', '--tags', '--always']:
@@ -862,18 +886,12 @@ def test_select_apply_compare_ref_falls_through_when_latest_tag_is_not_ff_reacha
             return '', False
         if args == ['rev-parse', '--abbrev-ref', '@{upstream}']:
             return 'origin/main', True
->>>>>>> v0.51.186
         raise AssertionError(f'unexpected git args: {args!r}')
 
     with patch.object(updates, '_run_git', side_effect=fake_git):
         ref = updates._select_apply_compare_ref(tmp_path)
 
-<<<<<<< HEAD
-    assert ref == 'origin/master', (
-        'Apply path must fall through to origin/<branch> when HEAD sits on a '
-        'sync-merged upstream tag — advancing to the fork\'s older tag would '
-        'be a downgrade.'
-    )
+    assert ref == 'origin/main'
 
 
 def test_origin_release_tags_returns_none_on_ls_remote_failure(tmp_path):
@@ -934,7 +952,4 @@ def test_check_repo_returns_unavailable_when_path_is_none():
     assert info['behind'] is None
     assert info['unavailable'] is True
     assert info['reason'] == 'not_a_git_checkout'
-=======
-    assert ref == 'origin/main'
->>>>>>> v0.51.186
 
