@@ -67,20 +67,27 @@ at `4edcb68` (~v0.51.10); recurring sync is automated by
 
 ### Cadence and mechanism
 
-- The workflow runs Mondays 06:00 UTC (`schedule: cron`) and on demand
+- The workflow runs daily 06:00 UTC (`schedule: cron`) and on demand
   (`workflow_dispatch`, optional `target_tag` input, optional `mode`
-  input — `next` (default) or `latest`).
-- Scheduled runs always use `next`: pick the next un-merged upstream
-  `v*` tag, create `sync/upstream-<tag>`, run `git merge --no-ff`, then
-  `pytest`. Manual dispatch can set `mode: latest` to skip ahead to the
-  newest un-merged tag in a single merge — use this only to catch up on
-  a backlog, and expect bigger conflicts (the stage-by-stage policy
-  below still applies to the default path).
+  input — `next` (default) or `latest`). The daily cadence is paired
+  with the daily babysitter routine so the fork stays close to upstream.
+- Scheduled runs default to `mode: latest`: jump straight to the newest
+  un-merged upstream `v*` tag, create `sync/upstream-<tag>`, run
+  `git merge --no-ff`, then `pytest`. This keeps the fork no more than a
+  day behind upstream's tip instead of crawling one tag at a time (we
+  were behind 24/7). Expect bigger conflicts than a single-tag merge —
+  the babysitter routine is mandated to resolve them and iterate to green
+  (see *Auto-resolve policy*). Manual dispatch can set `mode: next` to
+  advance exactly one un-merged tag when you want a small, bisectable
+  merge to investigate a specific tag.
 - **Clean merge + green tests** → ready-for-review PR with label
   `sync-upstream`.
-- **Conflicts or red tests** → draft PR with the partial state pushed
-  (conflict markers are committed so a human or Claude can resolve them
-  on the branch).
+- **Conflicts or red tests** → the workflow pushes the partial state to a
+  draft PR (conflict markers committed) and the babysitter routine then
+  picks it up to resolve. The babysitter's mandate is to **make the merge
+  happen** — attempt a resolution, validate, iterate to green, and (per
+  the *Auto-resolve policy* below) merge it — escalating to a human only
+  for the narrow set of genuine judgment calls listed there.
 
 ### Merging policy (do not deviate)
 
@@ -89,9 +96,15 @@ at `4edcb68` (~v0.51.10); recurring sync is automated by
   logic the workflow depends on.
 - **Never squash-merge** a sync PR. Keep the merge commit so the next
   sync run sees the correct merge-base.
-- Stage-by-stage: do not batch many tags into one merge unless the
-  intermediate tags are pure docs/changelog. Per-tag merges keep
-  conflicts small and bisectable.
+- **Catch up to the latest tag, not the next one.** The default is a
+  single `--no-ff` merge of upstream's newest un-merged tag (`mode:
+  latest`), because the fork was perpetually behind merging one tag a
+  day. A single merge to the newest tag is fine — `git merge` resolves
+  the cumulative diff, and the merge-base stays correct because we still
+  record one merge commit against an upstream tag that is on
+  `upstream/master`'s history (the `git tag --no-merged master` logic
+  only needs that, not per-tag merges). Use `mode: next` (one tag) only
+  to isolate a specific tag's conflicts while investigating.
 
 ### Conflict playbook (hot files)
 
@@ -121,66 +134,116 @@ both churn. When resolving:
   upstream's `## [vX.Y.Z]` block above any of our fork-only entries that
   follow it chronologically. Don't drop upstream's release notes.
 
-### Auto-resolve tiers
+### Auto-resolve policy (the babysitter must really try)
 
-Conflicts on a sync PR fall into three tiers. The sync babysitter (Claude
-routine) follows these rules; humans should follow the same logic.
+The sync babysitter (Claude routine) exists so the fork stays in sync
+with upstream **without** the maintainer hand-resolving every conflict.
+Its standing mandate: **make the merge happen.** Attempt a best-effort
+resolution on every conflict, validate it with the full test suite,
+**iterate** when something is off, and escalate to a human **only** when
+the right resolution is genuinely a judgment call the babysitter cannot
+make. "This file isn't on a list" is *not* a reason to escalate — only
+the hard-deny list and the genuine-ambiguity cases below are.
 
-**Tier 1 — union-both auto-resolve.** Conflicts are almost always
-additive (both sides added different entries to a list, doc, or
-changelog). Generic rule: **keep all lines/entries from both sides,
-preserving order where it matters**. No per-file judgement required.
+The default posture is **attempt, not escalate.** Work the problem before
+handing it back.
 
-Files: `.gitignore`, `CHANGELOG.md`, `ROADMAP.md`, `TESTING.md`,
-`README.md`, `docs/**/*.md`.
+#### What to attempt (almost everything)
 
-Exception inside Tier 1: if a Tier 1 file has a *structural* conflict
-(not just additive — e.g. upstream rewrote a section we also rewrote),
-treat it as Tier 3 and escalate.
+Attempt a resolution for conflicts in **any** file except the hard-deny
+list below. This covers all product code, tests, docs, and config —
+whether or not the file is named in the hot-file playbook.
 
-**Tier 2 — playbook auto-resolve.** Real semantic conflicts where the
-per-file playbook above (hot files: `api/auth.py`, `static/login.js`,
-etc.) tells Claude what to keep. Apply the playbook; validate with
-`pytest`. Files: `api/auth.py`, `api/routes.py`, `api/helpers.py`,
-`static/login.js`, `static/panels.js`, `static/ui.js`,
-`static/index.html`, `static/boot.js`, `server.py`.
+Resolution strategy, in order of preference:
 
-**Tier 2b — `tests/**` with mandatory green-suite gate.** Test-file
-conflicts are usually additive (both sides added unrelated test
-classes/functions to the same file). Auto-resolve rule: **union-both,
-keeping all test classes and functions from both sides**. Do not edit
-test bodies; only remove the conflict markers.
+1. **Union / additive** — the common case. Both sides added different
+   entries to a list, dict, function, doc, or changelog. **Keep all
+   entries from both sides**, preserving order where it matters. Applies
+   to docs (`CHANGELOG.md`, `README.md`, `ROADMAP.md`, `TESTING.md`,
+   `docs/**`, `.gitignore`) and to most code/test conflicts.
+2. **Playbook semantic merge** — for the hot files with known
+   fork-vs-upstream tension (`api/auth.py`, `static/login.js`,
+   `static/panels.js`, `api/routes.py`, `static/ui.js`, etc.), apply the
+   per-file guidance in the *Conflict playbook* above to decide what to
+   keep from each side.
+3. **Best-effort semantic merge** — for any other code file, reconstruct
+   the intent of both changes and combine them so neither side's feature
+   is lost. Prefer "ours" for fork-specific behavior (admin/RBAC,
+   multi-user, our UI affordances) and "theirs" for new upstream
+   features, then reconcile.
 
-After resolving, validation is **mandatory and stricter than other
-tiers** — a green resolution is not enough; the resulting suite must
-also be green:
+After resolving any `/api/*` route conflict, **audit new upstream routes
+for whether they need an RBAC gate** (`require_permission(...)` in
+`api/helpers.py`), per the playbook.
 
-1. Run `pytest <conflicted-test-file> -v` and confirm every test passes.
-2. Run the full suite: `pytest tests/ -q --timeout=60`.
-3. **If any test fails — including upstream-added tests that fail
-   against our fork — escalate to Tier 3.** Do not delete, skip, or
-   "fix" failing upstream tests on your own; a fork-vs-upstream test
-   failure usually means upstream tests a feature we deliberately
-   rejected in an earlier sync (see PR #22 / v0.51.59: upstream's
-   `TestUpdateCompareSource` tests assert the single-banner redesign
-   that PR #21 explicitly discarded). That judgment call is the
-   maintainer's, not the babysitter's.
+#### Iterate to green (don't escalate on the first red)
 
-When escalating from Tier 2b, the PR comment must list the failing
-test names and link to the prior sync merge commit that rejected the
-related production code, so the maintainer has the context to decide
-whether to skip the test, port the feature, or drop the test.
+Validation is mandatory and the resolution is not done until the suite is
+green:
 
-**Tier 3 — always escalate.** Files where being wrong is
-shipping-breaking, security-breaking, or self-corrupting. Never
-auto-resolve. Open a PR comment summarizing the conflict and pinging the
-maintainers.
+1. Run `pytest tests/ -q --timeout=60` — full suite. (If a specific test
+   file was conflicted, also run it with `-v` first for a fast signal.)
+2. If `api/auth.py` was touched, also run the issue-#2 load-bearing
+   suites (see *Validation after a sync merge*).
+3. **If tests are red, fix the merge and re-run — up to ~3 attempts.**
+   A red suite after a merge usually means the resolution dropped a
+   change or our code needs a small adaptation to upstream's new shape.
+   Legitimate moves: re-resolve the conflict differently; adapt our
+   production code to upstream's changed API/signature; port the small
+   upstream change our code now depends on. Re-run the full suite after
+   each attempt.
 
-Files: `CLAUDE.md` (load-bearing meta-config — corrupting this corrupts
-all future sync runs), `.github/workflows/**`, `Dockerfile`,
+Only after a genuine attempt to reach green should escalation be
+considered, and only for the cases below.
+
+#### When to escalate (genuine judgment calls only)
+
+Escalate — push the partial state to the draft PR and post a PR comment
+explaining the blocker — **only** when one of these is true:
+
+- **Hard-deny file conflicted.** A conflict touches a file on the
+  hard-deny list below. These are shipping-, security-, or
+  self-corrupting if resolved wrong, so the babysitter never auto-resolves
+  them.
+- **Deliberately-rejected upstream feature.** Reaching green would
+  require **deleting, skipping, or neutering an upstream-added test**, or
+  reverting a fork decision. This almost always means upstream tests a
+  feature the fork deliberately rejected in an earlier sync (e.g. PR #22 /
+  v0.51.59: upstream's `TestUpdateCompareSource` asserts the single-banner
+  redesign that PR #21 discarded). Whether to skip the test, port the
+  feature, or drop the test is the **maintainer's** call. The PR comment
+  must list the failing test names and link the prior sync merge commit
+  that rejected the related code.
+- **Irreducible ambiguity.** After a real attempt (including the iterate
+  loop), the babysitter cannot determine the correct behavior — both
+  resolutions are plausible and produce materially different runtime
+  behavior, and no test disambiguates. Summarize the two options in the
+  PR comment.
+
+If none of these hold, **do not escalate** — finish the resolution.
+
+#### Hard-deny list (always escalate, never auto-resolve)
+
+`CLAUDE.md` (load-bearing meta-config — corrupting this corrupts all
+future sync runs), `.github/workflows/**`, `Dockerfile`,
 `docker-compose*.yml`, `requirements*.txt`, `setup.py`, `pyproject.toml`,
-`.env*`, anything under `secrets/` or matching `*key*`/`*token*`, and
-**any file not explicitly named in Tier 1, Tier 2, or Tier 2b**.
+`.env*`, anything under `secrets/` or matching `*key*`/`*token*`.
+
+Note: upstream edits to `.github/workflows/**` that arrive as a clean
+merge (no conflict) are **not** an escalation — the sync workflow already
+drops them automatically (the fork runs its own CI; see
+`sync-upstream.yml`). The hard-deny entry is about *conflicts* in those
+files, which need a human.
+
+#### Auto-merge when green
+
+When the merge is clean (or was cleanly auto-resolved per the policy
+above) **and** the full CI on the PR is green, the babysitter **merges
+the PR itself** — with a **merge commit** (`gh pr merge --merge`, never
+`--squash`, never `--rebase`), then deletes the merged branch. Keeping the
+merge commit preserves the merge-base the next sync run depends on. If CI
+is not green, or the resolution required escalation, leave the PR for the
+maintainer and do not merge.
 
 ### Validation after a sync merge
 
