@@ -134,6 +134,47 @@ jobs:
           fi
           exit 0
 
+      # The default GITHUB_TOKEN cannot push commits that create or modify any file
+      # under .github/workflows/ (GitHub rejects the push with "refusing to allow a
+      # GitHub App to create or update workflow ... without `workflows` permission").
+      # This fork runs its own CI and deliberately does not track upstream's workflow
+      # changes, so we drop any upstream edits to .github/workflows/* and restore our
+      # master version, folding that into the merge commit. Without this, every sync
+      # that touches an upstream workflow file fails at the push step (e.g. v0.51.189
+      # adds a ruff lint job to .github/workflows/tests.yml). The drop is logged and
+      # surfaced in the PR body so it is never silent.
+      - name: Drop upstream .github/workflows changes (token cannot push them)
+        if: steps.merge.outputs.merge_status == 'clean' || steps.merge.outputs.merge_status == 'conflict'
+        id: workflow_guard
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.pick.outputs.tag }}"
+          CHANGED=$(git diff --name-only master HEAD -- .github/workflows/ || true)
+          if [ -z "$CHANGED" ]; then
+            echo "No upstream changes to .github/workflows/ — nothing to drop."
+            echo "dropped=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Restoring our master version of these workflow files:"
+          echo "$CHANGED"
+          # Restore each changed/added workflow file to master's content (or remove
+          # any workflow file upstream added that does not exist on master).
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            if git cat-file -e "master:$f" 2>/dev/null; then
+              git checkout master -- "$f"
+            else
+              git rm -f --ignore-unmatch "$f" >/dev/null
+            fi
+          done <<< "$CHANGED"
+          git add -A .github/workflows/
+          # Fold the revert into the existing merge commit so the branch tree has no
+          # workflow-file delta vs master and the push is accepted.
+          git commit --amend --no-edit
+          DROPPED=$(echo "$CHANGED" | tr '\n' ',' | sed 's/,$//')
+          echo "dropped=$DROPPED" >> "$GITHUB_OUTPUT"
+          echo "::notice ::Dropped upstream changes to: $DROPPED (fork does not track upstream CI workflows)"
+
       - name: Set up Python (only if merge applied cleanly)
         if: steps.merge.outputs.merge_status == 'clean'
         uses: actions/setup-python@v5
@@ -165,6 +206,7 @@ jobs:
           PR_MERGE_STATUS: ${{ steps.merge.outputs.merge_status }}
           PR_TESTS_STATUS: ${{ steps.tests.outputs.tests_status || 'skipped' }}
           PR_CONFLICTS: ${{ steps.merge.outputs.conflicts }}
+          PR_DROPPED_WORKFLOWS: ${{ steps.workflow_guard.outputs.dropped }}
         run: |
           set -euo pipefail
           if [ "$PR_MERGE_STATUS" = "clean" ] && [ "$PR_TESTS_STATUS" = "0" ]; then
@@ -207,6 +249,14 @@ jobs:
             printf '%s' "$STATE_HEADER"
             printf '%b\n\n' "$REASON"
             printf 'See `CLAUDE.md` → *Syncing with upstream* for the conflict playbook.\n\n'
+            if [ -n "$PR_DROPPED_WORKFLOWS" ]; then
+              printf '### ⚠️ Dropped upstream workflow changes\n'
+              printf 'The default `GITHUB_TOKEN` cannot push changes under `.github/workflows/`, and this\n'
+              printf 'fork runs its own CI rather than tracking upstream'"'"'s. These upstream edits were\n'
+              printf 'reverted to our `master` version and excluded from this PR:\n'
+              printf -- '- `%s`\n\n' "$PR_DROPPED_WORKFLOWS"
+              printf 'If any of these changes are wanted, port them in a separate PR.\n\n'
+            fi
             printf '### Validation\n'
             printf -- '- Merge: `%s`\n' "$PR_MERGE_STATUS"
             printf -- '- Tests: `%s` (0 = pass; `skipped` = not run because merge had conflicts)\n\n' "$PR_TESTS_STATUS"
