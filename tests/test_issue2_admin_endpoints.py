@@ -228,8 +228,10 @@ def test_delete_user_revokes_sessions():
 
 
 def test_delete_self_is_blocked():
+    # The path passed here is a placeholder — the real self-delete path is built
+    # below from the created admin's id and set on the handler before dispatch.
     admin, h = _admin_handler(
-        path=f'/api/admin/users/{admin["id"]}' if False else '/PLACEHOLDER',
+        path='/api/admin/users/__placeholder__',
         method='DELETE', body={},
     )
     parsed = _up.urlparse(f'/api/admin/users/{admin["id"]}')
