@@ -1,16 +1,19 @@
 name: Sync Upstream
 
-# Walk forward through nesquena/hermes-webui tags one stage at a time.
+# Catch the fork up to nesquena/hermes-webui in one merge per run.
 # - Runs daily 06:00 UTC, plus manual dispatch. Daily cadence paired with
-#   the daily Claude conflict-resolution routine keeps the fork close to
-#   upstream; weekly was too slow given upstream's ~3-tag/week pace.
-# - Scheduled runs always pick the next un-merged upstream `v*` tag
-#   (stage-by-stage merging is the documented policy — see CLAUDE.md).
-# - Manual dispatch can opt into `mode: latest` to skip ahead to the
-#   newest upstream tag in one merge, for catching up on a backlog.
+#   the daily Claude babysitter routine keeps the fork close to upstream;
+#   upstream ships ~3 tags/week, so one-tag-a-day fell permanently behind.
+# - Scheduled runs default to `mode: latest`: jump straight to the newest
+#   un-merged upstream `v*` tag in a single merge, so the fork is never
+#   more than a day behind upstream's tip. The capable babysitter routine
+#   resolves the (larger) conflicts and iterates to green — see CLAUDE.md.
+# - Manual dispatch can opt into `mode: next` to advance exactly one
+#   un-merged tag (smaller, bisectable merge — use when investigating a
+#   specific tag's conflicts in isolation).
 # - If the merge applies cleanly AND tests pass, opens a ready-for-review
-#   PR. Otherwise opens a draft PR with the conflict / failure state so a
-#   human (or Claude) can resolve it.
+#   PR. Otherwise opens a draft PR with the conflict / failure state for
+#   the babysitter routine (or a human) to resolve on the branch.
 #
 # This workflow only runs on the fork (TheCouchCoder-com/hermes-webui),
 # matching the guard pattern used in release.yml.
@@ -25,13 +28,13 @@ on:
         required: false
         type: string
       mode:
-        description: 'Tag selection when `target_tag` is blank. `next` = next un-merged tag (default, stage-by-stage). `latest` = newest upstream tag, skipping intermediates.'
+        description: 'Tag selection when `target_tag` is blank. `latest` = newest un-merged upstream tag in one merge (default — keeps the fork caught up). `next` = advance exactly one un-merged tag (smaller, bisectable merge).'
         required: false
         type: choice
-        default: next
+        default: latest
         options:
-          - next
           - latest
+          - next
 
 permissions:
   contents: write
@@ -65,7 +68,9 @@ jobs:
         run: |
           set -euo pipefail
           MODE="${{ inputs.mode }}"
-          MODE="${MODE:-next}"
+          # Scheduled runs leave inputs.mode empty — default to `latest` so the
+          # fork jumps to upstream's newest tag each day instead of falling behind.
+          MODE="${MODE:-latest}"
           if [ -n "${{ inputs.target_tag }}" ]; then
             TAG="${{ inputs.target_tag }}"
             echo "Using user-specified tag: $TAG"
