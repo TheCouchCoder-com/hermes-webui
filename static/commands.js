@@ -322,6 +322,63 @@ function cmdClear(){
   showToast(t('conversation_cleared'));
 }
 
+// Find the best matching model <option> for a slash-command query.
+// Returns an exact id/label match if present, otherwise the shortest option
+// whose value or label contains the query. Preferring the shortest match keeps
+// a specific query like "mimo-v2.5" from being shadowed by a longer variant
+// such as "mimo-v2.5-pro". See issue #3368.
+//
+// #3368 follow-up: a COMPLETE versioned query (ends in a digit, e.g.
+// "mimo-v2.5") must not match a variant/tier suffix (e.g. "mimo-v2.5-pro") via
+// substring — that silently upgrades the user to a different (paid) tier they
+// did not ask for. Such a candidate is only accepted when the query also
+// matches the option's visible label as a *whole word*, or when the extra text
+// continues a version number. Otherwise the longer tier is rejected here and
+// surfaced as a suggestion instead.
+function _looksLikeVersionedModel(query){
+  // e.g. "mimo-v2.5", "gpt-5.5", "claude-opus-4.6" — ends in a digit.
+  return /\d$/.test(String(query||''));
+}
+function _bestModelMatch(options,query){
+  let best=null;
+  const versioned=_looksLikeVersionedModel(query);
+  for(const opt of options){
+    const value=opt.value.toLowerCase();
+    const text=opt.textContent.toLowerCase();
+    if(value===query||text===query) return opt.value;
+    if(value.includes(query)||text.includes(query)){
+      if(versioned){
+        // Reject a longer variant where the query is immediately followed by a
+        // tier/variant suffix ("-pro", "-flash", " pro", etc.) rather than a
+        // version continuation. Tested on the option value (canonical id).
+        const idx=value.indexOf(query);
+        const after=idx>=0?value.charAt(idx+query.length):'';
+        // after === '' → query is a suffix of value (exact-ish, allow)
+        // after is a digit or '.' → version continuation (allow, e.g. v2 → v2.5)
+        // after is '-' or other → variant/tier suffix (reject)
+        if(after && after!=='.' && !/\d/.test(after)) continue;
+      }
+      if(best===null||opt.value.length<best.length) best=opt.value;
+    }
+  }
+  return best;
+}
+
+// When a versioned query has no clean match, find the closest catalog option
+// (a longer variant that the query is a prefix of) to offer as a suggestion,
+// e.g. "mimo-v2.5" → "mimo-v2.5-pro". Returns the suggested option value, or ''.
+function _nearestModelSuggestion(options,query){
+  let suggestion='';
+  for(const opt of options){
+    const value=opt.value.toLowerCase();
+    if(value.includes(query)){
+      const cand=opt.value;
+      if(!suggestion||cand.length<suggestion.length) suggestion=cand;
+    }
+  }
+  return suggestion;
+}
+
 async function cmdModel(args){
   if(!args){showToast(t('model_usage'));return;}
   const sel=$('modelSelect');
@@ -348,24 +405,23 @@ async function cmdModel(args){
   let match=(typeof _findModelInDropdown==='function')?_findModelInDropdown(q,sel,preferred):null;
   // Fallback: fuzzy match across all options
   if(!match){
-    for(const opt of sel.options){
-      if(opt.value.toLowerCase().includes(q)||opt.textContent.toLowerCase().includes(q)){
-        match=opt.value;break;
-      }
-    }
+    match=_bestModelMatch(sel.options,q);
   }
   // Fallback: if q has provider/ prefix (e.g. "deepseek/deepseek-v4-flash"),
   // try the bare model name (which is how options appear for the active provider)
   if(!match && q.includes('/')){
     const bare=q.slice(q.lastIndexOf('/')+1);
-    for(const opt of sel.options){
-      if(opt.value.toLowerCase().includes(bare)||opt.textContent.toLowerCase().includes(bare)){
-        match=opt.value;break;
-      }
-    }
+    match=_bestModelMatch(sel.options,bare);
+    // #3368: a versioned slash-qualified query whose only near catalog entry is a
+    // rejected tier variant (e.g. "xiaomi/mimo-v2.5" when only "xiaomi/mimo-v2.5-pro"
+    // exists) must NOT silently direct-update to the invalid name — fall through to
+    // the no-match/"did you mean?" toast instead. The cross-provider direct-update
+    // path below is only for genuinely off-catalog providers with no near variant.
+    const nearSuggestion=_nearestModelSuggestion(sel.options,q)||_nearestModelSuggestion(sel.options,bare);
+    const versionedNoSnap=_looksLikeVersionedModel(bare)&&nearSuggestion;
     // Cross-provider fallback: if still no match, the model is from a
     // different provider not in the dropdown. Call /api/session/update directly.
-    if(!match && S&&S.session&&S.session.session_id){
+    if(!match && !versionedNoSnap && S&&S.session&&S.session.session_id){
       const provider=q.slice(0,q.indexOf('/'));
       try{
         const resp=await fetch('/api/session/update',{
@@ -387,7 +443,21 @@ async function cmdModel(args){
       }catch(_){/* fall through to "no model match" */}
     }
   }
-  if(!match){showToast(t('no_model_match')+`"${args}"`);return;}
+  if(!match){
+    // #3368: when a complete versioned name (e.g. "mimo-v2.5") doesn't match
+    // because only a longer tier variant exists ("mimo-v2.5-pro"), don't snap
+    // to it — say no-match and suggest the near variant so the user can opt in.
+    // no_model_match already ends with an opening quote, so close it with args+".
+    let msg=t('no_model_match')+`${args}"`;
+    const suggestion=_nearestModelSuggestion(sel.options,q);
+    if(suggestion){
+      // model_did_you_mean is a placeholder template; t() invokes it with the
+      // suggestion as its arg. (Calling t() without the arg renders "undefined".)
+      msg+=t('model_did_you_mean', suggestion);
+    }
+    showToast(msg);
+    return;
+  }
   sel.value=match;
   await sel.onchange();
   showToast(t('switched_to')+match);

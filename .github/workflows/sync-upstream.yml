@@ -1,19 +1,16 @@
 name: Sync Upstream
 
-# Catch the fork up to nesquena/hermes-webui in one merge per run.
+# Walk forward through nesquena/hermes-webui tags one stage at a time.
 # - Runs daily 06:00 UTC, plus manual dispatch. Daily cadence paired with
-#   the daily Claude babysitter routine keeps the fork close to upstream;
-#   upstream ships ~3 tags/week, so one-tag-a-day fell permanently behind.
-# - Scheduled runs default to `mode: latest`: jump straight to the newest
-#   un-merged upstream `v*` tag in a single merge, so the fork is never
-#   more than a day behind upstream's tip. The capable babysitter routine
-#   resolves the (larger) conflicts and iterates to green — see CLAUDE.md.
-# - Manual dispatch can opt into `mode: next` to advance exactly one
-#   un-merged tag (smaller, bisectable merge — use when investigating a
-#   specific tag's conflicts in isolation).
+#   the daily Claude conflict-resolution routine keeps the fork close to
+#   upstream; weekly was too slow given upstream's ~3-tag/week pace.
+# - Scheduled runs always pick the next un-merged upstream `v*` tag
+#   (stage-by-stage merging is the documented policy — see CLAUDE.md).
+# - Manual dispatch can opt into `mode: latest` to skip ahead to the
+#   newest upstream tag in one merge, for catching up on a backlog.
 # - If the merge applies cleanly AND tests pass, opens a ready-for-review
-#   PR. Otherwise opens a draft PR with the conflict / failure state for
-#   the babysitter routine (or a human) to resolve on the branch.
+#   PR. Otherwise opens a draft PR with the conflict / failure state so a
+#   human (or Claude) can resolve it.
 #
 # This workflow only runs on the fork (TheCouchCoder-com/hermes-webui),
 # matching the guard pattern used in release.yml.
@@ -28,13 +25,13 @@ on:
         required: false
         type: string
       mode:
-        description: 'Tag selection when `target_tag` is blank. `latest` = newest un-merged upstream tag in one merge (default — keeps the fork caught up). `next` = advance exactly one un-merged tag (smaller, bisectable merge).'
+        description: 'Tag selection when `target_tag` is blank. `next` = next un-merged tag (default, stage-by-stage). `latest` = newest upstream tag, skipping intermediates.'
         required: false
         type: choice
-        default: latest
+        default: next
         options:
-          - latest
           - next
+          - latest
 
 permissions:
   contents: write
@@ -68,9 +65,7 @@ jobs:
         run: |
           set -euo pipefail
           MODE="${{ inputs.mode }}"
-          # Scheduled runs leave inputs.mode empty — default to `latest` so the
-          # fork jumps to upstream's newest tag each day instead of falling behind.
-          MODE="${MODE:-latest}"
+          MODE="${MODE:-next}"
           if [ -n "${{ inputs.target_tag }}" ]; then
             TAG="${{ inputs.target_tag }}"
             echo "Using user-specified tag: $TAG"
@@ -139,47 +134,6 @@ jobs:
           fi
           exit 0
 
-      # The default GITHUB_TOKEN cannot push commits that create or modify any file
-      # under .github/workflows/ (GitHub rejects the push with "refusing to allow a
-      # GitHub App to create or update workflow ... without `workflows` permission").
-      # This fork runs its own CI and deliberately does not track upstream's workflow
-      # changes, so we drop any upstream edits to .github/workflows/* and restore our
-      # master version, folding that into the merge commit. Without this, every sync
-      # that touches an upstream workflow file fails at the push step (e.g. v0.51.189
-      # adds a ruff lint job to .github/workflows/tests.yml). The drop is logged and
-      # surfaced in the PR body so it is never silent.
-      - name: Drop upstream .github/workflows changes (token cannot push them)
-        if: steps.merge.outputs.merge_status == 'clean' || steps.merge.outputs.merge_status == 'conflict'
-        id: workflow_guard
-        run: |
-          set -euo pipefail
-          TAG="${{ steps.pick.outputs.tag }}"
-          CHANGED=$(git diff --name-only master HEAD -- .github/workflows/ || true)
-          if [ -z "$CHANGED" ]; then
-            echo "No upstream changes to .github/workflows/ — nothing to drop."
-            echo "dropped=" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "Restoring our master version of these workflow files:"
-          echo "$CHANGED"
-          # Restore each changed/added workflow file to master's content (or remove
-          # any workflow file upstream added that does not exist on master).
-          while IFS= read -r f; do
-            [ -z "$f" ] && continue
-            if git cat-file -e "master:$f" 2>/dev/null; then
-              git checkout master -- "$f"
-            else
-              git rm -f --ignore-unmatch "$f" >/dev/null
-            fi
-          done <<< "$CHANGED"
-          git add -A .github/workflows/
-          # Fold the revert into the existing merge commit so the branch tree has no
-          # workflow-file delta vs master and the push is accepted.
-          git commit --amend --no-edit
-          DROPPED=$(echo "$CHANGED" | tr '\n' ',' | sed 's/,$//')
-          echo "dropped=$DROPPED" >> "$GITHUB_OUTPUT"
-          echo "::notice ::Dropped upstream changes to: $DROPPED (fork does not track upstream CI workflows)"
-
       - name: Set up Python (only if merge applied cleanly)
         if: steps.merge.outputs.merge_status == 'clean'
         uses: actions/setup-python@v5
@@ -211,7 +165,6 @@ jobs:
           PR_MERGE_STATUS: ${{ steps.merge.outputs.merge_status }}
           PR_TESTS_STATUS: ${{ steps.tests.outputs.tests_status || 'skipped' }}
           PR_CONFLICTS: ${{ steps.merge.outputs.conflicts }}
-          PR_DROPPED_WORKFLOWS: ${{ steps.workflow_guard.outputs.dropped }}
         run: |
           set -euo pipefail
           if [ "$PR_MERGE_STATUS" = "clean" ] && [ "$PR_TESTS_STATUS" = "0" ]; then
@@ -254,14 +207,6 @@ jobs:
             printf '%s' "$STATE_HEADER"
             printf '%b\n\n' "$REASON"
             printf 'See `CLAUDE.md` → *Syncing with upstream* for the conflict playbook.\n\n'
-            if [ -n "$PR_DROPPED_WORKFLOWS" ]; then
-              printf '### ⚠️ Dropped upstream workflow changes\n'
-              printf 'The default `GITHUB_TOKEN` cannot push changes under `.github/workflows/`, and this\n'
-              printf 'fork runs its own CI rather than tracking upstream'"'"'s. These upstream edits were\n'
-              printf 'reverted to our `master` version and excluded from this PR:\n'
-              printf -- '- `%s`\n\n' "$PR_DROPPED_WORKFLOWS"
-              printf 'If any of these changes are wanted, port them in a separate PR.\n\n'
-            fi
             printf '### Validation\n'
             printf -- '- Merge: `%s`\n' "$PR_MERGE_STATUS"
             printf -- '- Tests: `%s` (0 = pass; `skipped` = not run because merge had conflicts)\n\n' "$PR_TESTS_STATUS"
