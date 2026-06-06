@@ -24,12 +24,46 @@ def test_update_apply_network_error_has_recovery_message_not_raw_failed_to_fetch
 def test_update_apply_structured_server_errors_still_use_json_message_path():
     """Server-reachable JSON errors must keep the existing targeted message path."""
     src = _ui_js()
-    # applyUpdates() now takes an explicit target arg (issue #6 — per-row banner).
-    apply_start = src.index("async function applyUpdates(target)")
+    apply_start = src.index("async function applyUpdates()")
     show_error_call = src.index("_showUpdateError(target,res);", apply_start)
     reset_button = src.index("resetApplyButton(0);", show_error_call)
     assert show_error_call < reset_button
     assert "const msg='Update failed ('+target+'): '+(res.message||'unknown error');" in src
+
+
+def test_update_apply_successful_stash_conflict_displays_recovery_message():
+    """ok=True stash conflicts must show the server recovery message before restarting."""
+    src = _ui_js()
+    apply_start = src.index("async function applyUpdates()")
+    next_fn = src.index("function _showUpdateError", apply_start)
+    body = src[apply_start:next_fn]
+
+    messages_decl = body.index("const stashConflictMessages=[];")
+    stash_branch = body.index("if(res.stash_conflict)")
+    message_push = body.index("stashConflictMessages.push('Update applied ('+target+'):", stash_branch)
+    persistent_display = body.index("errEl.textContent=stashConflictMessages.join('\\n\\n')", message_push)
+    message_join = body.index("const stashConflictMessage=stashConflictMessages.join('\\n\\n');", persistent_display)
+    restart_wait = body.index("_waitForServerThenReload", message_join)
+
+    assert messages_decl < stash_branch < message_push < persistent_display < message_join < restart_wait
+    assert "showToast(stashConflictMessage||'Update applied" in body
+    assert "stashConflictMessages.length?10000" in body
+
+
+def test_update_apply_multiple_stash_conflicts_are_aggregated_not_overwritten():
+    """Multiple ok=True stash conflicts must preserve every target recovery message."""
+    src = _ui_js()
+    apply_start = src.index("async function applyUpdates()")
+    next_fn = src.index("function _showUpdateError", apply_start)
+    body = src[apply_start:next_fn]
+
+    assert "let stashConflictMessage='';" not in body
+    assert "stashConflictMessage='Update applied ('+target+'):" not in body
+    assert "const stashConflictMessages=[];" in body
+    assert "stashConflictMessages.push('Update applied ('+target+'): " in body
+    assert "errEl.textContent=stashConflictMessages.join('\\n\\n')" in body
+    assert "const stashConflictMessage=stashConflictMessages.join('\\n\\n');" in body
+    assert "showToast(stashConflictMessage||'Update applied" in body
 
 
 def test_update_apply_network_error_classifier_ignores_http_status_errors():
@@ -45,29 +79,24 @@ def test_update_apply_network_error_classifier_ignores_http_status_errors():
 
 
 def test_update_apply_prevents_duplicate_apply_requests_while_in_flight():
-    """Double-clicks should not send a second update apply request during restart race windows.
-
-    The guard moved from a single boolean to a per-target map (issue #6 —
-    per-row banner) so a webui update doesn't lock the agent button. The
-    behavioral contract — short-circuit when already in flight, set on
-    entry, clear on exit — is unchanged.
-    """
+    """Double-clicks should not send a second update apply request during restart race windows."""
     src = _ui_js()
-    apply_start = src.index("async function applyUpdates(target)")
+    apply_start = src.index("async function applyUpdates()")
     next_fn = src.index("function _showUpdateError", apply_start)
     body = src[apply_start:next_fn]
     assert "window._updateApplyInFlight" in body
-    assert "if(window._updateApplyInFlight[target]) return;" in body
-    assert "window._updateApplyInFlight[target]=true;" in body
-    assert "window._updateApplyInFlight[target]=false;" in body
+    assert "if(window._updateApplyInFlight) return;" in body
+    assert "window._updateApplyInFlight=true;" in body
+    assert "window._updateApplyInFlight=false;" in body
 
 
 def test_update_apply_rejects_zero_target_success_path():
     """Update Now must not claim success when no webui/agent target is selected."""
     src = _ui_js()
-    apply_start = src.index("async function applyUpdates(target)")
-    target_agent = src.index("if(window._updateData?.agent?.behind>0) await applyUpdates('agent');", apply_start)
-    zero_target_guard = src.find("if(!target)", apply_start, target_agent)
+    apply_start = src.index("async function applyUpdates()")
+    target_agent = src.index("if(window._updateData?.agent?.behind>0) targets.push('agent');", apply_start)
+    try_start = src.index("try{", target_agent)
+    zero_target_guard = src.find("if(!targets.length)", target_agent, try_start)
 
     assert zero_target_guard >= 0, (
         "applyUpdates must return before the success/restart flow when targets is empty"

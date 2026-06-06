@@ -208,12 +208,18 @@ explaining the blocker — **only** when one of these is true:
 - **Deliberately-rejected upstream feature.** Reaching green would
   require **deleting, skipping, or neutering an upstream-added test**, or
   reverting a fork decision. This almost always means upstream tests a
-  feature the fork deliberately rejected in an earlier sync (e.g. PR #22 /
-  v0.51.59: upstream's `TestUpdateCompareSource` asserts the single-banner
-  redesign that PR #21 discarded). Whether to skip the test, port the
-  feature, or drop the test is the **maintainer's** call. The PR comment
-  must list the failing test names and link the prior sync merge commit
-  that rejected the related code.
+  feature the fork deliberately rejected in an earlier sync. Whether to
+  skip the test, port the feature, or drop the test is the **maintainer's**
+  call. The PR comment must list the failing test names and link the prior
+  sync merge commit that rejected the related code.
+  - **Note — update banner:** the fork previously rejected upstream's
+    single-banner update redesign (PR #21 discarded it; PR #22 / v0.51.59
+    skipped `TestUpdateCompareSource`) in favor of a split webui/agent
+    banner. As of v0.51.295 the fork **follows upstream's single banner** —
+    separate agent updates are handled by upstream's `ignore_agent_updates`
+    setting (Settings → Preferences), so the split banner was removed. Do
+    **not** re-reject upstream's single-banner / `applyUpdates()` /
+    what's-new-summary code; take "theirs" for those on future syncs.
 - **Irreducible ambiguity.** After a real attempt (including the iterate
   loop), the babysitter cannot determine the correct behavior — both
   resolutions are plausible and produce materially different runtime

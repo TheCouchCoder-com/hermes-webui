@@ -913,16 +913,11 @@ class TestUpdateBannerUx:
     def test_update_banner_includes_release_labels(self):
         src = read('static/ui.js')
         assert 'function _formatUpdateTargetStatus' in src
-        assert 'info.branch' in src
-        # Per-row banner (issue #6) routes each target through
-        # _renderUpdateBannerRow, which calls _formatUpdateTargetStatus
-        # with the target's label internally. We deliberately diverge
-        # from upstream's single-banner redesign (see fork PR #21 /
-        # sync of v0.51.59) — keep the per-row assertions and drop the
-        # upstream single-banner ones that contradict our fork.
-        assert "_renderUpdateBannerRow('webui','WebUI',data.webui)" in src
-        assert "_renderUpdateBannerRow('agent','Agent',data.agent)" in src
-        assert "_formatUpdateTargetStatus(label,info)" in src
+        assert 'info.release_based' in src
+        assert 'info.current_version' in src
+        assert 'info.latest_version' in src
+        assert "_formatUpdateTargetStatus('WebUI',data.webui)" in src
+        assert "_formatUpdateTargetStatus('Agent',data.agent)" in src
 
     def test_settings_update_check_uses_same_repo_branch_formatter(self):
         src = read('static/panels.js')
@@ -937,39 +932,28 @@ class TestUpdateBannerUx:
 # ── static/index.html ─────────────────────────────────────────────────────────
 
 class TestIndexHtmlBanner:
-    """#813 — update banner HTML must include error element and force button.
-
-    Issue #6 split the single banner into per-target rows; the IDs are now
-    suffixed with the target ('-webui' / '-agent') but the behavioral
-    contract (persistent error display + hidden-by-default force button)
-    is preserved per row.
-    """
+    """#813 — update banner HTML must include error element and force button."""
 
     def test_update_error_element_exists(self):
         src = read('static/index.html')
-        for target in ('webui', 'agent'):
-            assert f'id="updateError-{target}"' in src, (
-                f"index.html must have #updateError-{target} element "
-                f"for persistent error display"
-            )
+        assert 'id="updateError"' in src, (
+            "index.html must have #updateError element for persistent error display"
+        )
 
     def test_force_update_button_exists(self):
         src = read('static/index.html')
-        for target in ('webui', 'agent'):
-            assert f'id="btnForceUpdate-{target}"' in src, (
-                f"index.html must have #btnForceUpdate-{target} button "
-                f"(hidden by default)"
-            )
+        assert 'id="btnForceUpdate"' in src, (
+            "index.html must have #btnForceUpdate button (hidden by default)"
+        )
 
     def test_force_update_button_hidden_by_default(self):
         src = read('static/index.html')
-        for target in ('webui', 'agent'):
-            m = re.search(rf'id="btnForceUpdate-{target}"[^>]*>', src)
-            assert m, f"#btnForceUpdate-{target} not found"
-            tag = m.group(0)
-            assert 'display:none' in tag, (
-                f"#btnForceUpdate-{target} must be hidden by default (display:none)"
-            )
+        m = re.search(r'id="btnForceUpdate"[^>]*>', src)
+        assert m, "#btnForceUpdate not found"
+        tag = m.group(0)
+        assert 'display:none' in tag, (
+            "#btnForceUpdate must be hidden by default (display:none)"
+        )
 
 
 # ── Regression: sequential webui+agent update — restart coordination ──────────

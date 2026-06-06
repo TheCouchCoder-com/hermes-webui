@@ -5367,6 +5367,9 @@ function _formatUpdateCheckError(label,info){
   const detail=String(info.error).replace(/^fetch failed:?\s*/i,'').trim();
   return detail ? `${label}: ${detail}` : label;
 }
+// Fork helper: format a per-target "update check unavailable" status line for
+// the Settings → System update display (panels.js). Independent of the banner
+// design — kept after dropping the fork's split banner in favor of upstream's.
 function _formatUpdateCheckUnavailable(label,info){
   if(!info||!info.unavailable) return null;
   const detail=info.message?String(info.message).trim():'';
@@ -5381,43 +5384,6 @@ function _isSafeUpdateCompareUrl(url){
     return false;
   }
 }
-function _renderUpdateBannerRow(target,label,info){
-  const row=$('updateRow-'+target);
-  const msg=$('updateMsg-'+target);
-  const link=$('updateWhatsNew-'+target);
-  const errEl=$('updateError-'+target);
-  const forceBtn=$('btnForceUpdate-'+target);
-  const applyBtn=$('btnApplyUpdate-'+target);
-  const part=_formatUpdateTargetStatus(label,info);
-  if(!row) return false;
-  if(!part){
-    row.style.display='none';
-    return false;
-  }
-  row.style.display='';
-  if(msg) msg.textContent='\u2B06 '+part+' available';
-  // Reset stale per-row state on every render \u2014 a divergent SHA payload
-  // would otherwise leave a 404 compare link visible (#1579), and a prior
-  // conflict would leave the force-update button armed against the new data.
-  if(link){
-    link.style.display='none';
-    link.removeAttribute('href');
-    const repoUrl=info&&info.repo_url;
-    const curSha=info&&info.current_sha;
-    const newSha=info&&info.latest_sha;
-    if(repoUrl && curSha && newSha){
-      link.href=repoUrl+'/compare/'+curSha+'...'+newSha;
-      link.style.display='inline';
-    }
-  }
-  if(errEl){errEl.style.display='none';errEl.textContent='';}
-  if(forceBtn){forceBtn.style.display='none';}
-  if(applyBtn){applyBtn.disabled=false;applyBtn.textContent='Update Now';}
-  return true;
-}
-// ── Update what's-new / summary helpers (ported from upstream; the fork's
-//    multi-row banner references these — they DOM-guard, so they no-op when
-//    the single-banner summary elements are absent). ──
 function _updateCompareUrl(info){
   if(!info) return null;
   const compareUrl=info.compare_url||null;
@@ -5563,7 +5529,6 @@ function _renderUpdateSummaryPanel(payload,data,targetKey){
     }
   }
 }
-
 async function showWhatsNewSummary(target){
   const data=window._updateData||{};
   const scopedUpdates=target?{[target]:data[target]}:data;
@@ -5638,12 +5603,24 @@ function _renderUpdateWhatsNewLinks(data){
   _appendUpdateDiffLinks(container,targets,"What's new: ");
 }
 function _showUpdateBanner(data){
-  const shownWebui=_renderUpdateBannerRow('webui','WebUI',data.webui);
-  const shownAgent=_renderUpdateBannerRow('agent','Agent',data.agent);
-  if(!shownWebui && !shownAgent) return;
+  const parts=[];
+  const webuiPart=_formatUpdateTargetStatus('WebUI',data.webui);
+  const agentPart=_formatUpdateTargetStatus('Agent',data.agent);
+  if(webuiPart) parts.push(webuiPart);
+  if(agentPart) parts.push(agentPart);
+  window._updateData=data;
+  if(!parts.length){
+    _renderUpdateWhatsNewLinks(data);
+    const staleBanner=$('updateBanner');
+    if(staleBanner) staleBanner.classList.remove('visible');
+    return;
+  }
+  const msg=$('updateMsg');
+  if(msg) msg.textContent='\u2B06 '+parts.join(', ')+' available';
   const banner=$('updateBanner');
   if(banner) banner.classList.add('visible');
-  window._updateData=data;
+  const summaryMode=window._whatsNewSummaryEnabled===true?'summary':'diff';
+  _renderUpdateWhatsNewLinks(data,{mode:summaryMode});
 }
 function dismissUpdate(){
   const b=$('updateBanner');if(b)b.classList.remove('visible');
@@ -5661,55 +5638,55 @@ function _formatUpdateApplyExceptionMessage(error){
   const message=(error&&error.message)||String(error||'unknown error');
   return 'Update failed: '+message;
 }
-async function applyUpdates(target){
-  // The HTML wires each row's "Update Now" to applyUpdates('webui'|'agent').
-  // A bare call (no arg) preserves the old contract: update everything that
-  // is behind, sequentially. Keeps existing callers / tests that invoked
-  // applyUpdates() without args working.
-  if(!target){
-    if(window._updateData?.webui?.behind>0) await applyUpdates('webui');
-    if(window._updateData?.agent?.behind>0) await applyUpdates('agent');
-    return;
-  }
-  if(target!=='webui' && target!=='agent') return;
-  window._updateApplyInFlight=window._updateApplyInFlight||{};
-  if(window._updateApplyInFlight[target]) return;
-  window._updateApplyInFlight[target]=true;
-  const btn=$('btnApplyUpdate-'+target);
-  const errEl=$('updateError-'+target);
-  const forceBtnReset=$('btnForceUpdate-'+target);
+async function applyUpdates(){
+  if(window._updateApplyInFlight) return;
+  window._updateApplyInFlight=true;
+  const btn=$('btnApplyUpdate');
   const resetApplyButton=(delayMs)=>{
     const reset=()=>{
-      window._updateApplyInFlight[target]=false;
+      window._updateApplyInFlight=false;
       if(btn){btn.disabled=false;btn.textContent='Update Now';}
     };
     if(delayMs>0) setTimeout(reset,delayMs);
     else reset();
   };
   if(btn){btn.disabled=true;btn.textContent='Updating\u2026';}
+  const errEl=$('updateError');
   if(errEl){errEl.style.display='none';errEl.textContent='';}
-  // Hide any leftover force-update button from a prior conflict on this row
-  // so a fresh retry starts clean (clear its stale target marker too).
+  // Hide any leftover force-update button from a prior conflict so a fresh
+  // retry starts clean (otherwise stale state points at the wrong target).
+  const forceBtnReset=$('btnForceUpdate');
   if(forceBtnReset){forceBtnReset.style.display='none';forceBtnReset.dataset.target='';}
-  // Zero-target guard: nothing to apply for this row if it isn't behind.
-  if(!(window._updateData?.[target]?.behind>0)){
-    const msg='No update available for '+target+'. Refresh update status and retry.';
+  const targets=[];
+  if(window._updateData?.webui?.behind>0) targets.push('webui');
+  if(window._updateData?.agent?.behind>0) targets.push('agent');
+  if(!targets.length){
+    const msg='No update target selected. Refresh update status and retry.';
     if(errEl){errEl.textContent=msg;errEl.style.display='block';}
     else showToast(msg,5000,'error');
     resetApplyButton(0);
     return;
   }
   try{
-    const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify({target}),timeoutMs:120000});
-    if(!res.ok){
-      _showUpdateError(target,res);
-      resetApplyButton(0);
-      return;
+    const stashConflictMessages=[];
+    const baselineServerIdentity = await _readHealthServerIdentity();
+    for(const target of targets){
+      const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify({target}),timeoutMs:120000});
+      if(!res.ok){
+        _showUpdateError(target,res);
+        resetApplyButton(0);
+        return;
+      }
+      if(res.stash_conflict){
+        stashConflictMessages.push('Update applied ('+target+'): '+(res.message||'Local changes were preserved in git stash.'));
+        if(errEl){errEl.textContent=stashConflictMessages.join('\n\n');errEl.style.display='block';}
+      }
     }
-    showToast('Update applied — restarting…');
+    const stashConflictMessage=stashConflictMessages.join('\n\n');
+    showToast(stashConflictMessage||'Update applied — restarting…',stashConflictMessages.length?10000:undefined,stashConflictMessages.length?'warning':undefined);
     sessionStorage.removeItem('hermes-update-checked');
     sessionStorage.removeItem('hermes-update-dismissed');
-    _waitForServerThenReload();
+    _waitForServerThenReload({baselineServerIdentity});
   }catch(e){
     const msg=_formatUpdateApplyExceptionMessage(e);
     if(errEl){errEl.textContent=msg;errEl.style.display='block';}
@@ -5718,8 +5695,8 @@ async function applyUpdates(target){
   }
 }
 function _showUpdateError(target,res){
-  const errEl=$('updateError-'+target);
-  const forceBtn=$('btnForceUpdate-'+target);
+  const errEl=$('updateError');
+  const forceBtn=$('btnForceUpdate');
   const msg='Update failed ('+target+'): '+(res.message||'unknown error');
   if(errEl){
     errEl.textContent=msg;
@@ -5765,7 +5742,7 @@ async function forceUpdate(btn){
   });
   if(!confirmed) return;
   btn.disabled=true;btn.textContent='Force updating\u2026';
-  const errEl=$('updateError-'+target);
+  const errEl=$('updateError');
   if(errEl){errEl.style.display='none';}
   try{
     const baselineServerIdentity = await _readHealthServerIdentity();

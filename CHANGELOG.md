@@ -13,6 +13,9 @@
 
 ## [Unreleased]
 
+### Changed (fork)
+- **Dropped the fork's split webui/agent update banner in favor of upstream's single update banner.** The split banner existed so WebUI could be updated separately from the Agent; upstream now ships an **"Ignore Agent updates"** preference (Settings → Preferences, `ignore_agent_updates`) that covers that need, so the fork no longer needs to diverge. Removed the per-target banner rows (`updateRow-webui`/`updateRow-agent`, `applyUpdates(target)`, `_renderUpdateBannerRow`) and adopted upstream's single-banner UI, `applyUpdates()`, and what's-new/summary panel. The fork-only "update check unavailable" status helper is retained. Future syncs follow upstream on the banner (see `CLAUDE.md`).
+
 ### Fixed (fork)
 - `sync-upstream.yml` no longer fails at the push step when an upstream tag modifies a file under `.github/workflows/`. The default `GITHUB_TOKEN` cannot push workflow-file changes (GitHub rejects the push without the `workflows` permission scope), and this fork runs its own CI rather than tracking upstream's. The workflow now reverts any upstream edits to `.github/workflows/*` back to our `master` version, folds the revert into the merge commit, and surfaces the dropped files as a `::notice` and in the PR body. Without this, every sync that touches an upstream workflow file (e.g. v0.51.189, which adds a ruff lint job to `tests.yml`) aborted before opening a PR.
 ### Removed
