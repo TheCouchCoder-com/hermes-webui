@@ -961,9 +961,24 @@ async function loadSession(sid){
     // replaying persisted live tools so the compact Activity count survives
     // switching away from and back to an active chat (#1715).
     S.activeStreamId=activeStreamId;
+    const liveToolReplayId=(tc)=>String(tc&&(tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'')||'').trim();
+    const replayPersistedLiveToolCards=(opts)=>{
+      const liveToolCalls=Array.isArray(S.toolCalls)
+        ? S.toolCalls
+        : (Array.isArray(INFLIGHT[sid]&&INFLIGHT[sid].toolCalls)?INFLIGHT[sid].toolCalls:[]);
+      const skipUnkeyedRestoredDuplicates=!!(opts&&opts.skipUnkeyedRestoredDuplicates);
+      const restoredLiveTurn=skipUnkeyedRestoredDuplicates?document.getElementById('liveAssistantTurn'):null;
+      const hasRestoredLiveToolRows=!!(restoredLiveTurn&&restoredLiveTurn.querySelector('.tool-card-row'));
+      for(const tc of (liveToolCalls||[])){
+        if(skipUnkeyedRestoredDuplicates&&hasRestoredLiveToolRows&&!liveToolReplayId(tc)) continue;
+        if(tc&&tc.name) appendLiveToolCard(tc,{sessionId:sid,streamId:activeStreamId});
+      }
+    };
+    let didReconnect=false;
     if(INFLIGHT[sid].reattach&&activeStreamId&&typeof attachLiveStream==='function'){
       INFLIGHT[sid].reattach=false;
       if (_loadingSessionId !== sid) return;
+      didReconnect=true;
       attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {reconnecting:true});
     }
     syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);
@@ -992,14 +1007,15 @@ async function loadSession(sid){
         else restoredLiveTurn=restoreLiveTurnHtmlForSession(sid);
       }
     }
+    if(restoredLiveTurn&&didReconnect){
+      replayPersistedLiveToolCards({skipUnkeyedRestoredDuplicates:true});
+    }
     if(!restoredLiveTurn){
       clearLiveToolCards();
       if(typeof placeLiveToolCardsHost==='function') placeLiveToolCardsHost();
       if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
       else appendThinking();
-      for(const tc of (S.toolCalls||[])){
-        if(tc&&tc.name) appendLiveToolCard(tc);
-      }
+      replayPersistedLiveToolCards();
     }
     if(typeof ensureLiveWorklogShell==='function'){
       const liveTurn=document.getElementById('liveAssistantTurn');
@@ -4678,6 +4694,50 @@ function renderSessionListFromCache(){
       };
       chip.ondblclick=(e)=>{e.stopPropagation();clearTimeout(_pClickTimer);_pClickTimer=null;_startProjectRename(p,chip);};
       chip.oncontextmenu=(e)=>{e.preventDefault();_showProjectContextMenu(e,p,chip);};
+      // Touch long-press → context menu (mobile UX: project chips can only be
+      // deleted via the right-click menu, which has no touch equivalent).
+      let _lpTimer=null;
+      let _lpHandled=false;
+      let _lpStartX=0,_lpStartY=0;
+      chip.addEventListener('touchstart',(e)=>{
+        const t=e.changedTouches&&e.changedTouches[0];
+        if(!t) return;
+        // Clear any in-flight timer before scheduling a new one, mirroring the
+        // session-item long-press path (_clearLongPressTimer). Without this a
+        // second finger / stray touchstart orphans the prior timer, which then
+        // fires unsuppressed ~500ms later and pops the menu after the gesture
+        // was cancelled.
+        if(_lpTimer){clearTimeout(_lpTimer);_lpTimer=null;}
+        _lpHandled=false;_lpStartX=t.clientX;_lpStartY=t.clientY;
+        chip.classList.add('long-pressing');
+        _lpTimer=setTimeout(()=>{
+          _lpTimer=null;
+          if(_lpHandled) return;  // already consumed by another gesture — stale fire is a no-op
+          _lpHandled=true;
+          chip.classList.remove('long-pressing');
+          clearTimeout(_pClickTimer);_pClickTimer=null;
+          const syn={clientX:t.clientX,clientY:t.clientY,preventDefault:()=>{}};
+          _showProjectContextMenu(syn,p,chip);
+        },500);
+      },{passive:true});
+      chip.addEventListener('touchmove',(e)=>{
+        if(!_lpTimer) return;
+        const t=e.changedTouches&&e.changedTouches[0];
+        if(!t) return;
+        if(Math.abs(t.clientX-_lpStartX)>10||Math.abs(t.clientY-_lpStartY)>10){
+          clearTimeout(_lpTimer);_lpTimer=null;
+          chip.classList.remove('long-pressing');
+        }
+      },{passive:true});
+      chip.addEventListener('touchend',(e)=>{
+        clearTimeout(_lpTimer);_lpTimer=null;
+        chip.classList.remove('long-pressing');
+        if(_lpHandled){e.preventDefault();e.stopPropagation();}
+      },{passive:false});
+      chip.addEventListener('touchcancel',()=>{
+        clearTimeout(_lpTimer);_lpTimer=null;_lpHandled=false;
+        chip.classList.remove('long-pressing');
+      },{passive:true});
       bar.appendChild(chip);
     }
     // Create button
@@ -5191,8 +5251,11 @@ function renderSessionListFromCache(){
         }
         if(e2.key==='Escape'){e2.preventDefault();e2.stopPropagation();finish(false);}
       };
-      // onblur: cancel only -- no accidental saves
-      inp.onblur=()=>{ if(_renamingSid===s.session_id) finish(false); };
+      // onblur: save on blur — Escape explicitly cancels. The old cancel-on-blur
+      // behavior broke rename on mobile (iPhone "Done" dismisses the keyboard,
+      // triggering blur) and was less natural on desktop too (typing a name then
+      // clicking elsewhere should save, not discard).
+      inp.onblur=()=>{ if(_renamingSid===s.session_id) finish(true); };
       title.replaceWith(inp);
       setTimeout(()=>{inp.focus();inp.select();},10);
     };
@@ -5883,10 +5946,19 @@ function _startProjectCreate(bar, addBtn){
   const inp=document.createElement('input');
   inp.className='project-create-input';
   inp.placeholder='Project name';
+  let _finishDone=false;
   const finish=async(save)=>{
+    if(_finishDone) return;
+    _finishDone=true;
     if(save&&inp.value.trim()){
       const color=PROJECT_COLORS[_allProjects.length%PROJECT_COLORS.length];
-      await api('/api/projects/create',{method:'POST',body:JSON.stringify({name:inp.value.trim(),color})});
+      try{
+        await api('/api/projects/create',{method:'POST',body:JSON.stringify({name:inp.value.trim(),color})});
+      }catch(e){
+        _finishDone=false;
+        showToast('Project create failed: '+(e.message||e));
+        return;
+      }
       await renderSessionList();
       showToast('Project created');
     }else{
@@ -5901,7 +5973,7 @@ function _startProjectCreate(bar, addBtn){
     }
     if(e.key==='Escape'){e.preventDefault();finish(false);}
   };
-  inp.onblur=()=>finish(false);
+  inp.onblur=()=>finish(true);
   inp.addEventListener('input',()=>_resizeProjectInput(inp));
   addBtn.replaceWith(inp);
   _resizeProjectInput(inp);
@@ -5912,13 +5984,17 @@ function _startProjectRename(proj, chip){
   const inp=document.createElement('input');
   inp.className='project-create-input';
   inp.value=proj.name;
+  let _finishDone=false;
   const finish=async(save)=>{
+    if(_finishDone) return;
+    _finishDone=true;
     if(save&&inp.value.trim()&&inp.value.trim()!==proj.name){
       try {
         await api('/api/projects/rename',{method:'POST',body:JSON.stringify({project_id:proj.project_id,name:inp.value.trim()})});
         await renderSessionList();
         showToast('Project renamed');
       } catch(e) {
+        _finishDone=false;
         showToast('Rename failed: '+(e.message||e));
       }
     }else{
@@ -5933,7 +6009,7 @@ function _startProjectRename(proj, chip){
     }
     if(e.key==='Escape'){e.preventDefault();finish(false);}
   };
-  inp.onblur=()=>finish(false);
+  inp.onblur=()=>finish(true);
   inp.onclick=(e)=>e.stopPropagation();
   inp.addEventListener('input',()=>_resizeProjectInput(inp));
   chip.replaceWith(inp);
