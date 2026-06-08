@@ -25,16 +25,6 @@ import types
 
 import pytest
 
-# Skip reason for tests of the upstream v0.51.59 update-banner redesign
-# (multi-target compare URLs + single banner with WhatsNewLinks container).
-# Our fork explicitly rejected that redesign in PR #21 when syncing v0.51.58.
-# Keeping the test bodies in place (rather than deleting them) so the next
-# upstream sync sees this region as already resolved and doesn't re-conflict.
-_FORK_REJECTED_SINGLE_BANNER = (
-    "fork rejected upstream's single-banner / multi-target-compare redesign "
-    "(see PR #21 / v0.51.58 sync) — skipping the corresponding upstream tests"
-)
-
 REPO = pathlib.Path(__file__).parent.parent
 
 
@@ -69,6 +59,26 @@ def extract_js_function(src: str, name: str) -> str:
                 break
     assert end is not None, f"{name}() body was not balanced"
     return src[match.start():end]
+
+
+@pytest.fixture(autouse=True)
+def _stub_pycache_purge(monkeypatch):
+    """No-op the __pycache__ purge for the update/restart tests in this module.
+
+    _schedule_restart() purges __pycache__ before os.execv() (#3774) so the
+    re-exec'd process recompiles freshly-pulled source. The real purge walks
+    REPO_ROOT + _AGENT_DIR on disk — slow (~0.4 s on the agent repo's ~17k
+    files) and destructive — which blows these tests' tight restart-timing
+    budgets and, worse, can delay the daemon thread past monkeypatch teardown
+    so it fires the REAL os.execv and corrupts the pytest worker. These tests
+    exercise restart coordination/locking, not the purge (which has dedicated
+    coverage in test_pycache_purge.py), so stub it to a no-op. The wiring
+    (purge happens before execv) is pinned by
+    test_schedule_restart_purges_pycache_before_execv, which re-patches with a
+    recording spy.
+    """
+    import api.updates as upd
+    monkeypatch.setattr(upd, "_purge_agent_pycache", lambda *a, **k: None)
 
 
 # ── api/updates.py ────────────────────────────────────────────────────────────
@@ -334,6 +344,39 @@ class TestScheduleRestart:
         # Give the thread time to call execv
         time.sleep(0.2)
         assert execv_called, "_schedule_restart must eventually call os.execv"
+
+    def test_schedule_restart_purges_pycache_before_execv(self, monkeypatch):
+        """The restart thread must purge __pycache__ before re-exec (#3774).
+
+        Pins the fix wiring: os.execv() replaces the process image without
+        touching on-disk .pyc files, so stale bytecode could otherwise serve
+        an old class definition after a self-update. Records the call order of
+        _purge_agent_pycache vs os.execv and asserts the purge runs first.
+        """
+        import api.updates as upd
+
+        events = []
+
+        def spy_purge(repo_dir):
+            events.append(("purge", repo_dir))
+
+        def fake_execv(exe, args):
+            events.append(("execv", exe))
+
+        # Override the autouse no-op stub with a recording spy.
+        monkeypatch.setattr(upd, "_purge_agent_pycache", spy_purge)
+        monkeypatch.setattr(os, "execv", fake_execv)
+
+        upd._schedule_restart(delay=0.05)
+        time.sleep(0.3)
+
+        kinds = [kind for kind, _ in events]
+        assert "purge" in kinds, "_schedule_restart must purge __pycache__"
+        assert "execv" in kinds, "_schedule_restart must call os.execv"
+        assert kinds.index("purge") < kinds.index("execv"), (
+            "__pycache__ purge must happen BEFORE os.execv so the re-exec'd "
+            "process recompiles from fresh source"
+        )
 
 
 class TestApplyUpdateRestartSafety:
@@ -1475,13 +1518,11 @@ class TestUpdateCompareSource:
         assert '"repo_url": "https://github.com/NousResearch/hermes-agent"' in src
         assert '"compare_url": "https://github.com/NousResearch/hermes-agent/compare/aaa0001...bbb0002"' in src
 
-    @pytest.mark.skip(reason=_FORK_REJECTED_SINGLE_BANNER)
     def test_update_banner_html_uses_multi_target_links_container(self):
         src = read('static/index.html')
         assert 'id="updateWhatsNewLinks"' in src
         assert 'id="updateWhatsNew"' not in src
 
-    @pytest.mark.skip(reason=_FORK_REJECTED_SINGLE_BANNER)
     def test_update_banner_frontend_uses_data_driven_compare_helpers(self):
         src = read('static/ui.js')
         assert 'function _isSafeUpdateCompareUrl(url)' in src
@@ -1496,7 +1537,6 @@ class TestUpdateCompareSource:
         assert "data.webui.repo_url" not in src
         assert "$('updateWhatsNew')" not in src
 
-    @pytest.mark.skip(reason=_FORK_REJECTED_SINGLE_BANNER)
     def test_update_banner_clears_stale_links_when_no_updates_remain(self):
         src = read('static/ui.js')
         start = src.find('function _showUpdateBanner(data)')
@@ -1546,7 +1586,6 @@ class TestWhatsNewSummaryToggle:
         assert 'window._whatsNewSummaryEnabled' in boot
         assert 'whats_new_summary_enabled' in boot
 
-    @pytest.mark.skip(reason=_FORK_REJECTED_SINGLE_BANNER)
     def test_update_banner_summary_flow_keeps_diff_links_after_summary(self):
         src = read('static/ui.js')
         assert 'function _renderUpdateSummaryPanel' in src

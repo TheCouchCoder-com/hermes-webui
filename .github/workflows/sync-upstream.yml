@@ -4,11 +4,10 @@ name: Sync Upstream
 # - Runs daily 06:00 UTC, plus manual dispatch. Daily cadence paired with
 #   the daily Claude conflict-resolution routine keeps the fork close to
 #   upstream; weekly was too slow given upstream's ~3-tag/week pace.
-# - Scheduled runs jump straight to the newest un-merged upstream `v*` tag
-#   (`mode: latest`) so the fork doesn't fall perpetually behind crawling
-#   one tag a day (see CLAUDE.md → Syncing with upstream).
-# - Manual dispatch honors the `mode` input (default `next` = advance one
-#   tag for a small, bisectable merge; `latest` = skip ahead to the tip).
+# - Scheduled runs always pick the next un-merged upstream `v*` tag
+#   (stage-by-stage merging is the documented policy — see CLAUDE.md).
+# - Manual dispatch can opt into `mode: latest` to skip ahead to the
+#   newest upstream tag in one merge, for catching up on a backlog.
 # - If the merge applies cleanly AND tests pass, opens a ready-for-review
 #   PR. Otherwise opens a draft PR with the conflict / failure state so a
 #   human (or Claude) can resolve it.
@@ -65,12 +64,8 @@ jobs:
         id: pick
         run: |
           set -euo pipefail
-          # Scheduled runs send no `mode` input → default to `latest` so the
-          # fork catches up to upstream's tip instead of crawling one tag a
-          # day. Manual dispatch always supplies the choice input (default
-          # `next`), which is honored as-is.
           MODE="${{ inputs.mode }}"
-          MODE="${MODE:-latest}"
+          MODE="${MODE:-next}"
           if [ -n "${{ inputs.target_tag }}" ]; then
             TAG="${{ inputs.target_tag }}"
             echo "Using user-specified tag: $TAG"
@@ -126,32 +121,15 @@ jobs:
           TAG="${{ steps.pick.outputs.tag }}"
           git checkout -b "$BRANCH"
           git merge --no-ff --no-edit "$TAG"
-
-          # The default GITHUB_TOKEN has no `workflows` permission, so it cannot
-          # push commits that create or modify files under .github/workflows/.
-          # The fork runs its own CI, so we always discard upstream's workflow
-          # edits and keep ours by resetting the directory to master's version.
-          # This also clears any merge conflict in those files.
-          # (See CLAUDE.md → Syncing with upstream.)
-          rm -rf .github/workflows
-          git checkout master -- .github/workflows
-          git add -A .github/workflows
-
-          # Recompute conflicts after dropping workflow files.
-          CONFLICTS=$(git diff --name-only --diff-filter=U | tr '\n' ',' | sed 's/,$//')
-          if [ -n "$CONFLICTS" ]; then
-            echo "Merge produced conflicts: $CONFLICTS"
+          STATUS=$?
+          if [ $STATUS -ne 0 ]; then
+            echo "Merge produced conflicts."
+            CONFLICTS=$(git diff --name-only --diff-filter=U | tr '\n' ',' | sed 's/,$//')
             echo "conflicts=$CONFLICTS" >> "$GITHUB_OUTPUT"
             git add -A
             git commit -m "merge upstream $TAG (conflicts unresolved)"
             echo "merge_status=conflict" >> "$GITHUB_OUTPUT"
           else
-            # Either a fully clean merge, or the only conflicts were workflow
-            # files we just dropped. Finalize the merge commit if one is still
-            # pending (a clean `git merge` already committed it).
-            if [ -f .git/MERGE_HEAD ]; then
-              git commit --no-edit
-            fi
             echo "merge_status=clean" >> "$GITHUB_OUTPUT"
           fi
           exit 0
