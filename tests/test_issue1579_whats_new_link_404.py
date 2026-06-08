@@ -48,6 +48,7 @@ def _make_throwaway_repo(tmp_path, *, local_only_commits=0, upstream_advanced=0)
     for cmd in [
         ['git', '-C', str(seed), 'config', 'user.email', 'test@test.test'],
         ['git', '-C', str(seed), 'config', 'user.name', 'test'],
+        ['git', '-C', str(seed), 'config', 'commit.gpgsign', 'false'],
         ['git', '-C', str(seed), 'commit', '--allow-empty', '-m', 'initial', '--quiet'],
         ['git', '-C', str(seed), 'remote', 'add', 'origin', str(upstream)],
         ['git', '-C', str(seed), 'push', '--quiet', '-u', 'origin', 'master'],
@@ -59,6 +60,7 @@ def _make_throwaway_repo(tmp_path, *, local_only_commits=0, upstream_advanced=0)
     subprocess.run(['git', 'clone', '--quiet', str(upstream), str(local)], check=True)
     subprocess.run(['git', '-C', str(local), 'config', 'user.email', 'test@test.test'], check=True)
     subprocess.run(['git', '-C', str(local), 'config', 'user.name', 'test'], check=True)
+    subprocess.run(['git', '-C', str(local), 'config', 'commit.gpgsign', 'false'], check=True)
 
     # Add local-only commits to the local clone (the #1579 trigger). These never
     # get pushed — they exist only on the local clone's master branch.
