@@ -16191,6 +16191,8 @@ const LOCALES = {
     busy_interrupt_confirm: 'Przerwano — wysyłanie nowej wiadomości',
     settings_label_busy_input_mode: 'Tryb wprowadzania przy zajętości',
     settings_desc_busy_input_mode: 'Kontroluje, co dzieje się, gdy wysyłasz wiadomość, podczas gdy agent pracuje. Kolejkowanie czeka; Przerwanie anuluje i zaczyna od nowa; Kierowanie (Steer) wprowadza korektę w środku tury bez przerywania (cofa się do kolejkowania, gdy agent lub strumień jest niedostępny).',
+    settings_label_always_new_chat: 'Zawsze zaczynaj nowy czat',
+    settings_desc_always_new_chat: 'Po włączeniu WebUI otwiera pusty czat (zamiast przywracać ostatnią sesję) przy każdym załadowaniu strony. Głębokie linki (?session=…) i aktywne strumienie nadal są wznawiany.',
     settings_label_fade_text_effect: 'Efekt pojawiania się tekstu',
     settings_desc_fade_text_effect: 'Płynne pojawianie się nowo przesyłanych słów, podczas gdy asystent odpowiada. Podobnie jak w OpenWebUI; domyślnie wyłączone dla maksymalnej wydajności.',
     settings_busy_input_mode_queue: 'Kolejkuj tury',

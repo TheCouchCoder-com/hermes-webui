@@ -164,6 +164,7 @@ class TestDetectWebUIVersion:
         git('init')
         git('config', 'user.name', 'Test User')
         git('config', 'user.email', 'test@example.invalid')
+        git('config', 'commit.gpgsign', 'false')
         tracked = tmp_path / 'tracked.txt'
         tracked.write_text('base\n', encoding='utf-8')
         git('add', 'tracked.txt')

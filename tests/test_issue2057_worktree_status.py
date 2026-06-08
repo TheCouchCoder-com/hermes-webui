@@ -38,6 +38,7 @@ def git_worktree(tmp_path):
     _git(repo, "init")
     _git(repo, "config", "user.email", "test@example.com")
     _git(repo, "config", "user.name", "Hermes Test")
+    _git(repo, "config", "commit.gpgsign", "false")
     _git(repo, "branch", "-M", "main")
     (repo / "README.md").write_text("hello\n", encoding="utf-8")
     _git(repo, "add", "README.md")

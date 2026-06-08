@@ -42,6 +42,7 @@ def _make_minimal_git_repo(tmp_path):
     subprocess.run(["git", "init", "-b", "main", str(main)], check=True, capture_output=True)
     subprocess.run(["git", "-C", str(main), "config", "user.email", "test@test.test"], check=True, capture_output=True)
     subprocess.run(["git", "-C", str(main), "config", "user.name", "Test"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(main), "config", "commit.gpgsign", "false"], check=True, capture_output=True)
     (main / "file.txt").write_text("content")
     subprocess.run(["git", "-C", str(main), "add", "file.txt"], check=True, capture_output=True)
     subprocess.run(["git", "-C", str(main), "commit", "-m", "init"], check=True, capture_output=True)

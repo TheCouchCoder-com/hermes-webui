@@ -46,6 +46,7 @@ def _init_repo(path):
         _git(path, "checkout", "-B", "master")
     _git(path, "config", "user.email", "hermes-tests@example.invalid")
     _git(path, "config", "user.name", "Hermes Tests")
+    _git(path, "config", "commit.gpgsign", "false")
     return path
 
 
