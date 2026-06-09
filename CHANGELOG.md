@@ -19,6 +19,14 @@
 ### Fixed (fork)
 - `sync-upstream.yml` no longer fails at the push step when an upstream tag modifies a file under `.github/workflows/`. The default `GITHUB_TOKEN` cannot push workflow-file changes (GitHub rejects the push without the `workflows` permission scope), and this fork runs its own CI rather than tracking upstream's. The workflow now reverts any upstream edits to `.github/workflows/*` back to our `master` version, folds the revert into the merge commit, and surfaces the dropped files as a `::notice` and in the PR body. Without this, every sync that touches an upstream workflow file (e.g. v0.51.189, which adds a ruff lint job to `tests.yml`) aborted before opening a PR.
 
+## [v0.51.326] — 2026-06-08 — Release KP (mic STT probe + journal cleanup + schema guard + help hover)
+
+### Fixed
+- **Mic input prefers configured server-side STT, with a safe fallback.** A page-load capability probe defaults to the Hermes STT provider when one is configured; installs without server STT keep browser dictation, and a failed transcribe reverts to browser SpeechRecognition. (#3618, @dso2ng)
+- **Deleting a conversation now also removes its turn/run journals** (previously the user's messages and full request/response payloads stayed on disk in plaintext after delete). (#3802)
+- **Imported/CLI/agent sessions no longer vanish from the sidebar on minimal `state.db` schemas.** The session-list query now degrades gracefully when the `messages` table is absent or missing columns instead of raising and hiding every row. (#3762)
+- **Help tab buttons stay readable on hover in every theme** (the hover fill no longer renders same-color text). (#3810)
+
 ## [v0.51.325] — 2026-06-08 — Release KO (in-app Help tab)
 
 ### Added
