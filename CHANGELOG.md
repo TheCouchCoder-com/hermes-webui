@@ -19,6 +19,12 @@
 ### Fixed (fork)
 - `sync-upstream.yml` no longer fails at the push step when an upstream tag modifies a file under `.github/workflows/`. The default `GITHUB_TOKEN` cannot push workflow-file changes (GitHub rejects the push without the `workflows` permission scope), and this fork runs its own CI rather than tracking upstream's. The workflow now reverts any upstream edits to `.github/workflows/*` back to our `master` version, folds the revert into the merge commit, and surfaces the dropped files as a `::notice` and in the PR body. Without this, every sync that touches an upstream workflow file (e.g. v0.51.189, which adds a ruff lint job to `tests.yml`) aborted before opening a PR.
 
+## [v0.51.366] — 2026-06-12 — Release ME (assistant turn anchor source normalizer — Slice 2, inert)
+
+### Added
+
+- **Slice 2 of the Stable Assistant Turn Anchors foundation: a source-event normalizer (#3980, #3926).** Adds `normalizeAssistantTurnAnchorSourceEvent` / `normalizeAssistantTurnAnchorSourceEvents` to the frozen `HermesAssistantTurnAnchors` global, converting live SSE-style, replay/journal, and settled-message events into a single anchor-normalized shape with stable identity and dedupe keys. The helper is **inert** — no `send()` / `attachLiveStream()` / `renderMessages()` / settlement / `S.messages` / `INFLIGHT` / DOM path consumes it yet — so there is zero rendering change in this release; it lands the model that Compact Worklog and the in-progress Transparent Stream work will later consume from one normalizer. Identity reads are own-property-only and payload shaping uses `Object.create(null)` with unsafe-key skipping, so prototype-pollution and inherited-identity payloads can't leak through. (#3980)
+
 ## [v0.51.365] — 2026-06-11 — Release MD (lineage-segment open + reasoning chip fixes)
 
 ### Fixed
