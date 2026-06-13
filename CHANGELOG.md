@@ -19,6 +19,14 @@
 ### Fixed (fork)
 - `sync-upstream.yml` no longer fails at the push step when an upstream tag modifies a file under `.github/workflows/`. The default `GITHUB_TOKEN` cannot push workflow-file changes (GitHub rejects the push without the `workflows` permission scope), and this fork runs its own CI rather than tracking upstream's. The workflow now reverts any upstream edits to `.github/workflows/*` back to our `master` version, folds the revert into the merge commit, and surfaces the dropped files as a `::notice` and in the PR body. Without this, every sync that touches an upstream workflow file (e.g. v0.51.189, which adds a ruff lint job to `tests.yml`) aborted before opening a PR.
 
+## [v0.51.367] — 2026-06-12 — Release MF (autocomplete filter + lineage merge + shutdown i18n fixes)
+
+### Fixed
+
+- **CLI-only slash commands no longer clutter the WebUI autocomplete (#3969).** Commands that only work in the terminal (and skill-shortcut names that collide with them) are filtered out of the autocomplete list; if you type one anyway, you still get the WebUI-only explanation.
+- **Session-lineage display rows that were being dropped on full session loads are now merged back in.** A merge gap omitted some lineage rows from `GET /api/session`; they're now included (additive, deduped by merge key, leaving explicit forks/child rows alone).
+- **The "Stop the Hermes WebUI server" settings description renders correctly in every language (#4002).** The string embedded `<code>` HTML inside translatable text; it's now split into plain text fragments composed around statically-rendered code spans, applied across all 13 locales.
+
 ## [v0.51.366] — 2026-06-12 — Release ME (assistant turn anchor source normalizer — Slice 2, inert)
 
 ### Added
