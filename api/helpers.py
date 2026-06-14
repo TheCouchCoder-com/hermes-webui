@@ -496,32 +496,11 @@ def read_body(handler) -> dict:
 
 PROFILE_COOKIE_NAME = 'hermes_profile'
 
-# Cookie format: "<profile_name>.<32-hex sig>" where sig is
-#   hmac_sha256(_signing_key, profile_name.encode())[:32].hex()
-# Identical scheme to the hermes_session cookie. The signature prevents a
-# logged-in user from hand-editing their cookie to escalate into another
-# profile (see issue #2 / multi-user RBAC); allowed_profiles enforcement on
-# /api/profile/switch is the hard wall, the signature is tamper-evidence.
-
-# Transition: an unsigned cookie (no '.') is silently rejected by default,
-# logging the user back to their assigned profile via the next switch. Set
-# HERMES_WEBUI_ACCEPT_UNSIGNED_PROFILE_COOKIE=1 to keep accepting the legacy
-# format for one transition release. Conftest enables this for tests.
-
-
-def _profile_cookie_signature(name: str) -> str:
-    """HMAC-SHA256 signature of a profile name. Hex, truncated to 32 chars
-    to match the hermes_session cookie format."""
-    import hashlib
-    import hmac
-    from api.auth import _signing_key
-    return hmac.new(_signing_key(), name.encode('utf-8'), hashlib.sha256).hexdigest()[:32]
-
-
-def _accept_unsigned_profile_cookie() -> bool:
-    import os
-    return os.environ.get('HERMES_WEBUI_ACCEPT_UNSIGNED_PROFILE_COOKIE', '').strip() == '1'
-
+# Cookie format (auth enabled): "<profile_name>.<hmac sig>" where sig is
+#   hmac_sha256(_signing_key, "profile:{session_token}:{profile_name}").hexdigest()
+# Bound to the active auth session so the cookie cannot be forged or replayed
+# across sessions. In no-auth mode the cookie is a plain profile name (not a
+# security boundary). See api/auth.py:sign_profile_cookie_value (#803).
 
 def get_profile_cookie_name() -> str:
     """Return the cookie name used to persist the active WebUI profile."""
@@ -529,9 +508,14 @@ def get_profile_cookie_name() -> str:
 
 
 def get_profile_cookie(handler) -> str | None:
-    """Extract and verify the hermes_profile cookie value from the request,
-    or None if the cookie is missing, malformed, or fails signature check."""
-    import hmac as _hmac
+    """Extract and authenticate the active-profile cookie value.
+
+    When WebUI auth is enabled, the profile cookie is treated as an
+    authorization input for profile-scoped routes. Require it to be signed for
+    the current auth session so clients cannot forge ``hermes_profile`` to
+    impersonate another profile. In no-auth deployments, keep the historical
+    plain profile-name cookie behavior.
+    """
     cookie_header = handler.headers.get('Cookie', '')
     if not cookie_header:
         return None
@@ -543,33 +527,30 @@ def get_profile_cookie(handler) -> str | None:
         return None
     cookie_name = get_profile_cookie_name()
     morsel = cookie.get(cookie_name)
-    if not morsel or not morsel.value:
+    if not (morsel and morsel.value):
         return None
-    raw = morsel.value
-    name: str
-    if '.' in raw:
-        name, _, sig = raw.rpartition('.')
-        if not name:
-            return None
-        try:
-            expected = _profile_cookie_signature(name)
-        except Exception:
-            return None
-        if not _hmac.compare_digest(sig, expected):
-            return None
-    else:
-        # Legacy unsigned cookie (pre-issue #2). Accepted only during transition.
-        if not _accept_unsigned_profile_cookie():
-            return None
-        name = raw
-    # Validate the recovered name against the profile-name pattern.
+
     from api.profiles import _PROFILE_ID_RE
-    if name == 'default' or _PROFILE_ID_RE.fullmatch(name):
-        return name
-    return None
+
+    def _valid_profile_name(val: str) -> bool:
+        return val == 'default' or bool(_PROFILE_ID_RE.fullmatch(val))
+
+    raw_val = morsel.value
+    try:
+        from api.auth import is_auth_enabled, parse_cookie, verify_profile_cookie_value
+        if is_auth_enabled():
+            val = verify_profile_cookie_value(raw_val, parse_cookie(handler))
+            return val if val and _valid_profile_name(val) else None
+    except Exception:
+        logger.warning("Failed to verify active profile cookie", exc_info=True)
+        return None
+
+    # No-auth mode: the cookie is a per-browser UI preference, not an authz
+    # boundary, so retain the legacy plain profile-name format.
+    return raw_val if _valid_profile_name(raw_val) else None
 
 
-def build_profile_cookie(name: str) -> str:
+def build_profile_cookie(name: str, handler=None) -> str:
     """Build a Set-Cookie header value for the active-profile cookie.
 
     The cookie value is HMAC-signed (see module docstring). Always persists
@@ -577,11 +558,29 @@ def build_profile_cookie(name: str) -> str:
     back to the process-global _active_profile mid-session.
     """
     import http.cookies as _hc
-    sig = _profile_cookie_signature(name)
-    signed = f"{name}.{sig}"
     cookie = _hc.SimpleCookie()
     cookie_name = get_profile_cookie_name()
-    cookie[cookie_name] = signed
+    value = name
+    # Guard against a future call site silently emitting an UNSIGNED profile
+    # cookie while auth is enabled (which a client could then... not forge, but
+    # it would weaken the binding). If auth is on we require a handler so the
+    # cookie is bound to the session. (#4023 Opus hardening.)
+    try:
+        from api.auth import is_auth_enabled
+        _auth_on = is_auth_enabled()
+    except Exception:
+        _auth_on = False
+    if _auth_on and handler is None:
+        raise RuntimeError("build_profile_cookie requires a request handler when auth is enabled (to bind the profile cookie to the session)")
+    if handler is not None:
+        try:
+            from api.auth import is_auth_enabled, parse_cookie, sign_profile_cookie_value
+            if is_auth_enabled():
+                value = sign_profile_cookie_value(name, parse_cookie(handler))
+        except Exception as exc:
+            logger.warning("Failed to sign active profile cookie", exc_info=True)
+            raise RuntimeError("could not sign active profile cookie") from exc
+    cookie[cookie_name] = value
     cookie[cookie_name]['path'] = '/'
     cookie[cookie_name]['httponly'] = True
     cookie[cookie_name]['samesite'] = 'Lax'

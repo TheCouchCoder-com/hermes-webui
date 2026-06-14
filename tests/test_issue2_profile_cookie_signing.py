@@ -1,111 +1,127 @@
 """
-Issue #2: HMAC-sign the hermes_profile cookie.
+Issue #2: tamper-proof the hermes_profile cookie.
 
-The cookie is now "<name>.<32-hex sig>" where sig is HMAC-SHA256 of the
-name with _signing_key as the key. This is tamper-evidence on top of the
-hard wall at /api/profile/switch (allowed_profiles enforcement).
+The original implementation (issue #2) HMAC-signed the cookie using only the
+profile name. Upstream v0.51.368 (#803) superseded that with a stronger
+session-bound signing scheme: the cookie is now bound to the active auth
+session so it cannot be forged or replayed across sessions. No-auth mode
+keeps the legacy plain-name cookie (not a security boundary there).
 
-Validation matrix
-  - Valid signed cookie  → returns the profile name.
-  - Tampered name        → returns None (cookie ignored).
-  - Tampered signature   → returns None.
-  - Unsigned legacy form → returns None UNLESS the transition env var is set.
-  - Missing cookie       → returns None.
-  - Malformed (e.g. just a dot) → returns None.
-
-build_profile_cookie always emits the signed form.
+This file retains regression coverage for the original concern (profile
+isolation / tamper prevention) expressed in terms of the current
+implementation. Detailed new-cookie tests live in test_issue803.py.
 """
-import os
 from unittest.mock import MagicMock
 
 import pytest
 
-from api.helpers import (
-    build_profile_cookie,
-    get_profile_cookie,
-    _profile_cookie_signature,
-)
 
-
-def _handler_with_cookie(cookie_value: str):
-    """Stand-in for an http.server BaseHTTPRequestHandler. The helper only
-    reads headers.get('Cookie', '') — a plain dict satisfies that."""
+def _handler(cookie_str: str):
     h = MagicMock()
-    h.headers = {'Cookie': f'hermes_profile={cookie_value}'} if cookie_value else {}
+    h.headers.get = lambda k, d='': cookie_str if k == 'Cookie' else d
     return h
 
 
-def test_build_profile_cookie_emits_signed_form():
-    set_cookie = build_profile_cookie('work')
-    # Format: "hermes_profile=work.<32hex>; Path=/; HttpOnly; SameSite=Lax"
-    assert set_cookie.startswith('hermes_profile=work.')
-    payload = set_cookie.split(';', 1)[0]
-    _, _, value = payload.partition('=')
-    name, _, sig = value.rpartition('.')
-    assert name == 'work'
-    assert len(sig) == 32 and all(c in '0123456789abcdef' for c in sig)
+# ── No-auth mode: plain profile name, still validated ────────────────────────
+
+class TestNoAuthMode:
+    def test_plain_cookie_accepted(self, monkeypatch):
+        from api.helpers import get_profile_cookie
+        monkeypatch.setattr('api.auth.is_auth_enabled', lambda: False)
+        assert get_profile_cookie(_handler('hermes_profile=work')) == 'work'
+
+    def test_default_profile_accepted(self, monkeypatch):
+        from api.helpers import get_profile_cookie
+        monkeypatch.setattr('api.auth.is_auth_enabled', lambda: False)
+        assert get_profile_cookie(_handler('hermes_profile=default')) == 'default'
+
+    def test_missing_cookie_returns_none(self, monkeypatch):
+        from api.helpers import get_profile_cookie
+        monkeypatch.setattr('api.auth.is_auth_enabled', lambda: False)
+        assert get_profile_cookie(_handler('')) is None
+
+    def test_invalid_profile_name_rejected(self, monkeypatch):
+        from api.helpers import get_profile_cookie
+        monkeypatch.setattr('api.auth.is_auth_enabled', lambda: False)
+        for bad in ('../etc', 'a/b', 'WithCaps', 'has space', '.hidden'):
+            assert get_profile_cookie(_handler(f'hermes_profile={bad}')) is None, bad
+
+    def test_build_emits_plain_value(self, monkeypatch):
+        from api.helpers import build_profile_cookie
+        monkeypatch.setattr('api.auth.is_auth_enabled', lambda: False)
+        s = build_profile_cookie('work')
+        assert 'hermes_profile=work' in s
+        assert 'HttpOnly' in s
+        assert 'SameSite=Lax' in s
 
 
-def test_get_profile_cookie_accepts_valid_signed():
-    sig = _profile_cookie_signature('work')
-    h = _handler_with_cookie(f'work.{sig}')
-    assert get_profile_cookie(h) == 'work'
+# ── Auth mode: session-bound signed cookie, tamper-proof ─────────────────────
 
+class TestAuthMode:
+    SESSION = 'session-token.session-sig'
 
-def test_get_profile_cookie_rejects_tampered_name():
-    sig = _profile_cookie_signature('work')
-    # Attacker swaps name from 'work' to 'admin' but keeps the work signature.
-    h = _handler_with_cookie(f'admin.{sig}')
-    assert get_profile_cookie(h) is None
+    def _auth_handler(self, profile_cookie_value: str) -> MagicMock:
+        h = MagicMock()
+        h.headers.get = lambda k, d='': (
+            f'hermes_session={self.SESSION}; hermes_profile={profile_cookie_value}'
+            if k == 'Cookie' else d
+        )
+        return h
 
+    def test_valid_signed_cookie_accepted(self, monkeypatch):
+        from api.auth import sign_profile_cookie_value
+        from api.helpers import get_profile_cookie
+        monkeypatch.setattr('api.auth.is_auth_enabled', lambda: True)
+        monkeypatch.setattr('api.auth.verify_session', lambda c: c == self.SESSION)
+        signed = sign_profile_cookie_value('work', self.SESSION)
+        assert get_profile_cookie(self._auth_handler(signed)) == 'work'
 
-def test_get_profile_cookie_rejects_tampered_signature():
-    h = _handler_with_cookie('work.deadbeefdeadbeefdeadbeefdeadbeef')
-    assert get_profile_cookie(h) is None
+    def test_unsigned_plain_cookie_rejected(self, monkeypatch):
+        """Tamper-proofing: a plain name cookie must be rejected when auth is on."""
+        from api.helpers import get_profile_cookie
+        monkeypatch.setattr('api.auth.is_auth_enabled', lambda: True)
+        monkeypatch.setattr('api.auth.verify_session', lambda c: c == self.SESSION)
+        assert get_profile_cookie(self._auth_handler('work')) is None
 
+    def test_cross_session_cookie_rejected(self, monkeypatch):
+        """Cookie signed for a different session must not grant access."""
+        from api.auth import sign_profile_cookie_value
+        from api.helpers import get_profile_cookie
+        other_session = 'other-token.other-sig'
+        monkeypatch.setattr('api.auth.is_auth_enabled', lambda: True)
+        monkeypatch.setattr(
+            'api.auth.verify_session',
+            lambda c: c in {self.SESSION, other_session},
+        )
+        signed = sign_profile_cookie_value('work', other_session)
+        assert get_profile_cookie(self._auth_handler(signed)) is None
 
-def test_get_profile_cookie_rejects_malformed_cookie():
-    for v in ('.', 'a.', '.a', '...'):
-        h = _handler_with_cookie(v)
-        assert get_profile_cookie(h) is None, f'should reject {v!r}'
+    def test_tampered_profile_name_rejected(self, monkeypatch):
+        """Attacker replaces profile name but keeps the original signature."""
+        from api.auth import sign_profile_cookie_value
+        from api.helpers import get_profile_cookie
+        monkeypatch.setattr('api.auth.is_auth_enabled', lambda: True)
+        monkeypatch.setattr('api.auth.verify_session', lambda c: c == self.SESSION)
+        signed_for_work = sign_profile_cookie_value('work', self.SESSION)
+        # Strip the real sig and replace the name
+        _, sig = signed_for_work.rsplit('.', 1)
+        tampered = f'admin.{sig}'
+        assert get_profile_cookie(self._auth_handler(tampered)) is None
 
+    def test_build_requires_handler_when_auth_on(self, monkeypatch):
+        from api.helpers import build_profile_cookie
+        monkeypatch.setattr('api.auth.is_auth_enabled', lambda: True)
+        with pytest.raises(RuntimeError):
+            build_profile_cookie('work')  # no handler
 
-def test_get_profile_cookie_no_cookie_returns_none():
-    h = _handler_with_cookie('')
-    assert get_profile_cookie(h) is None
-
-
-def test_unsigned_cookie_rejected_by_default(monkeypatch):
-    monkeypatch.delenv('HERMES_WEBUI_ACCEPT_UNSIGNED_PROFILE_COOKIE', raising=False)
-    h = _handler_with_cookie('work')
-    assert get_profile_cookie(h) is None
-
-
-def test_unsigned_cookie_accepted_when_transition_flag_set(monkeypatch):
-    monkeypatch.setenv('HERMES_WEBUI_ACCEPT_UNSIGNED_PROFILE_COOKIE', '1')
-    h = _handler_with_cookie('work')
-    assert get_profile_cookie(h) == 'work'
-
-
-def test_unsigned_cookie_still_validated_against_profile_regex(monkeypatch):
-    """Even with the legacy flag on, an obviously bogus name is rejected."""
-    monkeypatch.setenv('HERMES_WEBUI_ACCEPT_UNSIGNED_PROFILE_COOKIE', '1')
-    h = _handler_with_cookie('../../etc/passwd')
-    assert get_profile_cookie(h) is None
-
-
-def test_signed_cookie_for_default_profile_works():
-    """The literal name 'default' is a valid profile, must sign + verify too."""
-    sig = _profile_cookie_signature('default')
-    h = _handler_with_cookie(f'default.{sig}')
-    assert get_profile_cookie(h) == 'default'
-
-
-def test_signature_is_deterministic_within_same_signing_key():
-    a = _profile_cookie_signature('work')
-    b = _profile_cookie_signature('work')
-    assert a == b
-
-
-def test_signature_differs_per_profile_name():
-    assert _profile_cookie_signature('work') != _profile_cookie_signature('personal')
+    def test_build_with_handler_emits_session_bound_cookie(self, monkeypatch):
+        from api.auth import verify_profile_cookie_value
+        from api.helpers import build_profile_cookie
+        monkeypatch.setattr('api.auth.is_auth_enabled', lambda: True)
+        monkeypatch.setattr('api.auth.verify_session', lambda c: c == self.SESSION)
+        handler = MagicMock()
+        handler.headers.get = lambda k, d='': f'hermes_session={self.SESSION}' if k == 'Cookie' else d
+        cookie = build_profile_cookie('work', handler)
+        value = cookie.split('hermes_profile=', 1)[1].split(';', 1)[0]
+        assert value != 'work'  # must be signed, not plain
+        assert verify_profile_cookie_value(value, self.SESSION) == 'work'
