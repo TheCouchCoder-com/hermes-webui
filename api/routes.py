@@ -4165,14 +4165,30 @@ def _set_login_cookies(handler, *, user, session_cookie):
     """Emit Set-Cookie headers for hermes_session AND hermes_profile.
 
     Called after a successful login or bootstrap. The profile cookie is
-    HMAC-signed (api/helpers.py:build_profile_cookie) and pinned to the
+    session-bound (api/auth.py:sign_profile_cookie_value) and pinned to the
     user's assigned_profile so they land on their workspace immediately,
     not whatever the previous browser session had.
+
+    We sign with the freshly-created session_cookie value directly rather than
+    via build_profile_cookie/parse_cookie, because the session cookie is being
+    SET in this response — it is not yet in the request headers.
     """
-    from api.auth import set_auth_cookie
-    from api.helpers import build_profile_cookie
+    import http.cookies as _hc
+    from api.auth import is_auth_enabled, set_auth_cookie, sign_profile_cookie_value
+    from api.helpers import get_profile_cookie_name
     set_auth_cookie(handler, session_cookie)
-    handler.send_header("Set-Cookie", build_profile_cookie(user['assigned_profile']))
+    profile_name = user['assigned_profile']
+    if is_auth_enabled():
+        value = sign_profile_cookie_value(profile_name, session_cookie)
+    else:
+        value = profile_name
+    c = _hc.SimpleCookie()
+    cookie_name = get_profile_cookie_name()
+    c[cookie_name] = value
+    c[cookie_name]['path'] = '/'
+    c[cookie_name]['httponly'] = True
+    c[cookie_name]['samesite'] = 'Lax'
+    handler.send_header("Set-Cookie", c[cookie_name].OutputString())
 
 
 def _handle_login_post(handler, body) -> bool:
@@ -8746,7 +8762,7 @@ def handle_post(handler, parsed) -> bool:
             from api.config import invalidate_models_cache
             invalidate_models_cache()
             return j(handler, result, extra_headers={
-                'Set-Cookie': build_profile_cookie(name),
+                'Set-Cookie': build_profile_cookie(name, handler),
             })
         except (ValueError, FileNotFoundError) as e:
             return bad(handler, _sanitize_error(e), 404)

@@ -103,7 +103,7 @@ def test_login_sets_both_cookies_and_returns_ok():
 
 
 def test_login_profile_cookie_is_signed():
-    """The hermes_profile cookie carries the HMAC suffix (issue #2 commit 3)."""
+    """The hermes_profile cookie carries a session-bound HMAC suffix (issue #2 / #803)."""
     _create_admin()
     h = StubHandler()
     _handle_login_post(h, {'username': 'admin', 'password': 'supersecret'})
@@ -112,7 +112,7 @@ def test_login_profile_cookie_is_signed():
     assert '.' in value, "hermes_profile cookie must carry a signature suffix"
     name, _, sig = value.rpartition('.')
     assert name == 'default'
-    assert len(sig) == 32
+    assert sig and all(c in '0123456789abcdef' for c in sig), "sig must be non-empty hex"
 
 
 def test_login_routes_to_assigned_profile():
