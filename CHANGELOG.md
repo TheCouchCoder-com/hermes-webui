@@ -19,6 +19,14 @@
 ### Fixed (fork)
 - `sync-upstream.yml` no longer fails at the push step when an upstream tag modifies a file under `.github/workflows/`. The default `GITHUB_TOKEN` cannot push workflow-file changes (GitHub rejects the push without the `workflows` permission scope), and this fork runs its own CI rather than tracking upstream's. The workflow now reverts any upstream edits to `.github/workflows/*` back to our `master` version, folds the revert into the merge commit, and surfaces the dropped files as a `::notice` and in the PR body. Without this, every sync that touches an upstream workflow file (e.g. v0.51.189, which adds a ruff lint job to `tests.yml`) aborted before opening a PR.
 
+## [v0.51.372] — 2026-06-12 — Release MK (markdown link-label inline code, /use skill autocomplete, mobile Worklog overflow)
+
+### Fixed
+
+- **Inline code (and bold/italic/strikethrough) inside a markdown link label now renders correctly (#4001).** A link like `` [`abc123`](https://…) `` previously showed the literal `` `abc123` `` backticks (or escaped `&lt;code&gt;`) instead of a code span. The renderer now preserves `code`/`strong`/`em`/`del` formatting inside link labels while still escaping everything else and running the result through the existing tag/attribute sanitizer. (#4001)
+- **`/use` now autocompletes installed skill names (#3968).** Typing `/use ` offers the available skills, matching how `/model` and `/personality` already autocomplete their arguments. The suggestion list refreshes when skills are enabled, disabled, saved, or deleted. (#3968)
+- **The Worklog summary no longer causes sideways panning on narrow mobile viewports (#4064).** A long single-line Worklog label could widen the chat column past the screen on Android; the summary row is now bounded to the available width and truncates with an ellipsis instead. (#4064)
+
 ## [v0.51.371] — 2026-06-12 — Release MJ (low-risk batch: approval polling, composer/titlebar polish, slash-command parity, skill categories, French TTS)
 
 ### Fixed
