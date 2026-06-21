@@ -19,6 +19,13 @@
 ### Fixed (fork)
 - `sync-upstream.yml` no longer fails at the push step when an upstream tag modifies a file under `.github/workflows/`. The default `GITHUB_TOKEN` cannot push workflow-file changes (GitHub rejects the push without the `workflows` permission scope), and this fork runs its own CI rather than tracking upstream's. The workflow now reverts any upstream edits to `.github/workflows/*` back to our `master` version, folds the revert into the merge commit, and surfaces the dropped files as a `::notice` and in the PR body. Without this, every sync that touches an upstream workflow file (e.g. v0.51.189, which adds a ruff lint job to `tests.yml`) aborted before opening a PR.
 
+## [v0.51.373] — 2026-06-12 — Release ML (sidebar lineage + source-count fixes)
+
+### Fixed
+
+- **Expanded lineage segments no longer collapse when the session list refreshes mid-stream (#4005).** While a turn was streaming, each sidebar refresh wiped the lineage-report cache and re-collapsed any expanded lineage row. The cache is now pruned to only the rows that left the visible set (kept for still-visible rows), the in-flight report request is identity-guarded so a stale response can't overwrite a newer one, and an expanded row that still needs its report fetches and re-renders in place. (#4005)
+- **The sidebar source-filter counts (WebUI / CLI) now match the number of rows actually shown (#3966).** The chip counts were computed from pre-collapse session totals, so they could disagree with the collapsed/grouped rows rendered in the list. Counts are now derived from the same collapse-and-attach pass used to render each source's rows. (#3966)
+
 ## [v0.51.372] — 2026-06-12 — Release MK (markdown link-label inline code, /use skill autocomplete, mobile Worklog overflow)
 
 ### Fixed
