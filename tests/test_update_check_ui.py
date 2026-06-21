@@ -30,12 +30,14 @@ def test_ui_js_defines_update_check_unavailable_formatter():
 
 
 def test_unavailable_branch_lives_between_error_and_up_to_date():
-    """The unavailable branch must run AFTER errorParts (errors are more
+    """The no-git branch must run AFTER errorParts (errors are more
     actionable) but BEFORE the green up-to-date branch (so 'no .git' never
     masquerades as success)."""
-    error_idx = PANELS_JS.index("errorParts.length")
-    unavailable_idx = PANELS_JS.index("unavailableParts.length")
+    # Use the else-if branch markers (not the inline noGitParts suffix inside
+    # the updates-available branch, which appears earlier in the file).
+    error_idx = PANELS_JS.index("} else if(errorParts.length)")
+    unavailable_idx = PANELS_JS.index("} else if(noGitParts.length)")
     up_to_date_idx = PANELS_JS.index("settings_up_to_date")
     assert error_idx < unavailable_idx < up_to_date_idx, (
-        "expected order: errorParts → unavailableParts → up_to_date"
+        "expected order: errorParts → noGitParts → up_to_date"
     )

@@ -334,6 +334,8 @@ class TestScheduleRestart:
         import os as _os
         original_execv = _os.execv
 
+        monkeypatch.setattr(sys, 'platform', 'linux')
+        monkeypatch.setattr(upd, '_wait_until_restart_safe', lambda *a, **k: {'restart_blocked': False})
         monkeypatch.setattr(_os, 'execv', fake_execv)
 
         start = time.monotonic()
@@ -364,6 +366,8 @@ class TestScheduleRestart:
             events.append(("execv", exe))
 
         # Override the autouse no-op stub with a recording spy.
+        monkeypatch.setattr(sys, 'platform', 'linux')
+        monkeypatch.setattr(upd, '_wait_until_restart_safe', lambda *a, **k: {'restart_blocked': False})
         monkeypatch.setattr(upd, "_purge_agent_pycache", spy_purge)
         monkeypatch.setattr(os, "execv", fake_execv)
 
@@ -1454,6 +1458,8 @@ class TestSequentialUpdateRestartCoordination:
             execv_time.append(_t.monotonic())
             execv_called.set()
 
+        monkeypatch.setattr(sys, 'platform', 'linux')
+        monkeypatch.setattr(upd, '_wait_until_restart_safe', lambda *a, **k: {'restart_blocked': False})
         monkeypatch.setattr(os, 'execv', fake_execv)
 
         # Hold _apply_lock from another thread (simulating an in-flight
@@ -1501,6 +1507,8 @@ class TestSequentialUpdateRestartCoordination:
         execv_called = []
         def fake_execv(exe, args):
             execv_called.append(True)
+        monkeypatch.setattr(sys, 'platform', 'linux')
+        monkeypatch.setattr(upd, '_wait_until_restart_safe', lambda *a, **k: {'restart_blocked': False})
         monkeypatch.setattr(os, 'execv', fake_execv)
 
         upd._schedule_restart(delay=0.05)
@@ -1945,6 +1953,18 @@ class TestForceButtonResetOnRetry:
         assert "display='none'" in setup or "display = 'none'" in setup, (
             "applyUpdates setup must hide btnForceUpdate via display:none"
         )
+
+
+def test_force_update_confirm_discloses_untracked_file_deletion():
+    """#4310: destructive force-update copy must include untracked files."""
+    src = read('static/ui.js')
+    m = re.search(r'async function forceUpdate\b.*?\n\}', src, re.DOTALL)
+    assert m, "forceUpdate() not found"
+    fn = m.group(0)
+    assert 'delete untracked files' in fn, (
+        "forceUpdate confirmation must disclose that git clean -fd deletes "
+        "untracked files before the hard reset"
+    )
 
 
 # ── #785: Manual 'Check for Updates' button ───────────────────────────────────
