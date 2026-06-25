@@ -134,6 +134,24 @@ jobs:
           fi
           exit 0
 
+      - name: Drop upstream workflow file changes
+        if: steps.pick.outputs.tag != '' && steps.branch_check.outputs.skip != 'true'
+        run: |
+          # GitHub App tokens lack `workflows` permission, so pushes that include
+          # .github/workflows changes are rejected. The fork also runs its own CI
+          # and does not need upstream's workflow files.  Always restore our copy.
+          CHANGED=$(git diff --name-only master HEAD -- '.github/workflows/')
+          if [ -n "$CHANGED" ]; then
+            echo "$CHANGED" | while IFS= read -r f; do
+              if git cat-file -e "master:$f" 2>/dev/null; then
+                git checkout master -- "$f"
+              else
+                git rm --quiet -f "$f" 2>/dev/null || true
+              fi
+            done
+            git diff --staged --quiet || git commit -m "restore fork .github/workflows (drop upstream workflow changes)"
+          fi
+
       - name: Set up Python (only if merge applied cleanly)
         if: steps.merge.outputs.merge_status == 'clean'
         uses: actions/setup-python@v5
