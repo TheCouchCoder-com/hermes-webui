@@ -784,6 +784,9 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
     if path in (None, ""):
         return _resolve_path(_BOOT_DEFAULT_WORKSPACE)
 
+    if not isinstance(path, (str, Path)):
+        raise TypeError(f"workspace path must be a string or Path, not {type(path).__name__}")
+
     candidate = _resolve_path(path)
 
     # (A) Trusted if under the user's home directory — cross-platform via Path.home()
@@ -877,6 +880,9 @@ def validate_workspace_to_add(path: str) -> Path:
     macOS Finder's "Copy as Pathname" wraps paths in single quotes by default,
     and users routinely paste those into the Add Space input.
     """
+    if not isinstance(path, (str, Path)):
+        raise TypeError(f"workspace path must be a string or Path, not {type(path).__name__}")
+
     path = _strip_surrounding_quotes(path)
     candidate = _resolve_path(path)
 
