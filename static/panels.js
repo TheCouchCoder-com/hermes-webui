@@ -41,7 +41,7 @@ const APP_TITLEBAR_KEYS = {
   memory: 'tab_memory', workspaces: 'tab_workspaces',
   profiles: 'tab_profiles', todos: 'tab_todos', insights: 'tab_insights', logs: 'tab_logs', settings: 'tab_settings',
 };
-const MAIN_VIEW_PANELS = ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs','plugin'];
+const MAIN_VIEW_PANELS = ['settings','skills','memory','tasks','kanban','workspaces','profiles','admin','insights','logs','plugin'];
 const MAIN_VIEW_SIDEBAR_PANEL_FALLBACKS = { plugin: 'settings' };
 
 /**
@@ -5986,7 +5986,7 @@ function closeProfileDropdown() {
   if(tbtn) tbtn.classList.remove('active');
 }
 document.addEventListener('click', e => {
-  if (!e.target.closest('#profileChipWrap') && !e.target.closest('#titlebarProfileBtn') && !e.target.closest('#profileDropdown')) closeProfileDropdown();
+  if (!e.target.closest('#profileChipWrap') && !e.target.closest('#profileChipTitlebarWrap') && !e.target.closest('#profileDropdown')) closeProfileDropdown();
 });
 window.addEventListener('resize',()=>{
   const dd=$('profileDropdown');
@@ -6036,9 +6036,11 @@ async function switchToProfile(name) {
   const _switchGen = ++_profileSwitchGeneration;
   if (_chip) { _chip.classList.add('switching'); _chip.disabled = true; }
   if (_titlebarBtn) { _titlebarBtn.classList.add('switching'); _titlebarBtn.disabled = true; }
+  _forEachProfileChip(c => { c.classList.add('switching'); c.disabled = true; });
   // Optimistic name update — shows the target name right away
   if (_chipLabel) _chipLabel.textContent = name;
   if (_titlebarLabel) _titlebarLabel.textContent = name;
+  _setProfileChipLabel(name);
 
   // ── Clear stale content + show loading skeletons immediately (#4662) ───────
   // The conversation list and workspace tree still show the PREVIOUS profile's
@@ -6280,6 +6282,7 @@ async function switchToProfile(name) {
     // Always remove loading indicator regardless of success or failure
     if (_switchGen === _profileSwitchGeneration && _chip) { _chip.classList.remove('switching'); _chip.disabled = false; }
     if (_switchGen === _profileSwitchGeneration && _titlebarBtn) { _titlebarBtn.classList.remove('switching'); _titlebarBtn.disabled = false; }
+    if (_switchGen === _profileSwitchGeneration) _forEachProfileChip(c => { c.classList.remove('switching'); c.disabled = false; });
     // #4671 safety net: guarantee the session-list embargo is lifted on EVERY exit of the
     // current switch (success paths clear it before their authoritative render; this covers
     // early-returns/throws between skeleton-show and those clears so it can't freeze the

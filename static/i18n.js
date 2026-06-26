@@ -22063,6 +22063,8 @@ const LOCALES = {
     yolo_disabled: 'Chế độ YOLO TẮT',
     yolo_pill_label: 'YOLO',
     yolo_pill_title_active: 'Chế độ YOLO đang bật — bấm để tắt',
+    settings_label_always_new_chat: 'Luôn bắt đầu cuộc trò chuyện mới',
+    settings_desc_always_new_chat: 'Khi bật, WebUI sẽ mở một cuộc trò chuyện trống (thay vì khôi phục phiên cuối cùng) mỗi khi bạn tải trang. Liên kết sâu (?session=…) và các luồng đang chạy vẫn sẽ được tiếp tục.',
 },
 };
 

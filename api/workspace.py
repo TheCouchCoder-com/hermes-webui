@@ -786,6 +786,21 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
 
     candidate = _resolve_path(path)
 
+    # (A) Trusted if under the user's home directory — cross-platform via Path.home()
+    # Must be checked before system roots to allow symlinks like /var/home.
+    _home = _home_path()
+    if _home != Path("/"):
+        try:
+            candidate.relative_to(_home)
+            return candidate
+        except ValueError:
+            pass
+
+    # System directory check wins over existence — even for remote terminal
+    # profiles (we refuse to register OS internals regardless of terminal.cwd).
+    if _is_blocked_workspace_path(candidate, path):
+        raise ValueError(f"Path points to a system directory: {candidate}")
+
     access_error = _workspace_access_error(candidate)
     remote_candidate = _remote_terminal_workspace_candidate(path)
     if access_error:
@@ -798,19 +813,6 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
 
     if remote_candidate is not None:
         return remote_candidate
-
-    # (A) Trusted if under the user's home directory — cross-platform via Path.home()
-    # Must be checked before system roots to allow symlinks like /var/home.
-    _home = _home_path()
-    if _home != Path("/"):
-        try:
-            candidate.relative_to(_home)
-            return candidate
-        except ValueError:
-            pass
-
-    if _is_blocked_workspace_path(candidate, path):
-        raise ValueError(f"Path points to a system directory: {candidate}")
 
     # (B) Trusted if already in the saved workspace list — covers non-home installs
     try:
@@ -878,6 +880,17 @@ def validate_workspace_to_add(path: str) -> Path:
     path = _strip_surrounding_quotes(path)
     candidate = _resolve_path(path)
 
+    # Home directory is always trusted — check before the system-root blocklist
+    # so /var/home/... (systemd-homed) paths are not wrongly rejected.
+    _home = _home_path()
+    if _home != Path("/") and _is_within(candidate, _home):
+        return candidate
+
+    # System directory check wins over existence — even for remote terminal
+    # profiles (we refuse to register OS internals regardless of terminal.cwd).
+    if _is_blocked_workspace_path(candidate, path):
+        raise ValueError(f"Path points to a system directory: {candidate}")
+
     access_error = _workspace_access_error(candidate)
     remote_candidate = _remote_terminal_workspace_candidate(path)
     if access_error:
@@ -889,15 +902,6 @@ def validate_workspace_to_add(path: str) -> Path:
 
     if remote_candidate is not None:
         return remote_candidate
-
-    # Home directory is always trusted regardless of where it lives on disk
-    # (e.g. /var/home/... on systemd-homed Fedora/RHEL).
-    _home = _home_path()
-    if _home != Path("/") and _is_within(candidate, _home):
-        return candidate
-
-    if _is_blocked_workspace_path(candidate, path):
-        raise ValueError(f"Path points to a system directory: {candidate}")
 
     return candidate
 

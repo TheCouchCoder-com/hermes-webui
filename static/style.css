@@ -3088,9 +3088,6 @@ body.resizing .sidebar{transition:none!important;}
 .tool-worklog-group[data-tool-worklog-group="1"]:not([data-run-activity-group="1"]) .as-dot{
   display:none;
 }
-.tool-worklog-group[data-live-tool-call-group="1"][data-live-activity-current="1"] .tool-call-group-chevron{
-  display:none;
-}
 .tool-worklog-running-label{display:none;color:var(--accent-text);font-family:'SF Mono',ui-monospace,monospace;font-size:12px;font-weight:600;line-height:1.4;}
 .tool-worklog-group[data-tool-worklog-running="1"] .tool-worklog-running-label{display:inline-flex;}
 .tool-worklog-body{
