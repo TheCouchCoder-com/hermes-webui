@@ -56,6 +56,23 @@ function _isDocumentVisibleAndFocused() {
   return true;
 }
 
+let _desktopBackgroundedForNotifications=false;
+// Desktop shells can background a visible document; keep that signal notification-only.
+if(typeof window!=='undefined'){
+  window.__hermesSetBackgrounded=(value)=>{
+    _desktopBackgroundedForNotifications=!!value;
+    if(_desktopBackgroundedForNotifications){
+      for(const k in _STREAM_NOTIFICATION_BACKGROUND){
+        const e=_STREAM_NOTIFICATION_BACKGROUND[k];
+        if(e) e.wasBackgrounded=true;
+      }
+    }
+  };
+}
+function _isBackgroundedForBrowserNotification(){
+  return !!(typeof document!=='undefined'&&document.hidden)||_desktopBackgroundedForNotifications;
+}
+
 function _isSessionCurrentPane(sid) {
   if(!sid || !S.session || S.session.session_id!==sid) return false;
   // During session switching, S.session still points at the previous row until
@@ -1084,16 +1101,15 @@ async function send(){
       if(busyMode==='steer'&&S.activeStreamId&&typeof _trySteer==='function'){
         // Real steer: clear the input first so the user gets immediate
         // feedback, then ship the steer payload via /api/chat/steer.
-        // _trySteer falls back to queue+cancel internally if the agent
-        // isn't running / cached / steer-capable.
+        // _trySteer restores the draft and leaves the active stream running if
+        // the agent isn't running / cached / steer-capable.
         $('msg').value='';autoResize();
-        // Do NOT clear pendingFiles yet — _trySteer may fall back to
-        // interrupt+queue and needs the files for queueSessionMessage.
-        // _trySteer clears pendingFiles itself in the fallback path, and
-        // the server returns accepted:true (no files sent) on success.
-        await _trySteer(text, /*explicitSteer=*/false);
-        // After _trySteer: clear any remaining files (success path).
-        S.pendingFiles=[];renderTray();
+        // Do NOT clear pendingFiles yet — a failed steer restores the draft and
+        // must keep staged files available for the user's next explicit action.
+        const _steerDelivered=await _trySteer(text, /*explicitSteer=*/false);
+        // After a delivered steer, clear any staged files because the text-only
+        // steer payload has been handled. On failure, keep files staged.
+        if(_steerDelivered){S.pendingFiles=[];renderTray();}
       } else if(busyMode==='interrupt'){
         // Queue the message, then cancel so drain re-sends it.
         const _modelState=_chatPayloadModelState();
@@ -1522,6 +1538,7 @@ async function send(){
 }
 
 const LIVE_STREAMS={};
+const _STREAM_NOTIFICATION_BACKGROUND={};
 
 // #4416: track whether the tab was hidden at ANY point during a live stream, so
 // the response-complete notification fires for a backgrounded tab even when
@@ -1550,6 +1567,22 @@ function _clearStreamHidden(sid, streamId){
   if(!e) return;
   if(streamId&&e.streamId&&e.streamId!==streamId) return;
   delete _STREAM_WAS_HIDDEN[sid];
+}
+function _clearStreamNotificationBackground(sid, streamId){
+  if(!sid) return;
+  const e=_STREAM_NOTIFICATION_BACKGROUND[sid];
+  if(!e) return;
+  if(streamId&&e.streamId&&e.streamId!==streamId) return;
+  delete _STREAM_NOTIFICATION_BACKGROUND[sid];
+}
+function _shouldForceCompletionNotification(sid, streamId){
+  const hiddenEntry=_STREAM_WAS_HIDDEN[sid];
+  const backgroundEntry=_STREAM_NOTIFICATION_BACKGROUND[sid];
+  const wasHidden=!!(hiddenEntry&&hiddenEntry.wasHidden);
+  const wasBackgrounded=!!(backgroundEntry&&backgroundEntry.wasBackgrounded);
+  _clearStreamHidden(sid, streamId);
+  _clearStreamNotificationBackground(sid, streamId);
+  return wasHidden||wasBackgrounded;
 }
 
 function closeLiveStream(sessionId, streamId, source){
@@ -1628,6 +1661,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const _keep=reconnecting&&_prev&&_prev.streamId===streamId;
     if(!_keep){
       _STREAM_WAS_HIDDEN[activeSid]={streamId,wasHidden:(typeof document!=='undefined'&&!!document.hidden)};
+    }
+    const _prevBackground=_STREAM_NOTIFICATION_BACKGROUND[activeSid];
+    const _keepBackground=reconnecting&&_prevBackground&&_prevBackground.streamId===streamId;
+    if(!_keepBackground){
+      _STREAM_NOTIFICATION_BACKGROUND[activeSid]={streamId,wasBackgrounded:_desktopBackgroundedForNotifications};
     }
   }
   if(!INFLIGHT[activeSid]) INFLIGHT[activeSid]={messages:[...S.messages],uploaded:[...uploaded],toolCalls:[]};
@@ -1787,8 +1825,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const normalized=String(text||'').replace(/\s+/g,' ').trim();
     if(!normalized) return false;
     const systemRecovery=/^\[System:/i.test(normalized)
-      && /previous response was cut off by a network error/i.test(normalized)
-      && /continue exactly where you left off/i.test(normalized);
+      && (/continue exactly where you left off/i.test(normalized)
+        || /do not retry the same tool call/i.test(normalized));
     const backendRecovery=/^the live worker stopped before this run finished\.?$/i.test(normalized);
     return !!(systemRecovery || backendRecovery);
   }
@@ -1899,6 +1937,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
     _clearOwnerInflightState();
     _clearStreamHidden(activeSid, streamId);  // #4416: terminal path, drop hidden tracker
+    _clearStreamNotificationBackground(activeSid, streamId);
     _flushReasoningToAnchor();
     _scheduleAnchorRegistryCleanup();
     _clearApprovalForOwner();
@@ -2506,35 +2545,142 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!message||typeof message!=='object') return '';
     return String(message.reasoning||message._reasoning||message.reasoning_content||message.thinking||'');
   }
+  // #4622: a settled tool row built from messages[].tool_calls (state.db/sidecar)
+  // can lack the result body — terminal stdout, or the diff/output that a
+  // patch/edit card renders — because the persisted row carries only a short
+  // preview (or, on a cold/paginated load, nothing). The full body lives on the
+  // live S.toolCalls entry at settle time. When a settled row and a live call
+  // match by tool id, restore the missing body fields from the live call onto
+  // the settled row's tool+payload (only when the settled value is empty — never
+  // clobber a genuine persisted body), so the rebuilt card shows full output +
+  // the Show-more expander + the rendered diff. Returns true if it enriched.
+  function _enrichSettledToolRowBodyFromLive(row, live){
+    if(!row||typeof row!=='object'||!live||typeof live!=='object') return false;
+    const tool=(row.tool&&typeof row.tool==='object')?row.tool:(row.tool={});
+    const payload=(row.payload&&typeof row.payload==='object')?row.payload:(row.payload={});
+    let enriched=false;
+    const _empty=v=>v===undefined||v===null||v==='';
+    // Result body: _anchorSceneToolCallFromRow renders tool.snippet||payload.snippet
+    // (||payload.result||payload.output) as the card output + diff source, so
+    // restore the snippet onto both tool+payload when the settled row has none.
+    const liveSnippet=_anchorSceneStringPayload(live.snippet||live.result||live.output);
+    // Restore the live body when the settled snippet is missing OR is a bounded
+    // preview of the live one. The backend persists a capped preview
+    // (_TOOL_RESULT_SNIPPET_MAX = 4000 chars in api/streaming.py), so a long
+    // terminal/tool output settles to that 4000-char prefix, not to empty —
+    // #4622's actual symptom. Treat a settled snippet as restorable when the
+    // live snippet is strictly longer AND the settled value is a prefix of it
+    // AND the settled value is at/over the persistence cap (i.e. it's a
+    // truncated preview, not a genuinely short real value we must not clobber).
+    const _SETTLED_SNIPPET_CAP=4000;
+    const _isBoundedPreview=(settled,full)=>(
+      typeof settled==='string'&&typeof full==='string'&&
+      full.length>settled.length&&settled.length>=_SETTLED_SNIPPET_CAP&&
+      full.startsWith(settled)
+    );
+    const _settledSnippet=(!_empty(tool.snippet)?tool.snippet:(!_empty(payload.snippet)?payload.snippet:''));
+    const _snippetRestorable=(_empty(tool.snippet)&&_empty(payload.snippet))||_isBoundedPreview(_settledSnippet,liveSnippet);
+    if(liveSnippet&&_snippetRestorable){
+      tool.snippet=liveSnippet; payload.snippet=liveSnippet; enriched=true;
+    }
+    // Command (shell detail-lead) + args (diff/input reconstruction, the "Full" tab).
+    const liveCommand=_anchorSceneStringPayload(live.command||live.raw_command);
+    if(liveCommand&&_empty(tool.command)&&_empty(payload.command)){
+      tool.command=liveCommand; payload.command=liveCommand; enriched=true;
+    }
+    const liveArgs=(live.args&&typeof live.args==='object')?live.args:null;
+    const argsEmpty=o=>!o||typeof o!=='object'||Object.keys(o).length===0;
+    if(liveArgs&&argsEmpty(tool.args)&&argsEmpty(payload.args)){
+      tool.args={...liveArgs}; payload.args={...liveArgs}; enriched=true;
+    }
+    return enriched;
+  }
   function _anchorSceneRowsByMessageIndex(messages, turnStart, lastAsstIndex){
     const byIdx=new Map();
     const add=(idx,row)=>{
       if(!byIdx.has(idx)) byIdx.set(idx,[]);
       byIdx.get(idx).push(row);
     };
-    let order=0;
+    // Pre-index S.toolCalls by assistant_msg_idx for O(m+n) lookup
+    const toolsByIdx=new Map();
+    if(S.toolCalls) for(const tc of S.toolCalls){
+      const ti=typeof tc.toolIdx==='number'? tc.toolIdx : parseInt(tc.assistant_msg_idx,10);
+      if(Number.isFinite(ti)){
+        if(!toolsByIdx.has(ti)) toolsByIdx.set(ti,[]);
+        toolsByIdx.get(ti).push(tc);
+      }
+    }
+    let encounter=0;
     for(let idx=turnStart+1;idx<lastAsstIndex;idx+=1){
       const message=messages[idx];
       if(!message||message.role!=='assistant') continue;
+      const pool=[];
       const text=_anchorSceneMessageText(message);
-      if(_anchorSceneCleanText(text)) add(idx,_anchorSceneProseRow(text,order++,idx));
+      if(_anchorSceneCleanText(text)){
+        pool.push({..._anchorSceneProseRow(text,0,idx),_phase:2,_encounter:encounter++});
+      }
       const reasoning=_anchorSceneMessageReasoningText(message);
       if(_anchorSceneCleanText(reasoning)&&_anchorSceneTextKey(reasoning)!==_anchorSceneTextKey(text)){
-        add(idx,_anchorSceneThinkingRow(reasoning,order++,idx));
+        pool.push({..._anchorSceneThinkingRow(reasoning,0,idx),_phase:0,_encounter:encounter++});
       }
       const messageTools=[];
       if(Array.isArray(message.tool_calls)) messageTools.push(...message.tool_calls);
       if(Array.isArray(message._partial_tool_calls)) messageTools.push(...message._partial_tool_calls);
+      const seenToolIds=new Set();
+      const rowByToolId=new Map();
       for(const tool of messageTools){
-        add(idx,_anchorSceneToolRowFromCall(tool,order++,idx));
+        const row=_anchorSceneToolRowFromCall(tool,0,idx);
+        pool.push({...row,_phase:1,_encounter:encounter++});
+        const tid=row.tool_call_id||(row.tool&&row.tool.id);
+        if(tid){ seenToolIds.add(tid); rowByToolId.set(tid,row); }
       }
-    }
-    const toolCalls=Array.isArray(S.toolCalls)?S.toolCalls:[];
-    for(const tool of toolCalls){
-      if(!tool||typeof tool!=='object') continue;
-      const idx=Number(tool.assistant_msg_idx);
-      if(!Number.isFinite(idx)||idx<=turnStart||idx>=lastAsstIndex) continue;
-      add(idx,_anchorSceneToolRowFromCall(tool,order++,idx));
+      // Merge S.toolCalls for this index, dedup by tool id. When a live call
+      // matches a settled row already in the pool, don't just skip it —
+      // restore any result body the settled row is missing (#4622): the live
+      // S.toolCalls entry carries the full terminal output / patch diff that the
+      // persisted state.db row may have dropped to a short preview or nothing.
+      for(const tool of (toolsByIdx.get(idx)||[])){
+        if(!tool||typeof tool!=='object') continue;
+        const toolIdx=Number(tool.assistant_msg_idx);
+        if(!Number.isFinite(toolIdx)||toolIdx!==idx) continue;
+        const row=_anchorSceneToolRowFromCall(tool,0,idx);
+        const tid=row.tool_call_id||(row.tool&&row.tool.id);
+        if(tid&&seenToolIds.has(tid)){
+          const existing=rowByToolId.get(tid);
+          if(existing) _enrichSettledToolRowBodyFromLive(existing, tool);
+          continue;
+        }
+        if(tid){ seenToolIds.add(tid); rowByToolId.set(tid,row); }
+        pool.push({...row,_phase:1,_encounter:encounter++});
+      }
+      // Stable sort by (phase, started_at, encounter)
+      pool.sort((a,b)=>{
+        if(a._phase!==b._phase) return a._phase-b._phase;
+        const aTime=(a.tool&&a.tool.started_at!=null)?a.tool.started_at:Infinity;
+        const bTime=(b.tool&&b.tool.started_at!=null)?b.tool.started_at:Infinity;
+        if(aTime!==bTime) return aTime-bTime;
+        return a._encounter-b._encounter;
+      });
+      // Emit with sequential order_index values, strip temp props.
+      // Rows were built with orderIndex=0, so their row_id/seq still encode 0.
+      // Rewrite order_index AND regenerate the index-derived identity fields
+      // (row_id/seq) from the final per-bucket position, so two anonymous rows
+      // (no tool id) at the same message index don't collide on the same row_id
+      // and get silently deduped by _completeSettledAnchorSceneForTurn().
+      for(const row of pool){
+        const {_phase,_encounter,...clean}=row;
+        const oi=byIdx.has(idx)?byIdx.get(idx).length:0;
+        clean.order_index=oi;
+        clean.seq=oi;
+        if(clean.identity&&typeof clean.identity==='object') clean.identity={...clean.identity,seq:oi};
+        // Tool rows with a tool id carry a tid-based row_id (already unique) —
+        // only regenerate the default index-based row_id form.
+        const indexRowId=`settled:${activeSid||'session'}:${streamId||'stream'}:${clean.role}:${idx}:0`;
+        if(clean.row_id===indexRowId){
+          clean.row_id=`settled:${activeSid||'session'}:${streamId||'stream'}:${clean.role}:${idx}:${oi}`;
+        }
+        add(idx,clean);
+      }
     }
     return byIdx;
   }
@@ -2792,6 +2938,94 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     },null);
     return _findAnchorActivityEventByLocalId(localId,'reasoning');
   }
+  function _compactVisibleEchoText(value){
+    return String(value||'').replace(/\s+/g,'');
+  }
+  function _stripCompactEchoSuffix(value, suffix){
+    const raw=String(value||'');
+    const candidate=_compactVisibleEchoText(suffix);
+    if(!raw||!candidate) return {text:raw,removed:false};
+    const windowSize=Math.max(String(suffix||'').length*3,4096);
+    const offset=Math.max(0,raw.length-windowSize);
+    const tail=raw.slice(offset);
+    for(let idx=0;idx<=tail.length;idx+=1){
+      if(_compactVisibleEchoText(tail.slice(idx))===candidate){
+        return {text:raw.slice(0,offset+idx).trimEnd(),removed:true};
+      }
+    }
+    return {text:raw,removed:false};
+  }
+  function _stripAnchorReasoningEcho(visible){
+    const events=_anchorActivityEvents();
+    if(!events||!visible) return false;
+    for(let i=events.length-1;i>=0;i-=1){
+      const event=events[i];
+      if(!event||event.source_event_type!=='reasoning') continue;
+      const payload=(event.payload&&typeof event.payload==='object')?event.payload:{};
+      const rawText=String(payload.text||payload.reasoning||payload.thinking||'');
+      const stripped=_stripCompactEchoSuffix(rawText, visible);
+      if(!stripped.removed) continue;
+      const nextText=String(stripped.text||'').trim();
+      if(nextText){
+        _replaceAnchorActivityEventByLocalId(event.local_id,'reasoning',{
+          payload:{text:nextText},
+        });
+      }else{
+        events.splice(i,1);
+      }
+      _renderAnchorLiveScene();
+      return true;
+    }
+    return false;
+  }
+  function _removeLiveReasoningEchoRows(visible){
+    const turn=$('liveAssistantTurn');
+    const blocks=turn&&typeof _assistantTurnBlocks==='function'?_assistantTurnBlocks(turn):null;
+    if(!blocks||!visible) return false;
+    let removed=false;
+    const selector=[
+      '.agent-activity-thinking[data-anchor-scene-row="1"]',
+      '.agent-activity-thinking[data-live-thinking="1"]',
+      '.wl-reason[data-worklog-anchor-reason="1"]',
+      '.wl-reason[data-worklog-reason-source="reasoning"]'
+    ].join(',');
+    blocks.querySelectorAll(selector).forEach(row=>{
+      const textNode=row.querySelector&&(
+        row.querySelector('.thinking-card-body pre') ||
+        row.querySelector('.thinking-card-body')
+      );
+      const text=String((textNode&&textNode.textContent)||row.textContent||'');
+      if(!_stripCompactEchoSuffix(text, visible).removed) return;
+      row.remove();
+      removed=true;
+    });
+    if(removed&&typeof _syncToolCallGroupSummary==='function'){
+      blocks.querySelectorAll('.tool-worklog-group,.tool-call-group').forEach(group=>{
+        _syncToolCallGroupSummary(group);
+      });
+    }
+    return removed;
+  }
+  function _stripLiveReasoningEcho(visible){
+    let removed=false;
+    const durable=_stripCompactEchoSuffix(reasoningText, visible);
+    if(durable.removed){
+      reasoningText=durable.text;
+      removed=true;
+    }
+    const live=_stripCompactEchoSuffix(liveReasoningText, visible);
+    if(live.removed){
+      liveReasoningText=live.text;
+      removed=true;
+    }
+    const anchorRemoved=_stripAnchorReasoningEcho(visible);
+    const domRemoved=_removeLiveReasoningEchoRows(visible);
+    if(removed) syncInflightAssistantMessage();
+    if((removed||anchorRemoved||domRemoved)&&!String(liveReasoningText||'').trim()&&typeof removeThinking==='function'){
+      removeThinking();
+    }
+    return removed||anchorRemoved||domRemoved;
+  }
   function _flushReasoningToAnchor(){
     if(_anchorReasoningFlushed||!reasoningText) return;
     _anchorReasoningFlushed=true;
@@ -2943,7 +3177,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _smdWrittenLen=0;
     _smdWrittenText='';
     if(!window.smd){_smdParser=null;return;}
-    const baseRenderer=fade ? _streamFadeRenderer(el) : window.smd.default_renderer(el);
+    const baseRenderer=fade ? _streamFadeRenderer(el) : _safeSmdRenderer(el);
     const renderer=_smdRendererWithoutUnderscoreEmphasis(baseRenderer);
     _smdParser=window.smd.parser(renderer);
   }
@@ -3014,9 +3248,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     try{window.smd.parser_write(_smdParser,delta);}catch(_){}
     _smdWrittenLen=displayText.length;
     _smdWrittenText=displayText;
-    // streaming-markdown does NOT sanitize URL schemes. The default live path
-    // scans after writes; fade mode blocks unsafe href/src in its renderer.set_attr.
-    if(assistantBody&&!fade){_sanitizeSmdLinks(assistantBody);}
+    // URL scheme safety is handled by the renderer's set_attr hook
+    // (_safeSmdRenderer or _streamFadeRenderer), applied inline as smd
+    // creates each DOM node — no post-hoc full-DOM scan needed.
     _scheduleStreamingKatex();
   }
   // Allowed URL schemes for anchors and images rendered from agent-streamed markdown.
@@ -3166,6 +3400,36 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(last<value.length) frag.appendChild(document.createTextNode(value.slice(last)));
       parent.appendChild(frag);
     };
+    renderer.set_attr=(data,attr,value)=>{
+      const isHref=window.smd&&attr===window.smd.HREF;
+      const isSrc=window.smd&&attr===window.smd.SRC;
+      const safeUrl=isSrc?_SMD_SAFE_IMG_URL_RE:_SMD_SAFE_URL_RE;
+      if(isHref&&/^(file|workspace|session):\/\//i.test(String(value||''))){
+        baseSetAttr(data,attr,_smdLinkHref(value));
+        if(/^session:\/\//i.test(String(value||''))){
+          const node=data&&data.nodes&&data.nodes[data.index];
+          if(node&&node.classList) node.classList.add('session-link');
+        }
+        return;
+      }
+      if((isHref||isSrc)&&!safeUrl.test(String(value||''))){
+        const node=data&&data.nodes&&data.nodes[data.index];
+        if(node&&node.setAttribute) node.setAttribute('data-blocked-scheme','1');
+        return;
+      }
+      baseSetAttr(data,attr,value);
+    };
+    return renderer;
+  }
+  // Safe renderer: wraps default_renderer with a set_attr hook that validates
+  // href/src URL schemes inline — no post-hoc DOM-wide querySelectorAll needed.
+  // Unlike _streamFadeRenderer, this does NOT wrap add_text, so smd adds new
+  // DOM nodes as plain text nodes (no animation spans). Used on the non-fade
+  // streaming path to eliminate _sanitizeSmdLinks(assistantBody) O(DOM) scans
+  // on every token event (#WebUI-perf).
+  function _safeSmdRenderer(el){
+    const renderer=window.smd.default_renderer(el);
+    const baseSetAttr=renderer.set_attr;
     renderer.set_attr=(data,attr,value)=>{
       const isHref=window.smd&&attr===window.smd.HREF;
       const isSrc=window.smd&&attr===window.smd.SRC;
@@ -3346,6 +3610,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _flushPendingSegmentRender(options={}){
     const force=!!(options&&options.force);
+    const skipAnchorProcessProse=!!(options&&options.skipAnchorProcessProse);
     if(!assistantBody||(!force&&!_renderPending)) return;
     if(_renderPending) _cancelAnimationFramePendingStreamRender();
     const displayText=segmentStart===0
@@ -3353,12 +3618,24 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       : _stripXmlToolCalls(assistantText.slice(segmentStart));
     if(_smdParser){
       _smdWrite(displayText);
+    } else if(window.smd){
+      // Parser was nulled out (e.g. by a prior segment end) but smd is
+      // available — recreate it on the existing element. Uses the non-fade
+      // renderer to match standard rendering, avoiding O(n²) innerHTML
+      // churn on long responses (#4704). Clear any content the renderMd()
+      // fallback already wrote first: _smdNewParser resets _smdWrittenText to
+      // '' but does NOT clear the element, so a following _smdWrite(displayText)
+      // would append the full accumulated segment ON TOP of the existing
+      // fallback render and duplicate the live text.
+      assistantBody.innerHTML='';
+      _smdNewParser(assistantBody, false);
+      if(_smdParser) _smdWrite(displayText);
     } else if(renderMd){
       assistantBody.innerHTML=renderMd(displayText);
     } else {
       assistantBody.innerHTML=esc(displayText);
     }
-    _upsertAnchorProcessProse(displayText,{sealed:force});
+    if(!skipAnchorProcessProse) _upsertAnchorProcessProse(displayText,{sealed:force});
     if(typeof _syncLiveWorklogReasonsForAnchor==='function') _syncLiveWorklogReasonsForAnchor(assistantRow, displayText);
   }
   function _resetAssistantSegment(){
@@ -3644,7 +3921,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
 
   let _lastRenderMs=0;
-  function _scheduleRender(){
+  // Parse-result cache: _scheduleRender can accept a pre-computed _parseStreamState()
+  // from the token event handler, avoiding a duplicate O(n) scan inside _doRender
+  // when the rAF fires before the next token arrives.
+  let _cachedParsed=null;
+  let _cachedParsedText='';
+  let _cachedParsedReasoning='';
+  function _scheduleRender(parsed){
+    // If caller provides a pre-computed parse result, cache it for _doRender.
+    if(parsed){
+      _cachedParsed=parsed;
+      _cachedParsedText=assistantText;
+      _cachedParsedReasoning=liveReasoningText;
+    }
     if(_renderPending) return;
     if(_streamFinalized) return; // Bug A: don't schedule new rAF after stream finalized
     _renderPending=true;
@@ -3662,8 +3951,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _renderPending=false;
       // Guard: a pending setTimeout+rAF can outlive stream finalization.
       if(_streamFinalized) return;
+      // Mobile scroll-jank guard: temporarily disable overflow-anchor before DOM
+      // writes to suppress Chromium scroll re-anchoring during streaming growth.
+      if(typeof window._fixMobileScrollJank==='function') window._fixMobileScrollJank();
       _lastRenderMs=performance.now();
-      const parsed=_parseStreamState();
+      const parsed=_cachedParsed&&_cachedParsedText===assistantText&&_cachedParsedReasoning===liveReasoningText ? _cachedParsed : _parseStreamState();
+      _cachedParsed=null;
       _renderLiveThinking(parsed);
       if(assistantBody){
         const displayText = segmentStart===0
@@ -3758,7 +4051,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const parsed=_parseStreamState();
       if(_freshSegment) appendThinking('', _liveThinkingPlacement());
       if(String((parsed&&parsed.displayText)||'').trim()||assistantRow) ensureAssistantRow();
-      _scheduleRender();
+      _scheduleRender(parsed);
     });
 
     source.addEventListener('interim_assistant',e=>{
@@ -3766,9 +4059,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const d=JSON.parse(e.data);
       const visible=String(d&&d.text?d.text:'').trim();
       const alreadyStreamed=!!(d&&d.already_streamed);
+      const reasoningEcho=!!(d&&d.reasoning_echo);
       if(!visible){
         return;
       }
+      if(reasoningEcho) _stripLiveReasoningEcho(visible);
       liveReasoningText='';
       if(alreadyStreamed){
         if(!S.session||S.session.session_id!==activeSid){
@@ -3788,7 +4083,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         _resetAssistantSegment();
         return;
       }
-      _applyToAnchor('interim_assistant',d,e);
       assistantText += assistantText ? `\n\n${visible}` : visible;
       visibleInterimSnippets.push(visible);
       syncInflightAssistantMessage();
@@ -3800,36 +4094,42 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _completeAutomaticCompressionOnLiveProgress(activeSid);
       ensureAssistantRow(true);
       if(assistantRow) assistantRow.setAttribute('data-interim','1');
-      _flushPendingSegmentRender({force:true});
+      _flushPendingSegmentRender({force:true,skipAnchorProcessProse:true});
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       if(typeof closeCurrentLiveActivityGroup==='function') closeCurrentLiveActivityGroup();
+      _applyToAnchor('interim_assistant',d,e);
       // Collapse old interim notes once more than INTERIM_COLLAPSE_THRESHOLD accumulate.
       const INTERIM_COLLAPSE_THRESHOLD=3;
       if(visibleInterimSnippets.length>INTERIM_COLLAPSE_THRESHOLD&&assistantRow){
         const blocks=assistantRow.parentElement;
         if(blocks){
-          const allInterim=Array.from(blocks.querySelectorAll('[data-interim="1"]'));
-          const toHide=allInterim.slice(0,allInterim.length-INTERIM_COLLAPSE_THRESHOLD);
-          let toggle=blocks.querySelector('.interim-collapse-toggle');
-          if(!toggle){
-            toggle=document.createElement('span');
-            toggle.className='interim-collapse-toggle';
-            // No per-element listener: clicks are handled by a delegated
-            // document-level handler (see _interimCollapseDelegatedClick) so
-            // the toggle keeps working after a live-turn DOM restore
-            // (snapshotLiveTurnHtmlForSession/restoreLiveTurnHtmlForSession
-            // rebuild via innerHTML, which would drop a direct listener and
-            // leave the collapsed notes permanently unreachable). The
-            // threshold rides on the markup so the handler stays stateless.
-            toggle.dataset.threshold=String(INTERIM_COLLAPSE_THRESHOLD);
-            if(toHide.length) toHide[0].before(toggle);
+          const anchorSceneOwnsLive=!!(blocks.closest&&blocks.closest('[data-anchor-scene-live-owner="1"]'));
+          if(anchorSceneOwnsLive){
+            blocks.querySelectorAll('.interim-collapse-toggle').forEach(el=>el.remove());
+          }else{
+            const allInterim=Array.from(blocks.querySelectorAll('[data-interim="1"]'));
+            const toHide=allInterim.slice(0,allInterim.length-INTERIM_COLLAPSE_THRESHOLD);
+            let toggle=blocks.querySelector('.interim-collapse-toggle');
+            if(!toggle){
+              toggle=document.createElement('span');
+              toggle.className='interim-collapse-toggle';
+              // No per-element listener: clicks are handled by a delegated
+              // document-level handler (see _interimCollapseDelegatedClick) so
+              // the toggle keeps working after a live-turn DOM restore
+              // (snapshotLiveTurnHtmlForSession/restoreLiveTurnHtmlForSession
+              // rebuild via innerHTML, which would drop a direct listener and
+              // leave the collapsed notes permanently unreachable). The
+              // threshold rides on the markup so the handler stays stateless.
+              toggle.dataset.threshold=String(INTERIM_COLLAPSE_THRESHOLD);
+              if(toHide.length) toHide[0].before(toggle);
+            }
+            // Skip re-collapse when the user expanded manually; always update the stored count.
+            if(!toggle.dataset.expanded){
+              toHide.forEach(el=>el.classList.add('interim-collapsed'));
+            }
+            const stillHidden=blocks.querySelectorAll('[data-interim="1"].interim-collapsed').length;
+            if(stillHidden) toggle.textContent='Show '+stillHidden+' earlier update'+(stillHidden===1?'':'s');
           }
-          // Skip re-collapse when the user expanded manually; always update the stored count.
-          if(!toggle.dataset.expanded){
-            toHide.forEach(el=>el.classList.add('interim-collapsed'));
-          }
-          const stillHidden=blocks.querySelectorAll('[data-interim="1"].interim-collapsed').length;
-          if(stillHidden) toggle.textContent='Show '+stillHidden+' earlier update'+(stillHidden===1?'':'s');
         }
       }
       recordActivityBoundary();
@@ -4174,6 +4474,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const _prevCacheRead=(S.session&&S.session.cache_read_tokens)||0;
           const _prevCacheWrite=(S.session&&S.session.cache_write_tokens)||0;
           S.session=d.session;S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
+          // #4720: reset _oldestIdx (full-load symmetry; keeps the #4613 anchor aligned).
+          if(typeof _oldestIdx!=='undefined')_oldestIdx=d.session._messages_offset||0;
           S.messages=_filterRecoveryControlMessages(S.messages || []);
           if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
           if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();
@@ -4300,6 +4602,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(typeof _messageRenderableMessageCount==='function'&&typeof _messageRenderWindowSize!=='undefined'){
             _messageRenderWindowSize=Math.max(typeof _currentMessageRenderWindowSize==='function'?_currentMessageRenderWindowSize():50, _messageRenderableMessageCount());
           }
+          // #4650 review: the agent turn that just completed may have changed
+          // server-side reasoning config (e.g. a `/reasoning <level>` slash
+          // command writes agent.reasoning_effort) WITHOUT changing the model/
+          // provider cache key. Invalidate the reasoning-chip cache once at the
+          // turn boundary so the following syncTopbar() refetches the authoritative
+          // effort exactly once (not per-token — the storm short-circuit is intact).
+          if(typeof _lastReasoningFetchKey!=='undefined') _lastReasoningFetchKey=null;
           syncTopbar();renderMessages({preserveScroll:true});
           if(shouldFollowOnDone&&typeof scrollToBottom==='function') scrollToBottom();
           if(typeof noteWorkspaceMutationsFromToolCalls==='function') noteWorkspaceMutationsFromToolCalls(S.toolCalls);
@@ -4328,10 +4637,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         // delivers late — after the user returns and document.hidden is false).
         // If the user watched the whole stream, _wasEverHidden stays false and
         // the notification is suppressed (matches Slack/Discord/Gmail/Claude).
-        const _hiddenEntry=_STREAM_WAS_HIDDEN[activeSid];
-        const _wasEverHidden=!!(_hiddenEntry&&_hiddenEntry.wasHidden);
-        _clearStreamHidden(activeSid, streamId);
-        sendBrowserNotification('Response complete',assistantText?assistantText.slice(0,100):'Task finished',{forceHidden:_wasEverHidden,sid:activeSid});
+        const _wasEverBackgrounded=_shouldForceCompletionNotification(activeSid, streamId);
+        sendBrowserNotification('Response complete',assistantText?assistantText.slice(0,100):'Task finished',{forceHidden:_wasEverBackgrounded,sid:activeSid});
       };
       if(_shouldUseStreamFade()&&assistantBody){
         _cancelAnimationFramePendingStreamRender();
@@ -4497,6 +4804,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       try{if(source&&source.readyState!==2)source.close();}catch(_){ }
       _clearOwnerInflightState();
       _clearStreamHidden(activeSid, streamId);  // #4416: terminal path, drop hidden tracker
+      _clearStreamNotificationBackground(activeSid, streamId);
       _clearApprovalForOwner();
       _clearClarifyForOwner('terminal');
       let d={};
@@ -4674,6 +4982,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       try{if(source&&source.readyState!==2)source.close();}catch(_){ }
       _clearOwnerInflightState();
       _clearStreamHidden(activeSid, streamId);  // #4416: terminal path, drop hidden tracker
+      _clearStreamNotificationBackground(activeSid, streamId);
       _clearApprovalForOwner();
       _clearClarifyForOwner('cancelled');
       let _cancelData={};
@@ -5053,6 +5362,45 @@ let _approvalSessionId = null;
 let _approvalCurrentId = null;  // approval_id of the card currently shown
 let _approvalPendingBySession = new Map();
 
+const _DISMISSED_APPROVALS_KEY = 'hermes_dismissed_approvals';
+
+// Dismissed approvals are namespaced by session so that two sessions carrying
+// the SAME approval_id (e.g. a gateway/run source that reuses externally
+// supplied IDs across sessions) can't have a dismissal in one session hide the
+// other's still-pending approval. Stored value is "<sid>\u0000<approval_id>".
+function _approvalDismissKey(sid, approvalId) {
+  if (!approvalId) return '';
+  return String(sid || '') + '\u0000' + String(approvalId);
+}
+
+function _getDismissedApprovals() {
+  try { return JSON.parse(localStorage.getItem(_DISMISSED_APPROVALS_KEY) || '[]'); }
+  catch (_) { return []; }
+}
+
+function _isApprovalDismissed(sid, approvalId) {
+  const key = _approvalDismissKey(sid, approvalId);
+  if (!key) return false;
+  return _getDismissedApprovals().includes(key);
+}
+
+function _markApprovalDismissed(sid, approvalId) {
+  const key = _approvalDismissKey(sid, approvalId);
+  if (!key) return;
+  const set = _getDismissedApprovals().filter(k => k !== key);
+  set.push(key);
+  try { localStorage.setItem(_DISMISSED_APPROVALS_KEY, JSON.stringify(set.slice(-100))); }
+  catch (_) {}
+}
+
+function _unmarkApprovalDismissed(sid, approvalId) {
+  const key = _approvalDismissKey(sid, approvalId);
+  if (!key) return;
+  const set = _getDismissedApprovals().filter(k => k !== key);
+  try { localStorage.setItem(_DISMISSED_APPROVALS_KEY, JSON.stringify(set)); }
+  catch (_) {}
+}
+
 function _promptActiveSessionId() {
   return (S.session && S.session.session_id) || null;
 }
@@ -5110,6 +5458,7 @@ function showApprovalForSession(sid, pending, pendingCount) {
 function showApprovalCard(pending, pendingCount) {
   const sid = _rememberApprovalPending(pending, pendingCount);
   if (!_approvalPromptBelongsToActiveSession(sid)) return;
+  if (pending && pending.approval_id && _isApprovalDismissed(sid, pending.approval_id)) return;
   const keys = pending.pattern_keys || (pending.pattern_key ? [pending.pattern_key] : []);
   const desc = (pending.description || "") + (keys.length ? " [" + keys.join(", ") + "]" : "");
   const cmd = pending.command || "";
@@ -5151,6 +5500,13 @@ function showApprovalCard(pending, pendingCount) {
     setTimeout(() => onceBtn.focus({preventScroll: true}), 50);
   }
   if (typeof syncTopbar === 'function') syncTopbar();
+}
+
+function dismissApprovalCard() {
+  const sid = _approvalSessionId;
+  if (_approvalCurrentId) _markApprovalDismissed(sid, _approvalCurrentId);
+  hideApprovalCard(true);
+  if (sid) _clearApprovalPendingForSession(sid);
 }
 
 function _syncApprovalCollapseButton(card) {
@@ -5216,6 +5572,7 @@ async function respondApproval(choice) {
   const sid = _approvalSessionId || (S.session && S.session.session_id);
   if (!sid) return;
   const approvalId = _approvalCurrentId;
+  _unmarkApprovalDismissed(sid, approvalId);
   // Disable all buttons immediately to prevent double-submit
   ["approvalBtnOnce","approvalBtnSession","approvalBtnAlways","approvalBtnDeny"].forEach(id => {
     const b = $(id);
@@ -5269,7 +5626,10 @@ function _startApprovalFallbackPoll(sid) {
       const data = await api("/api/approval/pending?session_id=" + encodeURIComponent(sid),{timeoutToast:false});
       if (data.pending) { showApprovalForSession(sid, data.pending, data.pending_count||1); }
       else if (!_approvalPollingSessionMissingOrMismatched(sid)) {
+        const _resolvedEntry = _approvalPendingBySession.get(sid);
         _clearApprovalPendingForSession(sid);
+        const _resolvedId = _resolvedEntry && _resolvedEntry.pending && _resolvedEntry.pending.approval_id;
+        if (_resolvedId) _unmarkApprovalDismissed(sid, _resolvedId);
         _hideApprovalCardIfOwner(sid);
         if (!S.busy) {
           stopApprovalPollingForSession(sid);
@@ -6221,7 +6581,7 @@ function sendBrowserNotification(title,body,options={}){
   // explicit "Send test" override); only the visibility gate is bypassed.
   const forceHidden=!!(options&&options.forceHidden);
   if(!force&&!window._notificationsEnabled) return;
-  if(!force&&!forceHidden&&!document.hidden) return;
+  if(!force&&!forceHidden&&!_isBackgroundedForBrowserNotification()) return;
   if(!('Notification' in window)) return;
   if(Notification.permission==='granted'){
     _showPwaNotification(title,body,options).catch(()=>{try{new Notification(title||assistantDisplayName(),_notificationOptions(body,options));}catch(_err){}});

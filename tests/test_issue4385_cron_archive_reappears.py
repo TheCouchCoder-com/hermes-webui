@@ -109,16 +109,22 @@ def test_cron_state_projection_preserves_archived_sidecar(monkeypatch, tmp_path)
             (sid, "Cron Session", "test-model", 1, 20, "cron", "cron"),
         )
 
-    class ArchivedSidecar:
-        title = "Cron Session"
-        archived = True
-
-    monkeypatch.setattr(
-        models.Session,
-        "load_metadata_only",
-        staticmethod(lambda candidate: ArchivedSidecar() if candidate == sid else None),
+    # Write a real archived sidecar JSON under a patched SESSION_DIR so the
+    # projection's sidecar read exercises the production path (the #4842 perf
+    # fix stat-gates on SESSION_DIR/{sid}.json before consulting metadata, so a
+    # mock of load_metadata_only without a real file would never be reached —
+    # which mirrors production, where archived metadata only exists when the
+    # file does).
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    (session_dir / f"{sid}.json").write_text(
+        '{"session_id": "%s", "title": "Cron Session", "created_at": 1.0,'
+        ' "updated_at": 2.0, "archived": true, "messages": []}' % sid,
+        encoding="utf-8",
     )
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
     monkeypatch.setattr(models, "ensure_cron_project", lambda: "cron-project")
+    models.clear_sidecar_metadata_cache()
 
     rows = models._load_cli_sessions_uncached(
         tmp_path,
@@ -195,15 +201,17 @@ def test_webhook_state_projection_preserves_archived_sidecar(monkeypatch, tmp_pa
             (sid,),
         )
 
-    class ArchivedWebhookSidecar:
-        title = "Webhook Session"
-        archived = True
-
-    monkeypatch.setattr(
-        models.Session,
-        "load_metadata_only",
-        staticmethod(lambda candidate: ArchivedWebhookSidecar() if candidate == sid else None),
+    # Real archived sidecar JSON under a patched SESSION_DIR (see the cron test
+    # above — the #4842 stat-gate requires the file to exist, matching prod).
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    (session_dir / f"{sid}.json").write_text(
+        '{"session_id": "%s", "title": "Webhook Session", "created_at": 1.0,'
+        ' "updated_at": 2.0, "archived": true, "messages": []}' % sid,
+        encoding="utf-8",
     )
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    models.clear_sidecar_metadata_cache()
 
     rows = models._load_cli_sessions_uncached(
         tmp_path,
@@ -225,7 +233,7 @@ def test_webhook_state_projection_preserves_archived_sidecar(monkeypatch, tmp_pa
 
 
 def test_archived_webhook_projection_reaches_sidebar_payload(monkeypatch):
-    """The sidebar payload must preserve archived state for webhook projections."""
+    """Archived webhook projections are counted by default and fetched on demand."""
     import api.routes as routes
 
     sid = "webhook_archive_20260618"
@@ -249,12 +257,24 @@ def test_archived_webhook_projection_reaches_sidebar_payload(monkeypatch):
     monkeypatch.setattr(routes, "get_cli_sessions", lambda source_filter=None, all_profiles=False: [raw_webhook_row])
     monkeypatch.setattr(routes, "_reconcile_stale_stream_state_for_session_rows", lambda _sessions: False)
 
+    default_payload = routes._build_session_list_cache_payload(
+        active_profile="default",
+        all_profiles=False,
+        show_cli_sessions=True,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+    )
+    assert [row for row in default_payload["sessions"] if row["session_id"] == sid] == []
+    assert default_payload["archived_count"] == 1
+    assert default_payload["archived_webui_count"] == 1
+
     payload = routes._build_session_list_cache_payload(
         active_profile="default",
         all_profiles=False,
         show_cli_sessions=True,
         show_previous_messaging_sessions=False,
         show_cron_sessions=False,
+        include_archived=True,
     )
 
     rows = payload["sessions"]
@@ -266,7 +286,7 @@ def test_archived_webhook_projection_reaches_sidebar_payload(monkeypatch):
 
 
 def test_archived_cron_sidecar_suppresses_raw_unarchived_cron_row(monkeypatch):
-    """An archived cron sidecar should keep the raw state.db cron row hidden."""
+    """Archived cron sidecars stay out of the hot list but win on archive fetch."""
     import api.routes as routes
 
     sid = "cron_job123_20260618"
@@ -306,12 +326,25 @@ def test_archived_cron_sidecar_suppresses_raw_unarchived_cron_row(monkeypatch):
     monkeypatch.setattr(routes, "get_cli_sessions", lambda source_filter=None, all_profiles=False: [raw_cron_row])
     monkeypatch.setattr(routes, "_reconcile_stale_stream_state_for_session_rows", lambda _sessions: False)
 
+    default_payload = routes._build_session_list_cache_payload(
+        active_profile="default",
+        all_profiles=False,
+        show_cli_sessions=True,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=True,
+    )
+    assert [row for row in default_payload["sessions"] if row["session_id"] == sid] == []
+    assert default_payload["archived_count"] == 1
+    assert default_payload["archived_webui_count"] == 1
+    assert default_payload["archived_cli_count"] == 0
+
     payload = routes._build_session_list_cache_payload(
         active_profile="default",
         all_profiles=False,
         show_cli_sessions=True,
         show_previous_messaging_sessions=False,
         show_cron_sessions=True,
+        include_archived=True,
     )
 
     rows = payload["sessions"]

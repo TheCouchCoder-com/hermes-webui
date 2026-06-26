@@ -1197,8 +1197,10 @@ async function cmdInterrupt(args){
  * steer text to the next tool-result message so the model sees it on its
  * next iteration — same pathway as the CLI's /steer command.
  *
- * Falls back to interrupt mode when the agent isn't running, isn't cached,
- * or doesn't support steer (older hermes-agent versions).
+ * Leaves the active stream alone when the agent isn't running, isn't cached,
+ * or doesn't support steer (older hermes-agent versions). The failed steer text
+ * is restored to the composer so the user can choose Queue or Interrupt
+ * explicitly instead of WebUI silently cancelling the current run.
  */
 async function cmdSteer(args){
   const msg=(args||'').trim();
@@ -1214,17 +1216,12 @@ async function cmdSteer(args){
   await _trySteer(msg, /*explicitSteer=*/true);
 }
 
-/**
- * Shared implementation for /steer and the busy_input_mode='steer' path.
- *
- * Tries the real steer endpoint first. On any non-accept response (no cached
- * agent, agent lacks steer, stream dead, etc.) falls back to interrupt+queue:
- * queues the message and cancels the stream so the drain re-sends it.
- *
- * @param {string} msg - The steer text.
- * @param {boolean} explicitSteer - True if the user explicitly invoked /steer
- *   (vs the busy-mode auto-fallback). Affects toast wording only.
- */
+function _steerFailureMessageKey(fallback) {
+  const key = 'steer_fail_' + (fallback || 'unknown');
+  return (typeof LOCALES !== 'undefined' && LOCALES.en && LOCALES.en[key])
+    ? key : 'steer_fail_unknown';
+}
+
 function _showSteerIndicator(text){
   const inner=document.getElementById('msgInner');
   if(!inner) return;
@@ -1245,6 +1242,49 @@ function _showSteerIndicator(text){
   if(typeof scrollToBottom==='function') scrollToBottom();
 }
 
+function _showSteerRecovery(msg, explicitSteer, fallback) {
+  const inner = document.getElementById('msgInner');
+  if (!inner) return;
+  const old = inner.querySelector('.steer-recovery');
+  if (old) old.remove();
+  const el = document.createElement('div');
+  el.className = 'steer-recovery';
+  const label = document.createElement('span');
+  label.className = 'steer-recovery-label';
+  label.textContent = t(_steerFailureMessageKey(fallback));
+  el.appendChild(label);
+  const retryBtn = document.createElement('button');
+  retryBtn.className = 'steer-recovery-retry';
+  retryBtn.textContent = t('steer_recovery_retry');
+  retryBtn.addEventListener('click', () => {
+    el.remove();
+    void _trySteer(msg, explicitSteer).catch(console.error);
+  });
+  el.appendChild(retryBtn);
+  const dismissBtn = document.createElement('button');
+  dismissBtn.className = 'steer-recovery-dismiss';
+  dismissBtn.textContent = t('steer_recovery_dismiss');
+  dismissBtn.addEventListener('click', () => el.remove());
+  el.appendChild(dismissBtn);
+  inner.appendChild(el);
+  if (typeof scrollToBottom === 'function') scrollToBottom();
+}
+
+/**
+ * Shared implementation for /steer and the busy_input_mode='steer' path.
+ *
+ * Tries the real steer endpoint first. On any non-accept response (no cached
+ * agent, agent lacks steer, stream dead, etc.) it restores the draft and keeps
+ * the active stream running. Steer belongs to the active run; a failed Steer
+ * must not be silently upgraded into Queue, Interrupt, or Stop-and-send.
+ *
+ * @param {string} msg - The steer text.
+ * @param {boolean} explicitSteer - True if the user explicitly invoked /steer
+ *   (vs the busy-mode auto-fallback). Affects draft restore prefix only;
+ *   toast wording is determined by the failure reason code.
+ * @returns {Promise<boolean>} true when the steer was delivered, false when the
+ *   draft was restored and the active stream was left untouched.
+ */
 async function _trySteer(msg, explicitSteer){
   let result=null;
   try{
@@ -1253,7 +1293,7 @@ async function _trySteer(msg, explicitSteer){
       body:JSON.stringify({session_id:S.session.session_id,text:msg}),
     });
   }catch(e){
-    // Network or server error — fall back to interrupt
+    // Network or server error — keep the active stream running and restore the draft.
     result={accepted:false, fallback:'network_error'};
   }
   if(result&&result.accepted){
@@ -1263,26 +1303,21 @@ async function _trySteer(msg, explicitSteer){
     // all call renderMessages which rebuilds msgInner).
     _showSteerIndicator(msg);
     showToast(t('cmd_steer_delivered'),2500);
-    return;
+    return true;
   }
-  // Fall back to interrupt: queue the message + cancel the stream so the
-  // drain in setBusy(false) re-sends it as a fresh turn.
-  queueSessionMessage(S.session.session_id,{text:msg,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',profile:S.activeProfile||'default'});
-  updateQueueBadge(S.session.session_id);
-  S.pendingFiles=[];renderTray();
-  if(typeof cancelStream==='function'){await cancelStream();}
-  // Toast wording differs based on why we're falling back so the user
-  // understands what just happened.
-  const reason=(result&&result.fallback)||'unknown';
-  if(explicitSteer){
-    showToast(t('cmd_steer_fallback'),2500);
-  } else if(reason==='no_cached_agent'||reason==='not_running'||reason==='stream_dead'){
-    // Busy mode hit the steer path before the agent was ready —
-    // interrupt is the natural fallback, no need to call out steer.
-    showToast(t('busy_interrupt_confirm'),2000);
-  } else {
-    showToast(t('busy_steer_fallback'),2500);
+  // Do not fall back to interrupt: Steer failure is not permission to cancel
+  // the active run. Restore the draft so the user can explicitly Queue or
+  // Interrupt if that is what they want next. Pending files remain staged.
+  const inp=$('msg');
+  if(inp){
+    inp.value=explicitSteer?`/steer ${msg}`:msg;
+    if(typeof autoResize==='function')autoResize();
   }
+  if(typeof renderTray==='function')renderTray();
+  const fallbackCode = result && result.fallback;
+  showToast(t(_steerFailureMessageKey(fallbackCode)), 3500);
+  _showSteerRecovery(msg, explicitSteer, fallbackCode);
+  return false;
 }
 
 async function cmdTitle(args){

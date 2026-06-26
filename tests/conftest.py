@@ -204,6 +204,7 @@ os.environ.setdefault('HERMES_WEBUI_TEST_FAST_HASH', '1')
 os.environ.setdefault('HERMES_WEBUI_ACCEPT_UNSIGNED_PROFILE_COOKIE', '1')
 
 
+
 @pytest.fixture(autouse=True)
 def _isolate_hermes_config_path():
     """Keep profile/.env side effects from leaking the live config path across tests."""

@@ -242,6 +242,25 @@ class TestCommonLLMShapes:
         assert "<p><table" not in out
         assert "</table></p>" not in out
 
+    def test_table_pipe_inside_inline_code_is_protected(self, driver_path):
+        """Pipes inside backtick code in table cells must not create extra columns."""
+        src = (
+            "| field | expr |\n"
+            "| --- | --- |\n"
+            "| set | `updates.model = modelState.model || null` |\n"
+        )
+        out = _render(driver_path, src)
+        # Must be exactly 2 cells in the data row
+        assert "<th>field</th>" in out
+        assert "<th>expr</th>" in out
+        # The code cell should contain both pipes
+        assert "<code>" in out
+        assert "||" in out
+        # Must NOT split into extra cells
+        assert out.count("<td>") == 2, (
+            f"Expected exactly 2 <td> cells, got {out.count('<td>')}: {out!r}"
+        )
+
     def test_strikethrough_outside_quote(self, driver_path):
         out = _render(driver_path, "This was ~~outdated~~ but is now fine.")
         assert "<del>outdated</del>" in out
@@ -397,7 +416,7 @@ class TestFencedCodeFenceLength:
             "That is much more correct than pretending"
         )
         out = _render(driver_path, src)
-        assert out.count("<pre>") == 1
+        assert out.count("<pre class=\"md-source-block\">") == 1
         assert out.count("</pre>") == 1
         assert '<div class="pre-header">md</div>' in out
         assert "```novelcrafter" in out
@@ -408,7 +427,7 @@ class TestFencedCodeFenceLength:
 
     def test_four_backtick_outer_fence_preserves_inner_triple_fence(self, driver_path):
         out = _render(driver_path, "````md\n```inner\nfoo\n```\n````\n")
-        assert out.count("<pre>") == 1
+        assert out.count("<pre class=\"md-source-block\">") == 1
         assert out.count("</pre>") == 1
         assert '<div class="pre-header">md</div>' in out
         assert "```inner" in out
