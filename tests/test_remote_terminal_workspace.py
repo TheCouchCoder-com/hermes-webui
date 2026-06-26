@@ -69,12 +69,7 @@ def test_remote_terminal_workspace_paths_with_parent_escape_still_reject(monkeyp
         workspace.resolve_trusted_workspace(escaped)
 
 
-@pytest.mark.parametrize("workspace_path", [
-    "/etc",
-    pytest.param("/etc/ssh", marks=pytest.mark.skipif(
-        not __import__("pathlib").Path("/etc/ssh").exists(),
-        reason="/etc/ssh not present in this environment")),
-])
+@pytest.mark.parametrize("workspace_path", ["/etc", "/etc/ssh"])
 def test_remote_terminal_workspace_system_roots_still_reject(monkeypatch, workspace_path):
     monkeypatch.setattr(api_config, "get_config", lambda: _remote_config(terminal={"backend": "ssh", "cwd": "/etc"}))
 
