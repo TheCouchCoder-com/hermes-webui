@@ -5361,6 +5361,7 @@ function hideApprovalCard(force=false) {
 let _approvalSessionId = null;
 let _approvalCurrentId = null;  // approval_id of the card currently shown
 let _approvalPendingBySession = new Map();
+let _approvalResponding = null;
 
 const _DISMISSED_APPROVALS_KEY = 'hermes_dismissed_approvals';
 
@@ -5449,6 +5450,27 @@ function _renderPendingApprovalForActiveSession() {
   if (entry) showApprovalCard(entry.pending, entry.pendingCount);
 }
 
+function _approvalResponseMatches(sid, approvalId) {
+  return !!(
+    _approvalResponding &&
+    _approvalResponding.sid === sid &&
+    (_approvalResponding.approvalId || null) === (approvalId || null)
+  );
+}
+
+function _setApprovalControlsDisabled(choice, disabled) {
+  ["approvalBtnOnce","approvalBtnSession","approvalBtnAlways","approvalBtnDeny"].forEach(id => {
+    const b = $(id);
+    if (!b) return;
+    b.disabled = !!disabled;
+    if (disabled && choice && b.id === "approvalBtn" + choice.charAt(0).toUpperCase() + choice.slice(1)) {
+      b.classList.add("loading");
+    } else {
+      b.classList.remove("loading");
+    }
+  });
+}
+
 function showApprovalForSession(sid, pending, pendingCount) {
   if (!pending) return;
   pending._session_id = sid;
@@ -5487,10 +5509,11 @@ function showApprovalCard(pending, pendingCount) {
     // approval's collapsed state, which would hide its command + action buttons. (#3515)
     card.classList.remove("collapsed");
   }
-  // Re-enable buttons in case a previous approval disabled them
-  ["approvalBtnOnce","approvalBtnSession","approvalBtnAlways","approvalBtnDeny"].forEach(id => {
-    const b = $(id); if (b) { b.disabled = false; b.classList.remove("loading"); }
-  });
+  const responding = _approvalResponseMatches(sid, _approvalCurrentId);
+  _setApprovalControlsDisabled(
+    responding ? _approvalResponding.choice : null,
+    responding,
+  );
   card.classList.add("visible");
   _syncApprovalCollapseButton(card);
   _syncApprovalTranscriptSpace(card, {immediate: true});
@@ -5559,6 +5582,14 @@ function _syncApprovalTranscriptSpace(card, opts) {
   setTimeout(measure, 420);
 }
 
+function _restoreFailedApprovalResponse(sid, errMsg) {
+  _approvalResponding = null;
+  _setApprovalControlsDisabled(null, false);
+  if (_approvalPromptBelongsToActiveSession(sid)) _renderPendingApprovalForActiveSession();
+  if (typeof showToast === "function") showToast(errMsg, 5000);
+  if (typeof setStatus === "function") setStatus(errMsg);
+}
+
 function toggleApprovalCardCollapsed(forceCollapsed) {
   const card = $("approvalCard");
   if (!card) return;
@@ -5572,22 +5603,33 @@ async function respondApproval(choice) {
   const sid = _approvalSessionId || (S.session && S.session.session_id);
   if (!sid) return;
   const approvalId = _approvalCurrentId;
+  if (_approvalResponseMatches(sid, approvalId)) return;
   _unmarkApprovalDismissed(sid, approvalId);
-  // Disable all buttons immediately to prevent double-submit
-  ["approvalBtnOnce","approvalBtnSession","approvalBtnAlways","approvalBtnDeny"].forEach(id => {
-    const b = $(id);
-    if (b) { b.disabled = true; if (b.id === "approvalBtn" + choice.charAt(0).toUpperCase() + choice.slice(1)) b.classList.add("loading"); }
-  });
-  _approvalSessionId = null;
-  _approvalCurrentId = null;
-  _clearApprovalPendingForSession(sid);
-  hideApprovalCard(true);
+  _approvalResponding = {sid, approvalId: approvalId || null, choice};
+  _setApprovalControlsDisabled(choice, true);
   try {
-    await api("/api/approval/respond", {
+    const result = await api("/api/approval/respond", {
       method: "POST",
       body: JSON.stringify({ session_id: sid, choice, approval_id: approvalId })
     });
-  } catch(e) { setStatus(t("approval_responding") + " " + e.message); }
+    if (result && result.ok) {
+      _approvalResponding = null;
+      const pendingEntry = _approvalPendingBySession.get(sid);
+      const samePending = !!(pendingEntry && pendingEntry.pending && (pendingEntry.pending.approval_id || null) === (approvalId || null));
+      if (_approvalSessionId === sid && _approvalCurrentId === approvalId) {
+        _approvalSessionId = null;
+        _approvalCurrentId = null;
+        hideApprovalCard(true);
+      }
+      if (samePending) _clearApprovalPendingForSession(sid);
+      return;
+    }
+    const errMsg = (result && result.error) || "Approval response not accepted.";
+    _restoreFailedApprovalResponse(sid, errMsg);
+  } catch(e) {
+    const errMsg = (e && e.message) || (t("approval_responding") + " failed");
+    _restoreFailedApprovalResponse(sid, errMsg);
+  }
 }
 
 function startApprovalPolling(sid) {
