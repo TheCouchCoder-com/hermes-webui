@@ -19,6 +19,12 @@
 ### Fixed (fork)
 - `sync-upstream.yml` no longer fails at the push step when an upstream tag modifies a file under `.github/workflows/`. The default `GITHUB_TOKEN` cannot push workflow-file changes (GitHub rejects the push without the `workflows` permission scope), and this fork runs its own CI rather than tracking upstream's. The workflow now reverts any upstream edits to `.github/workflows/*` back to our `master` version, folds the revert into the merge commit, and surfaces the dropped files as a `::notice` and in the PR body. Without this, every sync that touches an upstream workflow file (e.g. v0.51.189, which adds a ruff lint job to `tests.yml`) aborted before opening a PR.
 
+## [v0.51.653] — 2026-06-25 — Release XI (gateway approval failures stay actionable instead of dead-ending)
+
+### Fixed
+
+- **In gateway-backed sessions, an approval card no longer disappears when the backend can't relay your approve/deny click.** Previously the WebUI cleared the approval card as soon as you clicked, before knowing whether the backend actually relayed the response to the gateway run — so if the relay failed, the card vanished and the run was left blocked with no way to respond. Now `/api/approval/respond` returns an explicit relay-failure error and preserves the pending state, and the card stays visible and actionable (with the error surfaced) until the backend confirms acceptance. Re-renders and Enter no longer re-enable or duplicate-submit an in-flight approval. Thanks @rodboev. (#4917, closes #4771)
+
 ## [v0.51.652] — 2026-06-25 — Release XH (background subagent results return to chat)
 
 ### Fixed
