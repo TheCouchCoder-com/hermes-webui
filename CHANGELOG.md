@@ -19,6 +19,12 @@
 ### Fixed (fork)
 - `sync-upstream.yml` no longer fails at the push step when an upstream tag modifies a file under `.github/workflows/`. The default `GITHUB_TOKEN` cannot push workflow-file changes (GitHub rejects the push without the `workflows` permission scope), and this fork runs its own CI rather than tracking upstream's. The workflow now reverts any upstream edits to `.github/workflows/*` back to our `master` version, folds the revert into the merge commit, and surfaces the dropped files as a `::notice` and in the PR body. Without this, every sync that touches an upstream workflow file (e.g. v0.51.189, which adds a ruff lint job to `tests.yml`) aborted before opening a PR.
 
+## [v0.51.654] — 2026-06-25 — Release XJ (session saves block reads less during streaming)
+
+### Changed
+
+- **Saving a session no longer holds the in-memory session lock while it parses, merges, and writes the sidebar index to disk.** During active streaming, every session save rewrites the sidebar `_index.json`; previously that whole read-modify-write held the in-memory `SESSIONS` lock, so an ordinary session read issued mid-stream queued behind the writer (part of the "laggy while a task streams" symptom in long-lived instances). The lock now guards only the in-memory session snapshot; JSON parsing, payload construction, and disk I/O run outside it. The on-disk index read-modify-write stays fully serialized by a separate dedicated index-write lock, so there's no new lost-update or corruption risk. Part of the #4918 performance work. Thanks @franksong2702. (#4921)
+
 ## [v0.51.653] — 2026-06-25 — Release XI (gateway approval failures stay actionable instead of dead-ending)
 
 ### Fixed
