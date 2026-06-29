@@ -13,11 +13,19 @@
 
 ## [Unreleased]
 
+<<<<<<< HEAD
 ### Changed (fork)
 - **Dropped the fork's split webui/agent update banner in favor of upstream's single update banner.** The split banner existed so WebUI could be updated separately from the Agent; upstream now ships an **"Ignore Agent updates"** preference (Settings → Preferences, `ignore_agent_updates`) that covers that need, so the fork no longer needs to diverge. Removed the per-target banner rows (`updateRow-webui`/`updateRow-agent`, `applyUpdates(target)`, `_renderUpdateBannerRow`) and adopted upstream's single-banner UI, `applyUpdates()`, and what's-new/summary panel. The fork-only "update check unavailable" status helper is retained. Future syncs follow upstream on the banner (see `CLAUDE.md`).
 
 ### Fixed (fork)
 - `sync-upstream.yml` no longer fails at the push step when an upstream tag modifies a file under `.github/workflows/`. The default `GITHUB_TOKEN` cannot push workflow-file changes (GitHub rejects the push without the `workflows` permission scope), and this fork runs its own CI rather than tracking upstream's. The workflow now reverts any upstream edits to `.github/workflows/*` back to our `master` version, folds the revert into the merge commit, and surfaces the dropped files as a `::notice` and in the PR body. Without this, every sync that touches an upstream workflow file (e.g. v0.51.189, which adds a ruff lint job to `tests.yml`) aborted before opening a PR.
+=======
+## [v0.51.655] — 2026-06-25 — Release XK (live metering stops reloading the session every tick)
+
+### Fixed
+
+- **Live metering during active streams no longer reloads the session on every usage tick.** The streaming worker now reuses its current session object for `_live_usage_snapshot()` and only falls back to `get_session()` once before the worker has loaded that object. This removes another avoidable global-session-lock touch point while tokens and tool events are streaming, narrowing the lock-contention half of #4918 without changing usage payloads or active-stream state.
+>>>>>>> v0.51.655
 
 ## [v0.51.654] — 2026-06-25 — Release XJ (session saves block reads less during streaming)
 
