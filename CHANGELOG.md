@@ -19,6 +19,12 @@
 ### Fixed (fork)
 - `sync-upstream.yml` no longer fails at the push step when an upstream tag modifies a file under `.github/workflows/`. The default `GITHUB_TOKEN` cannot push workflow-file changes (GitHub rejects the push without the `workflows` permission scope), and this fork runs its own CI rather than tracking upstream's. The workflow now reverts any upstream edits to `.github/workflows/*` back to our `master` version, folds the revert into the merge commit, and surfaces the dropped files as a `::notice` and in the PR body. Without this, every sync that touches an upstream workflow file (e.g. v0.51.189, which adds a ruff lint job to `tests.yml`) aborted before opening a PR.
 
+## [v0.51.656] — 2026-06-25 — Release XL (stream writeback timing diagnostics)
+
+### Fixed
+
+- **Final stream writeback now emits slow-stage diagnostics without changing the writeback contract.** Successful agent turns time the result merge, session save, persistent-state scan, optional `state.db` sync, and terminal `done` payload phases, logging a debug line only when the full writeback exceeds `HERMES_WEBUI_STREAM_WRITEBACK_DIAG_MS` (250 ms by default, negative disables). This gives the remaining #4918 lock-contention work a measured next step while preserving the existing active-stream lifecycle.
+
 ## [v0.51.655] — 2026-06-25 — Release XK (live metering stops reloading the session every tick)
 
 ### Fixed
