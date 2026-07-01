@@ -4480,6 +4480,7 @@ def _load_cli_sessions_uncached(
             'message_count': row['message_count'] or row['actual_message_count'] or 0,
             'created_at': row['started_at'],
             'updated_at': raw_ts,
+            'last_message_at': row.get('last_activity'),
             'pinned': False,
             'archived': _archived,
             'project_id': _cron_pid() if is_cron_session(sid, _source) else None,

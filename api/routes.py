@@ -2127,6 +2127,24 @@ def _build_session_list_cache_payload(
                 for key in ("source_tag", "raw_source", "session_source", "source_label"):
                     if not s.get(key) and meta.get(key):
                         s[key] = meta[key]
+        # For messaging sessions NOT in cli_by_id (below the 20-row CLI cap),
+        # the JSON-persisted last_message_at may be stale relative to state.db.
+        # A stale last_message_at causes _keep_latest_messaging_session_per_source
+        # to discard this session in favour of a competing session from another
+        # test that ran more recently. Do a cheap targeted state.db lookup so the
+        # sort timestamp reflects the authoritative message activity.
+        for s in webui_sessions:
+            if not _is_messaging_session_record(s):
+                continue
+            sid = s.get("session_id")
+            if not sid or sid in cli_by_id:
+                continue
+            try:
+                db_meta = get_state_db_session_summary(sid, profile=s.get("profile"))
+                if db_meta and db_meta.get("last_message_at"):
+                    s["last_message_at"] = db_meta["last_message_at"]
+            except Exception:
+                pass
         webui_sessions = [_normalize_sidebar_source_flags(s) for s in webui_sessions]
         # Apply the same CLI visibility semantics to imported local copies so
         # low-value imported artifacts do not leak into the sidebar.

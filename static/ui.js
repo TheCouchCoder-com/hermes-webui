@@ -12554,7 +12554,23 @@ function _redactToolTargetLabel(value){
   return String(value||'')
     .replace(/\bsshpass\s+-p\s+(?:"[^"]*"|'[^']*'|\S+)/gi,'sshpass -p "[redacted]"')
     .replace(/(--password(?:=|\s+))(?:"[^"]*"|'[^']*'|\S+)/gi,'$1[redacted]')
-    .replace(/(password(?:=|\s+))(?:"[^"]*"|'[^']*'|\S+)/gi,'$1[redacted]');
+    .replace(/(password(?:=|\s+))(?:"[^"]*"|'[^']*'|\S+)/gi,'$1[redacted]')
+    // Env-assignment / flag secrets, masked across the full (multi-line) text so
+    // the expanded shell card can't leak a key on a non-first line (#4926). Keys
+    // matched case-insensitively: *(TOKEN|API_KEY|APIKEY|SECRET|PASSWD|PASSWORD|
+    // ACCESS_KEY|PRIVATE_KEY|AUTH|CREDENTIAL|SESSION_KEY|CLIENT_SECRET)*.
+    .replace(/(^|[\s;|(])([A-Za-z0-9_]*(?:TOKEN|API[_-]?KEY|SECRET|PASSWD|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|CREDENTIALS?|CLIENT[_-]?SECRET|SESSION[_-]?KEY)[A-Za-z0-9_]*\s*=\s*)(?:"[^"]*"|'[^']*'|\S+)/gi,'$1$2[redacted]')
+    // AUTH-family env assignment, but only the `=` form (the `Authorization:`
+    // header colon form is handled separately below, and must not be eaten here).
+    .replace(/(^|[\s;|(])([A-Za-z0-9_]*AUTH[A-Za-z0-9_]*\s*=\s*)(?:"[^"]*"|'[^']*'|\S+)/gi,'$1$2[redacted]')
+    // --token / --api-key / --secret style flags.
+    .replace(/(--(?:token|api[_-]?key|secret|access[_-]?key|client[_-]?secret|auth[_-]?token)(?:=|\s+))(?:"[^"]*"|'[^']*'|\S+)/gi,'$1[redacted]')
+    // Authorization: Bearer/Bot/Token <token> (header or curl -H form):
+    // redact everything after the scheme keyword up to the closing quote/space.
+    .replace(/(authorization\s*:?\s*(?:bearer|bot|token)\s+)(?:"[^"]*"|'[^']*'|[^\s'"]+)/gi,'$1[redacted]')
+    .replace(/((?:authorization|x-api-key)\s*:\s+)(?:"[^"]*"|'[^']*'|[^\s'"]{12,})/gi,'$1[redacted]')
+    // Secret-looking URL query params (?token=... &api_key=... &access_token=...).
+    .replace(/([?&](?:token|api[_-]?key|access[_-]?token|secret|sig|signature|key)=)(?:[^&\s"']+)/gi,'$1[redacted]');
 }
 function _shortToolLabel(value, limit){
   const text=String(value||'').replace(/\s+/g,' ').trim();
@@ -12619,6 +12635,15 @@ function _toolTargetLabel(tc){
   else if(kind==='search'||kind==='web') raw=a.query||a.pattern||a.url||a.uri||'';
   else raw=a.cmd||a.command||a.path||a.file_path||a.file||a.uri||a.url||a.query||a.pattern||a.dir||a.task||a.name||'';
   return _redactToolTargetLabel(_decodeToolLabelEntities(String(raw).split('\n')[0].trim()));
+}
+function _toolFullCommandLabel(tc){
+  // Full (multi-line) shell command for the EXPANDED detail lead. Mirrors the
+  // shell raw-extraction in _toolTargetLabel but WITHOUT the .split('\n')[0]
+  // first-line collapse, so a multi-line script shows every line when the card
+  // is expanded (#4926). Redaction + entity-decode still applied to the whole.
+  const a=tc&&tc.args||{};
+  const raw=a.cmd||a.command||tc.command||tc.raw_command||tc.original_command||tc.display_command||'';
+  return _redactToolTargetLabel(_decodeToolLabelEntities(String(raw).replace(/\s+$/,'')));
 }
 function _toolVisibleTargetLabel(tc, opts){
   opts=opts||{};
@@ -12965,8 +12990,14 @@ function _toolDetailLeadLabel(kind){
 }
 function _toolDetailLeadText(kind, tc){
   const target=_toolTargetLabel(tc);
+  if(kind==='shell'){
+    // Expanded card shows the FULL multi-line command, not just the header's
+    // first line (#4926). Fall back to the first-line target if full is empty.
+    const full=_toolFullCommandLabel(tc);
+    const cmd=full||target;
+    return cmd?`$ ${cmd}`:'';
+  }
   if(!target) return '';
-  if(kind==='shell') return `$ ${target}`;
   return target;
 }
 function buildToolCard(tc){

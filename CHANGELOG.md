@@ -19,6 +19,12 @@
 ### Fixed (fork)
 - `sync-upstream.yml` no longer fails at the push step when an upstream tag modifies a file under `.github/workflows/`. The default `GITHUB_TOKEN` cannot push workflow-file changes (GitHub rejects the push without the `workflows` permission scope), and this fork runs its own CI rather than tracking upstream's. The workflow now reverts any upstream edits to `.github/workflows/*` back to our `master` version, folds the revert into the merge commit, and surfaces the dropped files as a `::notice` and in the PR body. Without this, every sync that touches an upstream workflow file (e.g. v0.51.189, which adds a ruff lint job to `tests.yml`) aborted before opening a PR.
 
+## [v0.51.657] — 2026-06-25 — Release XM (expanded shell tool cards show the full command)
+
+### Fixed
+
+- **Expanding a shell/terminal tool card now shows the full multi-line command, not just the first line.** In the transparent activity stream, a shell card's collapsed header correctly shows only the first line (compact metadata), but the expanded card reused that same first-line-only value — so a multi-line script still rendered as line 1 when you expanded it. The expanded detail lead now shows the complete command. As part of this, command redaction was broadened to mask common secret forms (env/colon assignments for `*TOKEN`/`*API_KEY`/`*SECRET`/`*ACCESS_KEY`/`*PRIVATE_KEY`/`*CREDENTIAL`/`*CLIENT_SECRET`/`*SESSION_KEY`/`*AUTH*`, `--token`/`--api-key`/`--secret`-style flags, `Authorization:` headers, and secret-looking URL query params) across the whole command, so exposing lines beyond the first never leaks a key. (#4926, part of #4925)
+
 ## [v0.51.656] — 2026-06-25 — Release XL (stream writeback timing diagnostics)
 
 ### Fixed
