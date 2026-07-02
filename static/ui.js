@@ -8485,7 +8485,21 @@ function _copyEventToClipboard(row){
     const fallbackName=row.getAttribute('data-event-name')||row.getAttribute('data-tool-name')||'tool';
     label=`tool ${tc.name||fallbackName}`;
     const parts=[`tool: ${tc.name||fallbackName}`];
-    if(tc.args&&Object.keys(tc.args).length) parts.push('args: '+JSON.stringify(tc.args,null,2));
+    if(tc.args&&Object.keys(tc.args).length){
+      // Redact secret-bearing arg values before copying to clipboard, mirroring
+      // the Full-tab render — content args can be long commands with secrets
+      // past the first line (#4928 gate).
+      let argsForCopy=tc.args;
+      if(typeof _redactToolTargetLabel==='function'){
+        try{
+          argsForCopy={};
+          Object.entries(tc.args).forEach(([k,v])=>{
+            argsForCopy[k]=typeof v==='string'?_redactToolTargetLabel(v):v;
+          });
+        }catch(e){ argsForCopy=tc.args; }
+      }
+      parts.push('args: '+JSON.stringify(argsForCopy,null,2));
+    }
     if(tc.snippet) parts.push('output:\n'+String(tc.snippet));
     if(parts.length===1){
       const argsText=Array.from(row.querySelectorAll('.tool-card-args .tool-arg-pair'))
@@ -8620,7 +8634,14 @@ function _transparentToolDetailHtml(tc, status){
   const meta=[];
   if(tc&&tc.duration!==undefined&&tc.duration!==null) meta.push(['duration', String(tc.duration)]);
   const preview=String((tc&&(tc.snippet||tc.preview||tc.result||tc.output))||'').trim();
-  const argHtml=[...meta,...argEntries].map(([k,v])=>`<div class="tool-arg-pair"><span class="tool-arg-key">${esc(String(k))}</span><span class="tool-arg-val">${esc(typeof v==='string'?v:JSON.stringify(v,null,2))}</span></div>`).join('');
+  const argHtml=[...meta,...argEntries].map(([k,v])=>{
+    let sv=typeof v==='string'?v:JSON.stringify(v,null,2);
+    // Redact secret-bearing arg values before rendering the transparent Full
+    // tab — content args can be long multi-line commands (#4928) whose later
+    // lines may carry secrets the short label never showed (#4928 gate).
+    if(typeof _redactToolTargetLabel==='function'){ try{ sv=_redactToolTargetLabel(sv); }catch(e){} }
+    return `<div class="tool-arg-pair"><span class="tool-arg-key">${esc(String(k))}</span><span class="tool-arg-val">${esc(sv)}</span></div>`;
+  }).join('');
   return `<div class="tool-card-detail" data-transparent-detail-mode="full"><div class="transparent-detail-modes" role="tablist"><span class="transparent-detail-mode active" role="tab" tabindex="0" data-mode="full" onclick="_setTransparentDetailMode(this,'full')">Full</span><span class="transparent-detail-mode" role="tab" tabindex="0" data-mode="output" onclick="_setTransparentDetailMode(this,'output')">Output</span></div><div class="tool-card-args">${argHtml}</div>${preview?`<div class="tool-card-result"><pre>${esc(preview)}</pre></div>`:''}</div>`;
 }
 function _syncTransparentEventControls(turn){
@@ -10994,6 +11015,12 @@ function _toolArgsSnapshot(args, limit){
     'url','uri','command','cmd','path','file','file_path','filename','file_glob',
     'glob','offset','limit',
   ];
+  // Content / diff-reconstruction keys must not be capped to the short
+  // incidental-arg limit, or long commands/paths get cut and recovery-rebuilt
+  // diffs (built from old_string/new_string/patch) break (#4928). Mirrors the
+  // backend _TOOL_ARG_CONTENT_KEYS / _TOOL_ARG_CONTENT_CAP.
+  const contentKeys=new Set(['command','cmd','script','code','patch','diff','old_string','new_string','content','path','file_path']);
+  const CONTENT_CAP=4000;
   const keys=[
     ...priority.filter(k=>Object.prototype.hasOwnProperty.call(args,k)),
     ...Object.keys(args).filter(k=>!priority.includes(k)),
@@ -11001,7 +11028,14 @@ function _toolArgsSnapshot(args, limit){
   const out={};
   keys.forEach(k=>{
     const v=String(args[k]);
-    out[k]=v.slice(0,120)+(v.length>120?'...':'');
+    const cap=contentKeys.has(String(k).toLowerCase())?CONTENT_CAP:120;
+    let val=v.slice(0,cap)+(v.length>cap?'...':'');
+    // Now that content args are retained up to 4000 chars (#4928), a secret on
+    // a non-first line / past char 120 would otherwise reach the args block,
+    // the Full tab, and clipboard copy unredacted. Redact at the snapshot so
+    // every downstream renderer receives already-masked args (#4928 gate).
+    if(typeof _redactToolTargetLabel==='function'){ try{ val=_redactToolTargetLabel(val); }catch(e){} }
+    out[k]=val;
   });
   return out;
 }
@@ -13059,7 +13093,11 @@ function buildToolCard(tc){
       ${hasDetail?`<div class="tool-card-detail">
         ${detailLead}
         ${visibleArgs.length?`<div class="tool-card-args">${
-          visibleArgs.map(([k,v])=>`<div class="tool-arg-pair"><span class="tool-arg-key">${esc(k)}</span><span class="tool-arg-val">${esc(String(v))}</span></div>`).join('')
+          visibleArgs.map(([k,v])=>{
+            let sv=String(v);
+            if(typeof _redactToolTargetLabel==='function'){ try{ sv=_redactToolTargetLabel(sv); }catch(e){} }
+            return `<div class="tool-arg-pair"><span class="tool-arg-key">${esc(k)}</span><span class="tool-arg-val">${esc(sv)}</span></div>`;
+          }).join('')
         }</div>`:''}
         ${displaySnippet?`<div class="tool-card-result">
           <pre>${tc.is_diff||_snippetLooksLikeDiff(displaySnippet)?`<code class="diff-block" data-highlighted="1">${_colorDiffLines(displaySnippet)}</code>`:esc(displaySnippet)}</pre>
