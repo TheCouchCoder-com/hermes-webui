@@ -13,19 +13,17 @@
 
 ## [Unreleased]
 
-<<<<<<< HEAD
 ### Changed (fork)
 - **Dropped the fork's split webui/agent update banner in favor of upstream's single update banner.** The split banner existed so WebUI could be updated separately from the Agent; upstream now ships an **"Ignore Agent updates"** preference (Settings → Preferences, `ignore_agent_updates`) that covers that need, so the fork no longer needs to diverge. Removed the per-target banner rows (`updateRow-webui`/`updateRow-agent`, `applyUpdates(target)`, `_renderUpdateBannerRow`) and adopted upstream's single-banner UI, `applyUpdates()`, and what's-new/summary panel. The fork-only "update check unavailable" status helper is retained. Future syncs follow upstream on the banner (see `CLAUDE.md`).
 
 ### Fixed (fork)
 - `sync-upstream.yml` no longer fails at the push step when an upstream tag modifies a file under `.github/workflows/`. The default `GITHUB_TOKEN` cannot push workflow-file changes (GitHub rejects the push without the `workflows` permission scope), and this fork runs its own CI rather than tracking upstream's. The workflow now reverts any upstream edits to `.github/workflows/*` back to our `master` version, folds the revert into the merge commit, and surfaces the dropped files as a `::notice` and in the PR body. Without this, every sync that touches an upstream workflow file (e.g. v0.51.189, which adds a ruff lint job to `tests.yml`) aborted before opening a PR.
-=======
+
 ## [v0.51.658] — 2026-06-25 — Release XN (tool cards keep long commands and reconstruct diffs)
 
 ### Fixed
 
 - **Long tool-call commands, paths, and reconstructed diffs are no longer cut to 120 characters in tool cards.** Tool-call arguments were truncated to 120 chars when persisted and when rebuilt for rendering, which clipped long single-line commands and file paths and — most damagingly — broke the diff shown for recovery-rebuilt sessions (whose diffs are reconstructed from the `old_string`/`new_string`/`patch` args). Content/diff-bearing arg keys (`command`, `cmd`, `script`, `code`, `patch`, `diff`, `old_string`, `new_string`, `content`, `path`, `file_path`) now keep their full value (bounded at a much larger storage-safe cap); incidental args still use the short cap. Secret-bearing values newly visible in the full command are masked at every render and clipboard-copy path. (#4928, part of #4925)
->>>>>>> v0.51.658
 
 ## [v0.51.657] — 2026-06-25 — Release XM (expanded shell tool cards show the full command)
 
