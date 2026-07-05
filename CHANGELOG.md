@@ -19,6 +19,12 @@
 ### Fixed (fork)
 - `sync-upstream.yml` no longer fails at the push step when an upstream tag modifies a file under `.github/workflows/`. The default `GITHUB_TOKEN` cannot push workflow-file changes (GitHub rejects the push without the `workflows` permission scope), and this fork runs its own CI rather than tracking upstream's. The workflow now reverts any upstream edits to `.github/workflows/*` back to our `master` version, folds the revert into the merge commit, and surfaces the dropped files as a `::notice` and in the PR body. Without this, every sync that touches an upstream workflow file (e.g. v0.51.189, which adds a ruff lint job to `tests.yml`) aborted before opening a PR.
 
+## [v0.51.664] — 2026-06-25 — Release XT (transparent stream keeps prose in chronological order)
+
+### Fixed
+
+- **In the transparent activity stream, a settled assistant turn that mixes commentary and tool activity now keeps its prose in chronological order instead of collapsing all text above the tool rows.** Settled mixed-content messages previously merged every text segment into one block before the activity rows landed, so the natural "explain → run tool → explain → run tool" reading order was lost. The transcript now interleaves text and tool cards in their original order for those turns. The Worklog / Transparent Stream model is unchanged; this only fixes the surviving ordering gap. Thanks @rodboev. (#4932, #3397)
+
 ## [v0.51.663] — 2026-06-25 — Release XS (mobile reload button shows outside standalone mode)
 
 ### Fixed
