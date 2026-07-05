@@ -19,6 +19,12 @@
 ### Fixed (fork)
 - `sync-upstream.yml` no longer fails at the push step when an upstream tag modifies a file under `.github/workflows/`. The default `GITHUB_TOKEN` cannot push workflow-file changes (GitHub rejects the push without the `workflows` permission scope), and this fork runs its own CI rather than tracking upstream's. The workflow now reverts any upstream edits to `.github/workflows/*` back to our `master` version, folds the revert into the merge commit, and surfaces the dropped files as a `::notice` and in the PR body. Without this, every sync that touches an upstream workflow file (e.g. v0.51.189, which adds a ruff lint job to `tests.yml`) aborted before opening a PR.
 
+## [v0.51.662] — 2026-06-25 — Release XR (live replies keep following during transcript rebuilds)
+
+### Fixed
+
+- **A streaming reply no longer stops following (or appears to jump backward) when the transcript rebuilds mid-stream.** `renderMessages` rebuilds the message pane by clearing it (`innerHTML=''`), and during that brief gap the scroll container can collapse and the browser clamps `scrollTop` to 0, emitting a scroll event. The scroll listener was interpreting that render artifact as a deliberate user scroll-up and unpinning the reader, so the live reply stopped auto-following. The DOM-wipe scroll is now marked programmatic and ignored; genuine user scroll-up (wheel/touch) during a render is still detected and still unpins. Thanks @allenliang2022. (#4934)
+
 ## [v0.51.661] — 2026-06-25 — Release XQ (no more fabricated multi-hour processing time)
 
 ### Fixed
