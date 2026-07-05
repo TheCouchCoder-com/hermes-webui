@@ -19,6 +19,12 @@
 ### Fixed (fork)
 - `sync-upstream.yml` no longer fails at the push step when an upstream tag modifies a file under `.github/workflows/`. The default `GITHUB_TOKEN` cannot push workflow-file changes (GitHub rejects the push without the `workflows` permission scope), and this fork runs its own CI rather than tracking upstream's. The workflow now reverts any upstream edits to `.github/workflows/*` back to our `master` version, folds the revert into the merge commit, and surfaces the dropped files as a `::notice` and in the PR body. Without this, every sync that touches an upstream workflow file (e.g. v0.51.189, which adds a ruff lint job to `tests.yml`) aborted before opening a PR.
 
+## [v0.51.665] — 2026-06-25 — Release XU (sidebar stops re-querying every poll during streaming)
+
+### Fixed
+
+- **`/api/sessions` no longer re-runs the expensive CLI/cron session projection on every poll while a turn is streaming**, a major cause of the multi-second sidebar latency and 100% CPU on cron-heavy installs (#4842, continuing #4672/#4808/#4889). The CLI/cron sidebar projection is cached, but its cache key folded in a state.db content fingerprint (`MAX(rowid) FROM messages`) that advances on every streamed message row — so during a live turn the frontend's ~5s poll always missed the cache and re-ran the full candidate-join + projection (and the lineage-metadata pass), contending for the same SQLite/global lock the streaming worker holds. The route-level session-list cache already froze its key during streaming (#4808), but that freeze never reached this inner CLI-sessions cache. Now, while any turn is streaming, the CLI-sessions cache key folds in the same stable streaming-freeze marker (keyed only on the set of active stream ids) and its TTL widens (30s), so the heavy projection is reused across polls and rebuilt at most once per streaming window instead of once per poll. In-app structural sidebar mutations (new/renamed/archived sessions, attention) clear the cache directly so they stay instant; externally-driven changes that don't fire that listener (a scheduled cron completing, an external CLI writing rows) surface within one streaming-TTL window (≤30s) — a bounded, self-healing lag. Idle behavior is unchanged.
+
 ## [v0.51.664] — 2026-06-25 — Release XT (transparent stream keeps prose in chronological order)
 
 ### Fixed
@@ -119,7 +125,6 @@
 ### Fixed
 
 - **Terminal tool cards keep their full output, and patch/edit cards keep their diff, after a turn settles in the Transparent Stream / Worklog view.** While a turn streamed, the tool cards showed their complete output; once the stream settled (or on reload/reconnect), terminal cards collapsed to just the `$ command` line with no stdout and patch/edit cards showed their input fields with no rendered diff. The settled rebuild reconstructs each tool row from the persisted `messages[].tool_calls` (state.db / sidecar), which can carry only a short preview — or, on a cold/paginated load, nothing — for the result body; the live in-memory tool call still held the full output at settle time, but the merge dropped it (it skipped the matching live entry instead of restoring the missing body onto the surviving settled row). The merge now restores the full result body, command, and input args from the matched live tool call when the settled row is missing them (without clobbering a genuinely persisted value), so the rebuilt card shows the complete terminal stdout (with the **Show more** expander and the transparent **Output** / **Full** tabs), and renders the patch/edit diff. (#4622)
-
 ## [v0.51.647] — 2026-06-25 — Release XC (task detail action buttons reappear on mobile PWA)
 
 ### Fixed
