@@ -11842,6 +11842,21 @@ function renderMessages(options){
     // Without this step CLI-origin sessions reload with empty tool cards.
     const resultsByTid={};
     const fallbackToolSources=[];
+    // Durable fallback: the persisted compact summary (session.tool_calls, built
+    // by _extract_tool_calls_from_messages) carries a bounded result `snippet`
+    // keyed by tid. On a cold/paginated load where the role:tool result-message
+    // join below misses (id mismatch, recovery-rebuilt turn), use this so the
+    // terminal output / diff body still renders instead of vanishing (#4927).
+    const persistedSnippetByTid={};
+    try{
+      const persisted=(S.session&&Array.isArray(S.session.tool_calls))?S.session.tool_calls:[];
+      persisted.forEach(tc=>{
+        if(!tc||typeof tc!=='object') return;
+        const ptid=tc.tid||tc.id||tc.tool_call_id||tc.call_id||'';
+        const psnip=tc.snippet||tc.result||tc.output||tc.preview||'';
+        if(ptid&&psnip&&!persistedSnippetByTid[ptid]) persistedSnippetByTid[ptid]=String(psnip);
+      });
+    }catch(e){}
     S.messages.forEach((m,rawIdx)=>{
       if(!m) return;
       // OpenAI / Hermes CLI format: role=tool with tool_call_id
@@ -11907,7 +11922,7 @@ function renderMessages(options){
         try{ args=JSON.parse(fn.arguments||'{}'); }catch(e){}
         const tid=tc.id||tc.call_id||'';
         const patchSnippet=_cliPatchSnippetFromArgs(name,args);
-        const resultSnippet=resultsByTid[tid]||'';
+        const resultSnippet=resultsByTid[tid]||persistedSnippetByTid[tid]||'';
         let argsSnap=_toolArgsSnapshot(args);
         derived.push(copyLiveToolMetadata({
           name,
@@ -11934,7 +11949,7 @@ function renderMessages(options){
         }
         const tid=tc.tid||tc.id||tc.tool_call_id||tc.call_id||'';
         const patchSnippet=_cliPatchSnippetFromArgs(name,args);
-        const resultSnippet=resultsByTid[tid]||tc.snippet||tc.preview||'';
+        const resultSnippet=resultsByTid[tid]||tc.snippet||tc.preview||persistedSnippetByTid[tid]||'';
         const argsSnap=_toolArgsSnapshot(args);
         derived.push(copyLiveToolMetadata({
           name,
@@ -11954,7 +11969,7 @@ function renderMessages(options){
           const args=p.input||{};
           const tid=p.id||'';
           const patchSnippet=_cliPatchSnippetFromArgs(name,args);
-          const resultSnippet=resultsByTid[tid]||'';
+          const resultSnippet=resultsByTid[tid]||persistedSnippetByTid[tid]||'';
           const argsSnap=_toolArgsSnapshot(args);
           derived.push(copyLiveToolMetadata({
             name,
