@@ -19,6 +19,12 @@
 ### Fixed (fork)
 - `sync-upstream.yml` no longer fails at the push step when an upstream tag modifies a file under `.github/workflows/`. The default `GITHUB_TOKEN` cannot push workflow-file changes (GitHub rejects the push without the `workflows` permission scope), and this fork runs its own CI rather than tracking upstream's. The workflow now reverts any upstream edits to `.github/workflows/*` back to our `master` version, folds the revert into the merge commit, and surfaces the dropped files as a `::notice` and in the PR body. Without this, every sync that touches an upstream workflow file (e.g. v0.51.189, which adds a ruff lint job to `tests.yml`) aborted before opening a PR.
 
+## [v0.51.663] — 2026-06-25 — Release XS (mobile reload button shows outside standalone mode)
+
+### Fixed
+
+- **The reload/refresh button is now visible in the mobile titlebar in a normal browser, not only in installed/standalone (PWA) mode.** The phone-width titlebar re-showed only the new-chat button while the reload button was re-shown by a separate standalone/fullscreen rule, so on a regular mobile browser there was no reload affordance. The phone-width rule now shows it too (it stays hidden on desktop, where it isn't needed). Thanks @rodboev. (#4939, fixes #4784)
+
 ## [v0.51.662] — 2026-06-25 — Release XR (live replies keep following during transcript rebuilds)
 
 ### Fixed
