@@ -19,6 +19,12 @@
 ### Fixed (fork)
 - `sync-upstream.yml` no longer fails at the push step when an upstream tag modifies a file under `.github/workflows/`. The default `GITHUB_TOKEN` cannot push workflow-file changes (GitHub rejects the push without the `workflows` permission scope), and this fork runs its own CI rather than tracking upstream's. The workflow now reverts any upstream edits to `.github/workflows/*` back to our `master` version, folds the revert into the merge commit, and surfaces the dropped files as a `::notice` and in the PR body. Without this, every sync that touches an upstream workflow file (e.g. v0.51.189, which adds a ruff lint job to `tests.yml`) aborted before opening a PR.
 
+## [v0.51.668] — 2026-06-26 — Release XX (WebUI stays in sync after the Desktop app continues a session)
+
+### Fixed
+
+- **A WebUI-created session stays in sync after the official Hermes Desktop app continues the same Agent session.** When the Desktop app appended settled rows to the shared `state.db` and you returned to WebUI, the sidebar/detail could show a stale or incomplete transcript and the next WebUI turn's context missed the externally-appended messages. The sidebar now refreshes WebUI-origin rows from settled `state.db` count/timestamp even when external/CLI sessions are hidden (overlaying only when the DB strictly grew, metadata-only, with the active-stream hold-down preserved), and full loads avoid duplicating the sidecar prefix when merging `state.db`. Read-only reconciliation — no Desktop change, no live-stream mirroring. Thanks @franksong2702. (#4834, fixes #4833)
+
 ## [v0.51.667] — 2026-06-26 — Release XW (compaction markers stay internal; code-shaped tool output stays intact)
 
 ### Fixed
