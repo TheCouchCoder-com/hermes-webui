@@ -1,7 +1,7 @@
 """
 Hermes Web UI -- optional authentication.
 Off by default. Enable by setting HERMES_WEBUI_PASSWORD, configuring a
-password in Settings, or registering passkeys and then going passwordless.
+password in Settings, registering passkeys, or configuring native OIDC SSO.
 """
 import hashlib
 import hmac
@@ -14,9 +14,10 @@ import secrets
 import tempfile
 import threading
 import time
+from pathlib import Path
 
 from api._atomic import atomic_write_json
-from api.config import STATE_DIR, load_settings
+from api.config import STATE_DIR, get_config, load_settings
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,7 @@ def _resolve_session_ttl() -> int:
 PUBLIC_PATHS = frozenset({
     '/login', '/health', '/favicon.ico', '/sw.js',
     '/api/auth/login', '/api/auth/status', '/api/auth/bootstrap',
+    '/api/auth/oidc/start', '/api/auth/oidc/callback',
     '/api/auth/passkey/options', '/api/auth/passkey/login',
     '/manifest.json', '/manifest.webmanifest',
     '/session/manifest.json', '/session/manifest.webmanifest',
@@ -84,6 +86,18 @@ def _resolve_cookie_name() -> str:
         '(name must be a valid RFC 6265 token)', name, COOKIE_NAME,
     )
     return COOKIE_NAME
+
+
+def _warn_auth_persistence_failure(prefix: str, artifact: Path, exc: Exception, consequence: str) -> None:
+    logger.warning(
+        '%s at %s (STATE_DIR=%s): %s: %s; %s',
+        prefix,
+        artifact,
+        STATE_DIR,
+        exc.__class__.__name__,
+        exc,
+        consequence,
+    )
 
 
 _SESSIONS_FILE = STATE_DIR / '.sessions.json'
@@ -124,23 +138,46 @@ def _load_sessions() -> dict:
     blocked by a corrupt or missing sessions file.
     """
     try:
-        if _SESSIONS_FILE.exists():
-            data = json.loads(_SESSIONS_FILE.read_text(encoding='utf-8'))
-            if not isinstance(data, dict):
-                raise ValueError('malformed sessions file — expected dict')
-            now = time.time()
-            out = {}
-            for t, entry in data.items():
-                if not isinstance(t, str):
-                    continue
-                exp = _session_expiry(entry)
-                if exp <= now:
-                    continue
-                out[t] = entry
-            return out
+        if not _SESSIONS_FILE.exists():
+            return {}
+        raw = _SESSIONS_FILE.read_text(encoding='utf-8')
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError('malformed sessions file: expected dict')
+    except OSError as e:
+        _warn_auth_persistence_failure(
+            'Auth session store read failed',
+            _SESSIONS_FILE,
+            e,
+            'starting fresh with an empty session table',
+        )
+        return {}
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        _warn_auth_persistence_failure(
+            'Ignoring malformed auth session store',
+            _SESSIONS_FILE,
+            e,
+            'starting fresh with an empty session table',
+        )
+        return {}
     except Exception as e:
-        logger.debug("Failed to load sessions file, starting fresh: %s", e)
-    return {}
+        _warn_auth_persistence_failure(
+            'Ignoring malformed auth session store',
+            _SESSIONS_FILE,
+            e,
+            'starting fresh with an empty session table',
+        )
+        return {}
+    now = time.time()
+    out = {}
+    for t, entry in data.items():
+        if not isinstance(t, str):
+            continue
+        exp = _session_expiry(entry)
+        if exp <= now:
+            continue
+        out[t] = entry
+    return out
 
 
 def _save_sessions(sessions: dict) -> None:
@@ -148,7 +185,12 @@ def _save_sessions(sessions: dict) -> None:
     try:
         atomic_write_json(_SESSIONS_FILE, sessions, mode=0o600)
     except Exception as e:
-        logger.debug("Failed to persist sessions: %s", e)
+        _warn_auth_persistence_failure(
+            'Auth session persistence failed',
+            _SESSIONS_FILE,
+            e,
+            'keeping the in-process session table available',
+        )
 
 
 # Active sessions: token -> expiry timestamp (persisted across restarts via STATE_DIR)
@@ -281,15 +323,39 @@ def _load_key(filename: str) -> bytes:
             raw = key_file.read_bytes()
             if len(raw) >= 32:
                 return raw[:32]
-    except OSError:
-        logger.debug("Failed to read key %s", filename)
+    except OSError as e:
+        _warn_auth_persistence_failure(
+            'Auth key read failed',
+            key_file,
+            e,
+            'generating a new key and continuing',
+        )
+    except Exception as e:
+        _warn_auth_persistence_failure(
+            'Auth key read failed',
+            key_file,
+            e,
+            'generating a new key and continuing',
+        )
     key = secrets.token_bytes(32)
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         key_file.write_bytes(key)
         key_file.chmod(0o600)
-    except OSError:
-        logger.debug("Failed to persist key %s", filename)
+    except OSError as e:
+        _warn_auth_persistence_failure(
+            'Auth key persistence failed',
+            key_file,
+            e,
+            'returning the generated key so startup can continue',
+        )
+    except Exception as e:
+        _warn_auth_persistence_failure(
+            'Auth key persistence failed',
+            key_file,
+            e,
+            'returning the generated key so startup can continue',
+        )
     return key
 
 
@@ -450,9 +516,67 @@ def are_passkeys_enabled() -> bool:
         return False
 
 
+def is_oidc_auth_enabled() -> bool:
+    """True if native OIDC login is configured for WebUI sessions."""
+    try:
+        from api.auth_oidc import is_oidc_enabled
+
+        return is_oidc_enabled()
+    except Exception as exc:
+        logger.debug("Failed to inspect OIDC availability: %s", exc)
+        return False
+
+
+def get_oidc_startup_warning() -> str | None:
+    """Return a startup warning when OIDC auth is only partially configured."""
+    try:
+        cfg = get_config()
+        raw = cfg.get("webui_oidc") if isinstance(cfg, dict) else {}
+        if not isinstance(raw, dict):
+            raw = {}
+    except Exception:
+        logger.debug("Failed to read webui_oidc config", exc_info=True)
+        raw = {}
+
+    def pick(name: str, env_name: str) -> str:
+        env_value = os.getenv(env_name)
+        value = env_value if env_value is not None else raw.get(name)
+        return str(value or "").strip()
+
+    issuer = bool(pick("issuer", "HERMES_WEBUI_OIDC_ISSUER"))
+    client_id = bool(pick("client_id", "HERMES_WEBUI_OIDC_CLIENT_ID"))
+    allow_claim = bool(pick("allow_claim", "HERMES_WEBUI_OIDC_ALLOW_CLAIM"))
+    allow_values = bool(pick("allow_values", "HERMES_WEBUI_OIDC_ALLOW_VALUES"))
+
+    if not any((issuer, client_id, allow_claim, allow_values)):
+        return None
+    if issuer and client_id and allow_claim and allow_values:
+        return None
+
+    missing = []
+    if not issuer:
+        missing.append("issuer")
+    if not client_id:
+        missing.append("client_id")
+    if not allow_claim:
+        missing.append("allow_claim")
+    if not allow_values:
+        missing.append("allow_values")
+
+    joined = ", ".join(missing)
+    return (
+        "Native OIDC login is only partially configured; missing "
+        f"{joined}. The WebUI will not enable OIDC auth until all four fields are set."
+    )
+
+
 def is_auth_enabled() -> bool:
-    """True if password auth or passkey-only auth is configured."""
-    return is_password_auth_enabled() or are_passkeys_enabled()
+    """True if password auth, passkeys, or OIDC login is configured."""
+    return (
+        is_password_auth_enabled()
+        or are_passkeys_enabled()
+        or is_oidc_auth_enabled()
+    )
 
 
 def verify_password(plain: str) -> bool:
@@ -806,6 +930,46 @@ def parse_cookie(handler) -> str | None:
     return morsel.value if morsel else None
 
 
+def _safe_login_inner_next(query: str | None) -> str:
+    """#5578: extract a SAFE, non-login inner redirect from a login page's query.
+
+    When an expired-auth bounce lands back on the login page (which already
+    carries its own `next` in the query), we want to preserve a legitimate inner
+    destination X across the redirect to the real login route — but only if X is
+    itself safe (path-absolute, not protocol-relative/backslash, no control
+    chars) AND not login-shaped / not itself carrying a nested next param.
+    Anything else collapses to '' (no inner redirect), which kills the
+    self-referential chain. Mirrors _safe_login_redirect_path().
+    """
+    import urllib.parse as _u
+    raw = _u.parse_qs(query or "").get("next", [""])[0]
+    path = str(raw or "").strip()
+    if not path or path[0] != "/" or path[1:2] in {"/", "\\"}:
+        return ""
+    if re.search(r"[\x00-\x1f\x7f\s]", path) or len(path) > 2048:
+        return ""
+    # Collapse only login-route chains — decode a few levels so a nested
+    # `/session/login%3Fnext%3D...` (encoded `?`) is still recognized by its
+    # leading PATH — but preserve a legitimate non-login inner path that merely
+    # carries its own `next=` query key (e.g. `/admin?next=/real/path`).
+    _probe = path
+    for _ in range(8):
+        _p = _probe.split("?", 1)[0].split("#", 1)[0].split("&", 1)[0].rstrip("/")
+        if _p == "/login" or _p.endswith("/login"):
+            return ""
+        _decoded = _u.unquote(_probe)
+        if _decoded == _probe:
+            break
+        _probe = _decoded
+    else:
+        # Still decoding at the cap (pathologically deep encoding) → fail closed.
+        _p = _probe.split("?", 1)[0].split("#", 1)[0].split("&", 1)[0].rstrip("/")
+        if _p == "/login" or _p.endswith("/login"):
+            return ""
+        return ""
+    return path
+
+
 def check_auth(handler, parsed) -> bool:
     """Check if request is authorized. Returns True if OK.
     If not authorized, sends 401 (API) or 302 redirect (page) and returns False."""
@@ -848,6 +1012,35 @@ def check_auth(handler, parsed) -> bool:
         # the full original URL (the browser auto-decodes once).
         # (Opus pre-release advisor finding for v0.50.258.)
         import urllib.parse as _urlparse
+        # #5578: if the page being redirected is ALREADY login-shaped, do NOT
+        # wrap its full `path?query` into a fresh `next=` — that query already
+        # carries a `next=`, so quoting the whole thing nests the login URL into
+        # itself and re-encodes it on every expired-auth bounce, exploding the
+        # URL until the tab breaks. This guard runs in check_auth() (BEFORE
+        # route handling), the actual source of the server-side loop.
+        #
+        # The login page is served ONLY at the public `/login` route (see
+        # PUBLIC_PATHS + the routes.py `/login` handler); the app's client route
+        # `/session/login` is NOT public, so a bare relative `login` from
+        # `/session/login` resolves to `/session/login` again and re-triggers
+        # check_auth() — an infinite redirect. Resolve to the real login route
+        # with `../login`, which lands on `/login` from a `/session/*` scope and
+        # on `<mount>/login` under a subpath mount (verified via urljoin). Carry
+        # through only a validated, non-login inner `next` so a legitimate
+        # post-login destination still survives a bounce that happened to land
+        # on the login page.
+        _login_path = (parsed.path or '/').rstrip('/')
+        if _login_path == '/login' or _login_path.endswith('/login'):
+            # /login itself is public → check_auth never redirects it; this only
+            # fires for the non-public client login route (e.g. /session/login).
+            _target = '../login' if '/' in _login_path.lstrip('/') else 'login'
+            _inner = _safe_login_inner_next(parsed.query)
+            if _inner:
+                _target += '?next=' + _urlparse.quote(_inner, safe='/')
+            handler.send_header('Location', _target)
+            handler.send_header('Content-Length', '0')
+            handler.end_headers()
+            return False
         _path_with_query = parsed.path or '/'
         if parsed.query:
             _path_with_query += '?' + parsed.query

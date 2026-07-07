@@ -53,8 +53,8 @@ class TestComposerPlaceholderProfile:
     def test_boot_applies_placeholder_after_active_profile_loads(self):
         """Boot must set the composer placeholder after S.activeProfile is known."""
         src = _src("boot.js")
-        fetch_idx = src.find("api('/api/profile/active')")
-        assert fetch_idx >= 0, "boot.js should fetch the active profile during boot"
+        fetch_idx = src.find("const activeProfileState = await _resolveActiveProfileBootstrapState();")
+        assert fetch_idx >= 0, "boot.js should resolve the active profile during boot"
         # Fork PR #1 added a titlebar profile chip and routes the composer
         # label through the shared _setProfileChipLabel() helper instead of
         # touching #profileChipLabel directly. Accept either pattern so the
