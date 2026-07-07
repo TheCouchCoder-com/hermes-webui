@@ -229,6 +229,28 @@ def cleanup_legacy_sessions() -> int:
         return 0
 
 
+def log_startup_migration() -> None:
+    """Run the issue #2 multi-user RBAC first-boot migration and legacy-session
+    cleanup, logging the outcome. Idempotent and safe to call unconditionally on
+    every startup: on first boot after the upgrade it copies the legacy shared
+    password hash into an 'admin' user; on a fresh install it leaves
+    ``.users.json`` absent so /login renders the bootstrap form. Extracted from
+    server.py so the entry point stays a thin routing shell (business logic lives
+    in api/*)."""
+    try:
+        _mig = run_first_boot_migration()
+        if _mig['action'] == 'upgraded':
+            print(f"[migration] action={_mig['action']} admin={_mig['admin_username']}", flush=True)
+        elif _mig['action'] in ('first_boot', 'env_var_legacy_preserved'):
+            print(f"[migration] action={_mig['action']}", flush=True)
+        # Legacy sessions have no user_id binding; force a one-time re-login.
+        _dropped = cleanup_legacy_sessions()
+        if _dropped:
+            print(f"[migration] dropped {_dropped} legacy unbound session(s)", flush=True)
+    except Exception as exc:
+        print(f"[migration] startup migration failed: {exc}", flush=True)
+
+
 def is_first_boot() -> bool:
     """True iff the server has no users configured AND no legacy env-var
     password (so /login should render the bootstrap form). Used by
