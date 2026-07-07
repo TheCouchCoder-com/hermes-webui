@@ -19,6 +19,12 @@
 ### Fixed (fork)
 - `sync-upstream.yml` no longer fails at the push step when an upstream tag modifies a file under `.github/workflows/`. The default `GITHUB_TOKEN` cannot push workflow-file changes (GitHub rejects the push without the `workflows` permission scope), and this fork runs its own CI rather than tracking upstream's. The workflow now reverts any upstream edits to `.github/workflows/*` back to our `master` version, folds the revert into the merge commit, and surfaces the dropped files as a `::notice` and in the PR body. Without this, every sync that touches an upstream workflow file (e.g. v0.51.189, which adds a ruff lint job to `tests.yml`) aborted before opening a PR.
 
+## [v0.51.669] — 2026-06-26 — Release XY (set OpenAI priority service tier from the model picker)
+
+### Added
+
+- **The main-model advanced settings can now set the OpenAI priority service tier (`service_tier`), matching the CLI/gateway fast-mode path.** Previously the WebUI model picker had no way to opt a conversation into OpenAI's priority tier even though the agent's `/fast` path supported it. The Settings → main-model advanced panel now exposes a Service tier control (Default/off · Priority) for eligible OpenAI-family models; the choice persists and is forwarded on the request. Codex models are excluded (their transport doesn't accept `service_tier`, so the selector is hidden and the value is never forwarded/persisted for them), and non-OpenAI providers never receive it. Thanks @rodboev. (#4543, fixes #4536)
+
 ## [v0.51.668] — 2026-06-26 — Release XX (WebUI stays in sync after the Desktop app continues a session)
 
 ### Fixed
