@@ -55,6 +55,7 @@ from api.session_events import (
     unsubscribe_session_events,
 )
 from api.gateway_restart import restart_active_profile_gateway
+from api.shares import create_or_refresh_share, load_share, revoke_share
 
 logger = logging.getLogger(__name__)
 
@@ -5007,6 +5008,146 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False)
         _apply_source_meta(s)
 
     return s
+
+
+def _share_snapshot_messages_for_session(session, *, cli_meta: dict | None = None) -> list:
+    """Return the visible transcript that a public share should snapshot.
+
+    External sessions (Telegram/Discord/Slack/CLI/etc.) may have no WebUI sidecar
+    or may persist only local metadata in the sidecar while the transcript lives
+    in state.db. Public sharing should snapshot the same visible conversation the
+    session page renders, not the bare local sidecar payload.
+    """
+    sid = str(getattr(session, "session_id", "") or "").strip()
+    current_messages = list(getattr(session, "messages", None) or [])
+    if not sid:
+        return current_messages
+    profile = getattr(session, "profile", None)
+    is_messaging = (
+        _is_messaging_session_record(session)
+        or _is_messaging_session_record(cli_meta)
+    )
+    if is_messaging or not current_messages:
+        cli_messages = get_cli_session_messages(sid, profile=profile)
+        if cli_messages:
+            if is_messaging:
+                return _merged_session_messages_for_display(session, cli_messages)
+            return list(cli_messages)
+    return current_messages
+
+
+def _build_share_metadata_sidecar(
+    sid: str,
+    snapshot_session,
+    *,
+    cli_meta: dict | None = None,
+):
+    """Create a minimal WebUI sidecar for share metadata on external sessions."""
+    cli_meta = dict(cli_meta or {})
+    workspace = (
+        cli_meta.get("workspace")
+        or cli_meta.get("cwd")
+        or getattr(snapshot_session, "workspace", None)
+    )
+    if not workspace:
+        workspace = get_last_workspace()
+    session = Session(
+        session_id=sid,
+        title=(
+            cli_meta.get("title")
+            or getattr(snapshot_session, "title", None)
+            or title_from(getattr(snapshot_session, "messages", None) or [], "CLI Session")
+        ),
+        workspace=workspace,
+        messages=[],
+        model=cli_meta.get("model") or getattr(snapshot_session, "model", None) or "unknown",
+        model_provider=(
+            cli_meta.get("model_provider")
+            or getattr(snapshot_session, "model_provider", None)
+        ),
+        created_at=cli_meta.get("created_at") or getattr(snapshot_session, "created_at", None),
+        updated_at=cli_meta.get("updated_at") or getattr(snapshot_session, "updated_at", None),
+        profile=cli_meta.get("profile") or getattr(snapshot_session, "profile", None),
+    )
+    session.is_cli_session = bool(
+        getattr(snapshot_session, "is_cli_session", False)
+        or is_cli_session_row(cli_meta)
+    )
+    session.source_tag = cli_meta.get("source_tag") or getattr(snapshot_session, "source_tag", None)
+    session.raw_source = (
+        cli_meta.get("raw_source")
+        or getattr(snapshot_session, "raw_source", None)
+        or session.source_tag
+    )
+    session.session_source = (
+        cli_meta.get("session_source")
+        or getattr(snapshot_session, "session_source", None)
+    )
+    session.source_label = (
+        cli_meta.get("source_label")
+        or getattr(snapshot_session, "source_label", None)
+    )
+    session.read_only = bool(
+        cli_meta.get("read_only") or getattr(snapshot_session, "read_only", False)
+    )
+    for attr in (
+        "user_id",
+        "chat_id",
+        "chat_type",
+        "thread_id",
+        "session_key",
+        "platform",
+        "origin_chat_id",
+        "origin_user_id",
+        "parent_session_id",
+    ):
+        value = cli_meta.get(attr)
+        if value is None:
+            value = getattr(snapshot_session, attr, None)
+        if value is not None:
+            setattr(session, attr, value)
+    return session
+
+
+def _resolve_share_session_pair(sid: str, handler):
+    """Resolve a shareable session plus the sidecar that stores share metadata.
+
+    Returns ``(snapshot_session, stored_session_or_none, cli_meta)``. The
+    snapshot session always carries the transcript that should become the public
+    share payload. ``stored_session`` is the WebUI-owned sidecar to mutate for
+    share_token/share_created_at persistence; it may be absent for pure external
+    sessions that have not yet created local metadata.
+    """
+    try:
+        stored_session = get_session(sid)
+        cli_meta = (
+            _lookup_cli_session_metadata(sid)
+            if _session_requires_cli_metadata_lookup(stored_session)
+            else {}
+        )
+        effective_profile = (
+            (cli_meta or {}).get("profile")
+            or getattr(stored_session, "profile", None)
+            or None
+        )
+        if not _session_visible_to_active_profile(effective_profile, handler):
+            raise KeyError(sid)
+        stored_session = _ensure_full_session_before_mutation(sid, stored_session)
+        snapshot_session = copy.copy(stored_session)
+        snapshot_session.messages = _share_snapshot_messages_for_session(
+            stored_session,
+            cli_meta=cli_meta,
+        )
+        return snapshot_session, stored_session, cli_meta or {}
+    except KeyError:
+        cli_meta = _lookup_cli_session_metadata(sid) or {}
+        effective_profile = cli_meta.get("profile") or None
+        if not _session_visible_to_active_profile(effective_profile, handler):
+            raise KeyError(sid) from None
+        synth, reason = _claim_or_synthesize_cli_session(sid, cli_meta=cli_meta)
+        if reason == "was_webui" or synth is None:
+            raise KeyError(sid) from None
+        return synth, None, cli_meta
 
 
 def _reconcile_stale_stream_state_for_session_rows(session_rows) -> bool:
@@ -11919,6 +12060,17 @@ def handle_get(handler, parsed) -> bool:
         except Exception as exc:
             return _serve_shell_unavailable(handler, exc)
 
+    if parsed.path == "/share" or parsed.path.startswith("/share/"):
+        share_path = (Path(__file__).parent.parent / "static" / "share.html").resolve()
+        return t(
+            handler,
+            share_path.read_text(encoding="utf-8"),
+            content_type="text/html; charset=utf-8",
+            extra_headers={
+                "X-Robots-Tag": "noindex, nofollow",
+            },
+        )
+
     if parsed.path == "/login":
         _settings = load_settings()
         _bn = _html.escape(_settings.get("bot_name") or "Hermes")
@@ -12045,6 +12197,20 @@ def handle_get(handler, parsed) -> bool:
             "passkey_feature_flag": passkey_flag,
             "auth_disabled_acknowledged": bool(load_settings().get("auth_disabled_acknowledged")) if not auth_enabled else False,
         })
+
+    if parsed.path.startswith("/api/share/"):
+        token = parsed.path[len("/api/share/"):].strip()
+        share = load_share(token)
+        if not share:
+            return bad(handler, "Shared conversation not found", 404)
+        return j(
+            handler,
+            {"share": share},
+            extra_headers={
+                "Cache-Control": "no-store",
+                "X-Robots-Tag": "noindex, nofollow",
+            },
+        )
 
     if parsed.path in ("/manifest.json", "/manifest.webmanifest"):
         return _serve_manifest(handler)
@@ -13979,6 +14145,90 @@ def handle_post(handler, parsed) -> bool:
         prompts.append(new_prompt)
         _save_saved_prompts(prompts)
         return j(handler, {"ok": True, "prompt": new_prompt})
+
+    if parsed.path == "/api/share/create":
+        sid = str(body.get("session_id") or "").strip()
+        if not sid:
+            return bad(handler, "session_id is required", 400)
+        try:
+            snapshot_session, stored_session, cli_meta = _resolve_share_session_pair(sid, handler)
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+        try:
+            share_meta = create_or_refresh_share(snapshot_session)
+        except ValueError as exc:
+            return bad(handler, str(exc), 400)
+        persisted_session = stored_session
+        if persisted_session is None:
+            persisted_session = _build_share_metadata_sidecar(
+                sid,
+                snapshot_session,
+                cli_meta=cli_meta,
+            )
+        persisted_session.share_token = share_meta["share_token"]
+        persisted_session.share_created_at = share_meta["share_created_at"]
+        persisted_session.save(touch_updated_at=False)
+        _publish_session_list_changed(
+            "session_share_create",
+            profile=getattr(persisted_session, "profile", None),
+            session_id=sid,
+        )
+        response_session = copy.copy(persisted_session)
+        response_session.messages = list(getattr(snapshot_session, "messages", None) or [])
+        return j(
+            handler,
+            {
+                "ok": True,
+                "share": {
+                    "token": share_meta["share_token"],
+                    "url": f"/share/{share_meta['share_token']}",
+                    "title": share_meta["share_title"],
+                    "message_count": share_meta["share_message_count"],
+                    "created_at": share_meta["share_created_at"],
+                    "updated_at": share_meta["share_updated_at"],
+                },
+                "session": response_session.compact() | {"messages": response_session.messages},
+            },
+        )
+
+    if parsed.path == "/api/share/revoke":
+        sid = str(body.get("session_id") or "").strip()
+        if not sid:
+            return bad(handler, "session_id is required", 400)
+        try:
+            snapshot_session, stored_session, cli_meta = _resolve_share_session_pair(sid, handler)
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+        target_session = stored_session
+        if target_session is None:
+            token = str(getattr(snapshot_session, "share_token", "") or "").strip()
+            if not token:
+                return bad(handler, "Session not found", 404)
+            target_session = _build_share_metadata_sidecar(
+                sid,
+                snapshot_session,
+                cli_meta=cli_meta,
+            )
+            target_session.share_token = token
+            target_session.share_created_at = getattr(snapshot_session, "share_created_at", None)
+        revoke_share(target_session)
+        target_session.share_token = None
+        target_session.share_created_at = None
+        target_session.save(touch_updated_at=False)
+        _publish_session_list_changed(
+            "session_share_revoke",
+            profile=getattr(target_session, "profile", None),
+            session_id=sid,
+        )
+        response_session = copy.copy(target_session)
+        response_session.messages = list(getattr(snapshot_session, "messages", None) or [])
+        return j(
+            handler,
+            {
+                "ok": True,
+                "session": response_session.compact() | {"messages": response_session.messages},
+            },
+        )
 
     if parsed.path == "/api/session/new":
         try:
