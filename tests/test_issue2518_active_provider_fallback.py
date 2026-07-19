@@ -90,9 +90,10 @@ class TestClientFallbackSourceShape:
         src = _read("static/sessions.js")
         idx = src.find("async function newSession(flash, options={}){")
         # Window covers the model-fallback region of newSession(); the function
-        # has grown over time (e.g. pre-session toolset staging #4490), so keep
-        # the window comfortably larger than the fallback block it guards.
-        body = src[idx:idx + 5000]
+        # has grown over time (e.g. pre-session toolset staging #4490, upstream
+        # profile-switch additions), so keep the window comfortably larger than
+        # the fallback block it guards.
+        body = src[idx:idx + 6000]
         assert "#2518" in body, (
             "newSession()'s fallback comment should reference #2518 so the "
             "follow-up provenance survives future refactors."

@@ -7592,6 +7592,39 @@ def _rescale_threshold_tokens_for_context_window(
     return max(1, int(threshold * new_window / old_window))
 
 
+def _worktree_default_from_config(profile: str | None) -> bool:
+    """Return the agent's config-level ``worktree:`` default for *profile*.
+
+    The agent CLI honors ``worktree: true`` in config.yaml for every session
+    it creates (``use_worktree = worktree or w or CLI_CONFIG.get("worktree",
+    False)``).  /api/session/new consults this only when the request body has
+    no explicit ``worktree`` key, so both entry points to the same repo agree
+    on isolation (#6022).  Explicit body values always win.
+
+    Profile-aware on purpose: the WebUI serves multiple profiles from one
+    process, and a user with ``worktree: true`` in one profile but not another
+    expects per-profile behavior.  ``get_config_for_profile_home`` handles the
+    ambient/common case via the mtime-tracked cache and reads a diverging
+    profile's config.yaml directly off disk (see #3294).
+    """
+    try:
+        if profile:
+            from api.profiles import get_hermes_home_for_profile
+
+            cfg_dict = get_config_for_profile_home(get_hermes_home_for_profile(profile))
+        else:
+            cfg_dict = get_config_for_profile_home(None)
+        # Strict boolean: only a real YAML `true` opts in.  Any other shape
+        # ("true", 1, [], {}, null, ...) is malformed for this key and must
+        # fall to the safe no-worktree default rather than truthiness-coerce
+        # into minting worktrees.
+        return (cfg_dict or {}).get("worktree", False) is True
+    except Exception:
+        # Config resolution must never break session creation.
+        logger.warning("failed to read worktree config default", exc_info=True)
+        return False
+
+
 def _session_model_state_from_request(
     model: str | None,
     requested_provider: str | None,
@@ -8542,6 +8575,24 @@ def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before
         return None, sidecar_messages
 
     floor = min(sidecar_timestamps[-raw_budget:])
+    sidecar_before_count = sum(1 for ts in sidecar_timestamps if ts < floor)
+    prefix_summary = get_state_db_session_message_prefix_summary(
+        getattr(session, "session_id", None),
+        floor,
+        profile=getattr(session, "profile", None) or None,
+    )
+    if prefix_summary is None:
+        return None, sidecar_messages
+    try:
+        state_before_count = int(prefix_summary["count"])
+        null_timestamp_count = int(prefix_summary["null_timestamp_count"])
+    except (KeyError, TypeError, ValueError):
+        return None, sidecar_messages
+    if null_timestamp_count or state_before_count != sidecar_before_count:
+        return None, sidecar_messages
+    if sidecar_before_count == 0:
+        return floor, sidecar_messages
+
     sidecar_before_keys = [
         _session_message_visible_key(msg)
         for msg, ts in zip(sidecar_messages, sidecar_timestamps, strict=True)
@@ -9155,6 +9206,7 @@ from api.models import (
     get_cli_sessions,
     get_cli_session_messages,
     get_state_db_session_messages,
+    get_state_db_session_message_prefix_summary,
     get_state_db_session_message_keys_before_timestamp,
     get_state_db_session_summary,
     merge_session_messages_append_only,
@@ -12041,6 +12093,8 @@ def handle_get(handler, parsed) -> bool:
 
                 if is_auth_enabled():
                     cookie_val = parse_cookie(handler)
+                    if not cookie_val:
+                        cookie_val = getattr(handler, "_trusted_auth_session_cookie_value", None)
                     if cookie_val and verify_session(cookie_val):
                         csrf_token = csrf_token_for_session(cookie_val) or ""
             except Exception:
@@ -12163,7 +12217,14 @@ def handle_get(handler, parsed) -> bool:
         return True
 
     if parsed.path == "/api/auth/status":
-        from api.auth import _passkey_feature_flag_enabled, get_password_hash, is_auth_enabled, is_oidc_auth_enabled, parse_cookie, verify_session
+        from api.auth import (
+            _passkey_feature_flag_enabled,
+            ensure_trusted_auth_session,
+            get_password_hash,
+            is_auth_enabled,
+            is_oidc_auth_enabled,
+            is_trusted_auth_enabled,
+        )
         from api.passkeys import registered_credentials
         from api.startup import is_first_boot
 
@@ -12178,14 +12239,15 @@ def handle_get(handler, parsed) -> bool:
 
         auth_enabled = is_auth_enabled() or users_configured
         logged_in = False
+        session_info = None
         oidc_enabled = is_oidc_auth_enabled()
         if auth_enabled:
-            cv = parse_cookie(handler)
-            logged_in = bool(cv and verify_session(cv))
+            session_info = ensure_trusted_auth_session(handler)
+            logged_in = bool(session_info)
         passkey_flag = _passkey_feature_flag_enabled()
         passkeys = registered_credentials() if passkey_flag else []
         password_auth_enabled = get_password_hash() is not None
-        return j(handler, {
+        payload = {
             "auth_enabled": auth_enabled,
             "logged_in": logged_in,
             "first_boot": first_boot,
@@ -12196,7 +12258,14 @@ def handle_get(handler, parsed) -> bool:
             "passkeys_count": len(passkeys),
             "passkey_feature_flag": passkey_flag,
             "auth_disabled_acknowledged": bool(load_settings().get("auth_disabled_acknowledged")) if not auth_enabled else False,
-        })
+        }
+        if is_trusted_auth_enabled() or (session_info and session_info.get("auth_type") == "trusted"):
+            payload["trusted_auth_enabled"] = True
+        if session_info and session_info.get("auth_type") == "trusted":
+            payload["auth_type"] = session_info.get("auth_type")
+            payload["user"] = session_info.get("username")
+            payload["bound_profile"] = session_info.get("bound_profile")
+        return j(handler, payload)
 
     if parsed.path.startswith("/api/share/"):
         token = parsed.path[len("/api/share/"):].strip()
@@ -14029,7 +14098,12 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/updates/check":
         settings = load_settings()
         if not settings.get("check_for_updates", True):
-            return j(handler, {"disabled": True})
+            force = bool(body.get("force", False)) if isinstance(body, dict) else False
+            if force:
+                # Manual force-check bypasses auto-check toggle (#6082)
+                pass
+            else:
+                return j(handler, {"disabled": True})
         include_agent_updates = not bool(settings.get("ignore_agent_updates"))
         force = bool(body.get("force", False))
         # Allow the client to pass the channel explicitly in the POST body. This
@@ -14236,10 +14310,26 @@ def handle_post(handler, parsed) -> bool:
         except (TypeError, ValueError) as e:
             return bad(handler, str(e))
         worktree_info = None
-        worktree_requested = (
-            body.get("worktree") is True
-            or str(body.get("worktree")).strip().lower() in {"1", "true", "yes", "on"}
-        )
+        worktree_skipped = None
+        # Three-value worktree model (#6022): an explicit body value always
+        # wins; an ABSENT key falls back to the agent's config-level
+        # ``worktree:`` default so WebUI sessions and CLI sessions agree on
+        # isolation for the same repo.  Clients that must never create a
+        # worktree (e.g. the boot-time auto-bind) send ``worktree: false``
+        # explicitly.
+        raw_worktree = body.get("worktree")
+        # Presence-based, not truthiness-based: a client that sends the key at
+        # all (even ``worktree: null``) has spoken explicitly and never falls
+        # through to the config default.  ``null`` parses as non-true below,
+        # i.e. an explicit opt-out — only a genuinely ABSENT key inherits.
+        worktree_explicit = "worktree" in body
+        if worktree_explicit:
+            worktree_requested = (
+                raw_worktree is True
+                or str(raw_worktree).strip().lower() in {"1", "true", "yes", "on"}
+            )
+        else:
+            worktree_requested = _worktree_default_from_config(body.get("profile") or None)
         if worktree_requested:
             try:
                 from api.worktrees import create_worktree_for_workspace
@@ -14249,7 +14339,15 @@ def handle_post(handler, parsed) -> bool:
                 worktree_info = create_worktree_for_workspace(base_workspace)
                 workspace = worktree_info["path"]
             except (TypeError, ValueError) as e:
-                return bad(handler, str(e), status=400)
+                # Explicit requests keep the hard failure.  A config-default
+                # request on a non-git workspace (create_worktree_for_workspace
+                # raises ValueError) degrades to a plain session instead —
+                # otherwise `worktree: true` in config.yaml would 400 every
+                # session in every non-git directory.
+                if worktree_explicit:
+                    return bad(handler, str(e), status=400)
+                worktree_info = None
+                worktree_skipped = str(e)
             except Exception as e:
                 logger.exception("failed to create worktree-backed session")
                 return bad(handler, f"Failed to create worktree: {e}", status=500)
@@ -14332,7 +14430,12 @@ def handle_post(handler, parsed) -> bool:
                 profile=getattr(s, "profile", None),
                 session_id=getattr(s, "session_id", None),
             )
-        return j(handler, {"session": s.compact() | {"messages": s.messages}})
+        payload = {"session": s.compact() | {"messages": s.messages}}
+        if worktree_skipped:
+            # Config-default worktree was skipped (non-git workspace); tell the
+            # client the session is plain so the UI doesn't assume isolation.
+            payload["worktree_skipped"] = worktree_skipped
+        return j(handler, payload)
 
     if parsed.path == "/api/session/compression-recovery/start":
         return _handle_session_compression_recovery_start(handler, body)
@@ -14949,15 +15052,24 @@ def handle_post(handler, parsed) -> bool:
             logger.debug("Failed to close workspace terminal for deleted session %s", sid)
         # Also delete from CLI state.db for CLI sessions shown in sidebar,
         # but never erase external messaging channel memory via WebUI delete.
+        state_db_cleanup_failed = False
         if not is_messaging_session:
             try:
                 from api.models import delete_cli_session
 
-                delete_cli_session(sid)
+                state_db_cleanup_failed = not delete_cli_session(sid)
             except Exception:
-                logger.debug("Failed to delete CLI session %s", sid)
+                state_db_cleanup_failed = True
+                logger.warning("Failed to delete CLI session %s", sid, exc_info=True)
         _publish_session_list_changed("session_delete", profile=event_profile)
-        return j(handler, {"ok": True, **worktree_retained})
+        return j(
+            handler,
+            {
+                "ok": True,
+                "state_db_cleanup_failed": state_db_cleanup_failed,
+                **worktree_retained,
+            },
+        )
 
     if parsed.path == "/api/session/clear":
         try:
@@ -15552,10 +15664,17 @@ def handle_post(handler, parsed) -> bool:
         if not name:
             return bad(handler, "name is required")
         try:
+            from api.auth import ensure_trusted_auth_session
             from api.profiles import switch_profile, _validate_profile_name
             from api.helpers import build_profile_cookie
             if name != 'default':
                 _validate_profile_name(name)
+            session_info = ensure_trusted_auth_session(handler)
+            if getattr(handler, '_trusted_auth_session_rejected', False):
+                return bad(handler, 'Authentication required', 401)
+            bound_profile = str((session_info or {}).get("bound_profile") or "").strip() or None
+            if bound_profile and name != bound_profile:
+                return bad(handler, "Profile is bound to the current session", 403)
             # process_wide=False: don't mutate the process-global _active_profile.
             # Per-client profile is managed via cookie + thread-local (#798).
             result = switch_profile(name, process_wide=False)
@@ -15569,8 +15688,15 @@ def handle_post(handler, parsed) -> bool:
                 restart_watcher_for_profile(name)
             except Exception as exc:
                 logger.warning("Failed to restart gateway watcher for profile %s: %s", name, exc)
+            session_cookie_value = getattr(handler, '_trusted_auth_session_cookie_value', None)
+            if session_cookie_value:
+                if bound_profile and name == bound_profile:
+                    return j(handler, result)
+                extra_header = build_profile_cookie(name, session_cookie_value=session_cookie_value)
+            else:
+                extra_header = build_profile_cookie(name, handler)
             return j(handler, result, extra_headers={
-                'Set-Cookie': build_profile_cookie(name, handler),
+                'Set-Cookie': extra_header,
             })
         except PermissionError as e:
             return bad(handler, _sanitize_error(e), 403)
@@ -16504,13 +16630,19 @@ def handle_post(handler, parsed) -> bool:
         return j(handler, {"credentials": registered_credentials()})
 
     if parsed.path == "/api/auth/logout":
-        from api.auth import clear_auth_cookie, invalidate_session, parse_cookie
-        from api.helpers import build_profile_cookie  # noqa: F401  (imported for clarity)
+        from api.auth import clear_auth_cookie, ensure_trusted_auth_session, get_trusted_auth_logout_url, invalidate_session, parse_cookie
+        from api.helpers import clear_profile_cookie
 
-        cookie_val = parse_cookie(handler)
+        session_info = ensure_trusted_auth_session(handler)
+        cookie_val = getattr(handler, '_trusted_auth_session_cookie_value', None) or parse_cookie(handler)
         if cookie_val:
             invalidate_session(cookie_val)
-        body = json.dumps({"ok": True}).encode()
+        payload = {"ok": True}
+        if session_info and session_info.get("auth_type") == "trusted":
+            logout_url = get_trusted_auth_logout_url()
+            if logout_url:
+                payload["trusted_logout_url"] = logout_url
+        body = json.dumps(payload).encode()
         handler.send_response(200)
         handler.send_header("Content-Type", "application/json")
         handler.send_header("Content-Length", str(len(body)))
@@ -16519,13 +16651,7 @@ def handle_post(handler, parsed) -> bool:
         clear_auth_cookie(handler)
         # Clear the hermes_profile cookie too — it's bound to the logged-in
         # session conceptually, even though the cookie itself stays valid.
-        import http.cookies as _hc
-        _pc = _hc.SimpleCookie()
-        _pc['hermes_profile'] = ''
-        _pc['hermes_profile']['path'] = '/'
-        _pc['hermes_profile']['max-age'] = '0'
-        _pc['hermes_profile']['httponly'] = True
-        handler.send_header("Set-Cookie", _pc['hermes_profile'].OutputString())
+        clear_profile_cookie(handler)
         handler.end_headers()
         handler.wfile.write(body)
         return True
@@ -20917,6 +21043,7 @@ def _prepare_chat_start_session_for_stream(
     s.model = model
     s.model_provider = model_provider
     s.active_stream_id = stream_id
+    s.post_compression_context_tokens_estimate = None
     s.pending_user_message = msg
     s.pending_attachments = attachments
     s.pending_started_at = started_at if started_at is not None else time.time()
@@ -22086,6 +22213,20 @@ def _handle_chat_start(handler, body, diag=None):
             profile_config=_pp_cfg,
             explicit_model_pick=explicit_model_pick,
         )
+        # #5979: record a SIGNATURE of the deliberately-picked model+provider so
+        # the streaming resolver can preserve a custom-proxy vendor namespace on a
+        # cold catalog — but ONLY while the routing context still matches. On a
+        # fresh explicit pick, stamp the signature of the resolved model+provider;
+        # otherwise leave any prior signature in place (it self-invalidates when
+        # the model/provider changes, since the streaming side recomputes and
+        # compares). This survives same-model follow-up sends (the onchange marker
+        # is one-shot) yet can't outlive a real switch.
+        try:
+            if explicit_model_pick:
+                from api.models import model_explicit_pick_signature as _mk_sig
+                s.model_explicit_pick_signature = _mk_sig(model, model_provider)
+        except Exception:
+            pass
         catalog_profile_provider = _pp_provider
         if catalog_profile_provider is None and isinstance(_pp_cfg, dict):
             profile_model_config = _pp_cfg.get("model") or {}
@@ -23736,7 +23877,7 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
     # Collect keys from both _pending and _gateway_queues
     keys_from_pending = pending.get("pattern_keys") or [pending.get("pattern_key", "")] if pending else []
     all_keys = [k for k in keys_from_pending if k] + [k for k in gateway_keys if k]
-    if choice in ("once", "session"):
+    if choice == "session":
         for k in all_keys:
             approve_session(sid, k)
     elif choice == "always":
@@ -23744,6 +23885,11 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
             approve_session(sid, k)
             approve_permanent(k)
         save_permanent_allowlist(_permanent_approved)
+    # choice == "once": no persistence — approval lasts this single call only.
+    # resolve_gateway_approval() below unblocks the parked agent thread for
+    # every choice, so "once" still lets the current tool run; we just must not
+    # call approve_session() here, or the next matching guarded call would find
+    # the pattern already session-approved and skip its approval card (#6017).
     # Unblock the agent thread waiting in the gateway approval queue.
     # This is the primary signal when streaming is active — the agent
     # thread is parked in entry.event.wait() and needs to be woken up.
