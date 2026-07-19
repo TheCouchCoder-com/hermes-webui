@@ -2659,7 +2659,7 @@ function _kanbanLooksLikeStaleClientError(err){
 function _kanbanUnavailableHtml(err){
   const raw = String((err && err.message) || err || '');
   if (_kanbanLooksLikeStaleClientError(err)) {
-    return `<div class="main-view-empty"><div class="main-view-empty-title">Kanban needs a hard refresh</div><div class="main-view-empty-subtitle">The server rejected an obsolete Kanban endpoint. This usually means the browser or Mac app is still running a stale cached WebUI bundle after an update.</div><button class="btn primary" type="button" onclick="hardRefreshWebUIClient()">Hard refresh now</button><div class="main-view-empty-subtitle">Original error: ${esc(raw || 'not found')}</div></div>`;
+    return `<div class="main-view-empty"><div class="main-view-empty-title">Kanban needs a hard refresh</div><div class="main-view-empty-subtitle">The server rejected an obsolete Kanban endpoint. This usually means the browser or Mac app is still running a stale cached WebUI bundle after an update.</div><button class="btn primary" type="button" onclick="hardRefreshWebUIClient()">${esc(t('update_hard_refresh_now')||'Hard refresh now')}</button><div class="main-view-empty-subtitle">Original error: ${esc(raw || 'not found')}</div></div>`;
   }
   const msg = `${esc(t('kanban_unavailable'))}: ${esc(raw)}`;
   return `<div class="main-view-empty"><div class="main-view-empty-title">${msg}</div></div>`;
@@ -6306,7 +6306,9 @@ async function promptWorkspacePath(){
     const ws=(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
     if(!ws)return;
     try{
-      const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws})});
+      // System-minted session (#6022): worktree:false is explicit so a config
+      // worktree default can't leak a worktree from a workspace prompt.
+      const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
       if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
     }catch(e){showToast(t('workspace_switch_failed')+e.message);return;}
     if(!S.session)return;
@@ -6342,7 +6344,9 @@ async function switchToWorkspace(path,name){
     const ws=path||(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
     if(!ws){showToast(t('no_workspace'));return;}
     try{
-      const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws})});
+      // System-minted session (#6022): explicit worktree:false — a workspace
+      // switch from a blank page is not deliberate New Chat intent.
+      const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
       if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
     }catch(e){if(typeof setStatus==='function')setStatus(t('switch_failed')+e.message);return;}
     if(!S.session)return;
@@ -6598,8 +6602,8 @@ async function loadProfilesPanel() {
       explainer.innerHTML = `
         <div class="profile-card-header">
           <div style="min-width:0;flex:1">
-            <div class="profile-card-name">Profiles vs workspaces</div>
-            <div class="profile-card-meta">Use profiles for how the agent works; use workspaces for what files it works on.</div>
+            <div class="profile-card-name">${esc(t('profile_concept_title'))}</div>
+            <div class="profile-card-meta">${esc(t('profile_concept_subtitle'))}</div>
           </div>
         </div>`;
       explainer.onclick = () => _renderProfileConceptHelp(data.active || 'default');
@@ -6659,14 +6663,15 @@ function _renderProfileConceptHelp(activeName){
   const body = $('profileDetailBody');
   const empty = $('profileDetailEmpty');
   if (!title || !body) return;
-  title.textContent = 'Profiles vs workspaces';
+  title.textContent = t('profile_concept_title');
   body.innerHTML = `
     <div class="main-view-content">
       <div class="detail-card">
-        <div class="detail-card-title">Use profiles for how; workspaces for what</div>
-        <div class="detail-row"><div class="detail-row-label">Profiles</div><div class="detail-row-value">Agent identity, memory, skills, model/provider config, and connected tools. Create profiles for roles like researcher, writer, marketer, or developer when those roles should carry different context or capabilities.</div></div>
-        <div class="detail-row"><div class="detail-row-label">Workspaces</div><div class="detail-row-value">Project or product folders on disk. Use one workspace per repo/product so chat, terminal, and file browsing point at the right files.</div></div>
-        <div class="detail-row"><div class="detail-row-label">Together</div><div class="detail-row-value">A profile can have a default workspace, but you can still switch workspaces for a session. Profiles answer “who is working?”; workspaces answer “where are they working?”</div></div>
+        <div class="detail-card-title">${esc(t('profile_concept_title'))}</div>
+        <div class="detail-row"><div class="detail-row-label">${esc(t('tab_profiles'))}</div><div class="detail-row-value">${esc(t('profile_concept_desc_profiles'))}</div></div>
+        <div class="detail-row"><div class="detail-row-label">${esc(t('tab_workspaces'))}</div><div class="detail-row-value">${esc(t('profile_concept_desc_workspaces'))}</div></div>
+        <div class="detail-row"><div class="detail-row-label">${esc(t('profile_concept_label_together'))}</div><div class="detail-row-value">${esc(t('profile_concept_desc_together'))}</div></div>
+        <div class="detail-row" style="border-top:1px solid var(--border);padding-top:8px;margin-top:4px"><div class="detail-row-label">${esc(t('profile_concept_label_example'))}</div><div class="detail-row-value">${esc(t('profile_concept_example'))}</div></div>
       </div>
     </div>`;
   body.style.display = '';
@@ -6925,7 +6930,7 @@ async function switchToProfile(name) {
   // already on this profile, so paths like activateCurrentProfile() (which
   // doesn't pre-check) can't flash a skeleton→restore for a click that changes
   // nothing. (#4662 Opus gate)
-  if (name && name === S.activeProfile) return;
+  if (name && name === S.activeProfile) return true;
   S._pendingSessionToolsets=null;
   // Profile switches are per-client cookie/TLS scoped, so a running stream in
   // the current session can safely continue while this tab moves to another
@@ -7008,9 +7013,12 @@ async function switchToProfile(name) {
     // the single source of truth for switch failure and is gated on _switchGen, so the
     // error surfaces ONLY when the CURRENT switch genuinely fails (@rodboev review, #4662).
     const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify({ name }), timeoutToast: false });
-    if (_switchGen !== _profileSwitchGeneration) return;
+    if (_switchGen !== _profileSwitchGeneration) return false;
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
+    if (typeof _resetCronUnreadForProfileSwitch === 'function') {
+      _resetCronUnreadForProfileSwitch();
+    }
     const targetActiveProfile = S.activeProfile || 'default';
     let sessionProfileMatchesTarget = true;
     if (!sessionInProgress && S.session) {
@@ -7024,13 +7032,6 @@ async function switchToProfile(name) {
         sessionInProgress = true;
       }
     }
-    // #4650 review: a profile switch can change agent.reasoning_effort (and other
-    // reasoning inputs like base_url) WITHOUT changing the default model/provider,
-    // which is all the reasoning-chip cache key tracks. Force exactly one reasoning
-    // refetch for the new profile so the chip reflects the new profile's effort
-    // (the syncTopbar() calls below route through syncReasoningChip()).
-    if (typeof _lastReasoningFetchKey !== 'undefined') _lastReasoningFetchKey = null;
-
     // Reconnect the gateway SSE to the NEW profile's watcher. The backend watcher
     // registry is now profile-keyed (#3629), but this tab's existing EventSource is
     // still subscribed to the PREVIOUS profile's watcher — and the probe-based
@@ -7094,6 +7095,9 @@ async function switchToProfile(name) {
     if (S.session && !sessionInProgress) {
       S.session.profile = data.active || name;
     }
+    if (typeof refreshProfileTransitionReasoningChip === 'function') {
+      refreshProfileTransitionReasoningChip(data.default_model, data.default_model_provider);
+    }
 
     // ── Apply workspace ────────────────────────────────────────────────────
     if (data.default_workspace) {
@@ -7129,15 +7133,15 @@ async function switchToProfile(name) {
       const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
       if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
       await renderSessionList();
-      if (_switchGen !== _profileSwitchGeneration) return;
+      if (_switchGen !== _profileSwitchGeneration) return false;
       if (workspaceVisible && typeof clearWorkspaceTreeSkeleton === 'function') clearWorkspaceTreeSkeleton();
       showToast(t('profile_switched', name));
     } else if (sessionInProgress) {
       // The current session has messages and belongs to the previous profile.
       // Start a new session for the new profile so nothing gets cross-tagged.
       const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
-      await newSession(false, {awaitWorkspaceLoad: workspaceVisible});
-      if (_switchGen !== _profileSwitchGeneration) return;
+      await newSession(false, {awaitWorkspaceLoad: workspaceVisible, worktree: false});
+      if (_switchGen !== _profileSwitchGeneration) return false;
       // Keep topbar chips (workspace/profile) in sync after creating the
       // new profile-scoped session.
       syncTopbar();
@@ -7151,7 +7155,7 @@ async function switchToProfile(name) {
       // the superseded switch would clear the newer switch's workspace skeleton
       // and pop a stale toast. Mirrors the no-messages branch guard below.
       // (@rodboev/greptile review, #4662)
-      if (_switchGen !== _profileSwitchGeneration) return;
+      if (_switchGen !== _profileSwitchGeneration) return false;
       if (typeof _openProfileSwitchSessionBrowser === 'function') _openProfileSwitchSessionBrowser();
       // Safety net: if the new session has no workspace, newSession() won't have
       // painted the file tree — clear the up-front skeleton so it can't strand
@@ -7192,6 +7196,7 @@ async function switchToProfile(name) {
 
     await _profileSwitchPanelLoad();
     _refreshProfileSwitchBackground(_switchGen);
+    return true;
 
   } catch (e) {
     // Revert the optimistic name update on error
@@ -7218,6 +7223,7 @@ async function switchToProfile(name) {
         clearWorkspaceTreeSkeleton();
       }
     }
+    return false;
   } finally {
     // Always remove loading indicator regardless of success or failure
     if (_switchGen === _profileSwitchGeneration && _chip) { _chip.classList.remove('switching'); _chip.disabled = false; }
@@ -11924,14 +11930,18 @@ async function checkUpdatesNow(channelOverride){
       const agentPart=formatUpdatePart('Agent',data.agent);
       if(webuiPart) parts.push(webuiPart);
       if(agentPart) parts.push(agentPart);
+      const manualInstruction=(typeof _formatManualUpdateInstruction==='function')
+        ? _formatManualUpdateInstruction(data.webui)
+        : null;
       // Track non-git targets separately so a mixed deployment (one git
       // checkout + one no-git install) never hides the "can't check" state
       // behind an up-to-date summary (#4356).
       const noGitParts=[];
-      if(data.webui&&data.webui.no_git) noGitParts.push('WebUI');
+      if(data.webui&&data.webui.no_git&&!data.webui.manual_update) noGitParts.push('WebUI');
       if(data.agent&&data.agent.no_git&&!data.agent.ignored) noGitParts.push('Agent');
       if(parts.length){
         let txt=t('settings_updates_available').replace('{count}',parts.join(', '));
+        if(manualInstruction) txt+=' · '+manualInstruction;
         if(noGitParts.length) txt+=' · '+t('settings_update_no_git');
         if(status){status.textContent=txt;status.style.color='var(--accent)';}
         // Also trigger the update banner
@@ -12558,13 +12568,13 @@ async function saveSettings(andClose){
 
 async function signOut(){
   try{
-    await api('/api/auth/logout',{method:'POST',body:'{}'});
+    const response=await api('/api/auth/logout',{method:'POST',body:'{}'});
     // Drop the last-opened session ID so the next login boots into a fresh
     // empty chat instead of restoring this user's session — and prevents the
     // ID leaking into a different profile that logs in on the same browser
     // (issue #8).
     try{ localStorage.removeItem('hermes-webui-session'); }catch(_){ }
-    window.location.href='login';
+    window.location.href=response.trusted_logout_url||'login';
   }catch(e){
     showToast(t('sign_out_failed')+e.message);
   }
@@ -12635,7 +12645,21 @@ async function disableAuth(){
 let _cronPollSince=Date.now()/1000;  // track from page load
 let _cronPollTimer=null;
 let _cronUnreadCount=0;
+let _cronPollGeneration=0;
 const _cronNewJobIds=new Set();  // track which job IDs had new completions (unread)
+
+function _resetCronUnreadForProfileSwitch(){
+  _cronPollGeneration++;
+  _cronNewJobIds.clear();
+  _cronPollSince=Date.now()/1000;
+  // Clear persisted cron sidebar markers from the profile we left. Non-cron
+  // completion unread stays intact (#5960 gate: sticky all-profile leak).
+  if(typeof _clearCronSessionCompletionUnreadForInactiveProfiles==='function'){
+    const activeProfile=(typeof S!=='undefined'&&S&&S.activeProfile)||'default';
+    _clearCronSessionCompletionUnreadForInactiveProfiles(activeProfile);
+  }
+  updateCronBadge();
+}
 
 // Auto-refresh the cron list when a job is created from chat or any external source.
 // The chat path dispatches this event when the agent response mentions cron creation.
@@ -12648,7 +12672,9 @@ function startCronPolling(){
   _cronPollTimer=setInterval(async()=>{
     if(document.hidden) return;  // don't poll when tab is in background
     try{
+      const pollGeneration=_cronPollGeneration;
       const data=await api(`/api/crons/recent?since=${_cronPollSince}`);
+      if(pollGeneration!==_cronPollGeneration) return;
       if(data.completions&&data.completions.length>0){
         for(const c of data.completions){
           if(c.toast_notifications !== false){
@@ -12657,7 +12683,11 @@ function startCronPolling(){
           _cronPollSince=Math.max(_cronPollSince,c.completed_at);
           if(c.job_id) _cronNewJobIds.add(String(c.job_id));
           if(c.session_id && typeof _markSessionCompletionUnreadIfBackground === 'function'){
-            _markSessionCompletionUnreadIfBackground(c.session_id, c.message_count);
+            const activeProfile=(typeof S!=='undefined'&&S&&S.activeProfile)||'default';
+            _markSessionCompletionUnreadIfBackground(c.session_id, c.message_count, {
+              source:'cron',
+              profile:activeProfile,
+            });
           }
         }
         // _cronUnreadCount is derived from _cronNewJobIds.size in updateCronBadge.
