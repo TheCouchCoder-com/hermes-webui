@@ -1,6 +1,6 @@
 # Hermes Web UI
 
-> **Fork notice.** This is a fork of [`nesquena/hermes-webui`](https://github.com/nesquena/hermes-webui), maintained by **TheCouchCoder & ChakerT**. Released under the MIT License (see [`LICENSE`](LICENSE)). The fork tracks upstream and adds deployment changes specific to our setup. Bug reports for this fork go to [our issue tracker](https://github.com/TheCouchCoder-com/hermes-webui/issues), not upstream.
+> **Fork notice.** This is a fork of [`nesquena/hermes-webui`](https://github.com/nesquena/hermes-webui), originally maintained by **TheCouchCoder & ChakerT**. Released under the MIT License (see [`LICENSE`](LICENSE)). **This fork is archived and no longer maintained** — it no longer tracks upstream and will not receive further updates. For an actively maintained project, use [`nesquena/hermes-webui`](https://github.com/nesquena/hermes-webui) directly.
 
 [Hermes Agent](https://hermes-agent.nousresearch.com/) is a sophisticated autonomous agent that lives on your server, accessed via a terminal or messaging apps, that remembers what it learns and gets more capable the longer it runs.
 
