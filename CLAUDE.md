@@ -2,6 +2,16 @@
 
 Guidance for Claude Code when working in this repository.
 
+## Status: archived / abandoned
+
+This fork is no longer maintained. Upstream syncing has been disabled:
+`.github/workflows/sync-upstream.yml` is now a permanent no-op (`if:
+false` guard), and the daily "sync-upstream babysitter" Routine that
+drove the babysitter workflow described below has been stopped. The
+*Syncing with upstream* section is kept for historical reference only —
+do not re-enable it without deliberately reverting both the workflow
+guard and recreating the Routine.
+
 ## Project orientation
 
 - Python web UI for Hermes (`server.py` + `api/` backend, `static/` frontend).
@@ -59,6 +69,10 @@ Use semver. When changes mix categories, take the highest-scoring change. When a
 The project is currently `v0.51.x`. Strict semver allows breaking changes in minor versions pre-1.0, but this repo's history shows real breakage staying in patch/minor without a 1.0 jump — match the observed style. If a change would be major post-1.0, still call it out explicitly in the changelog entry under a `### Breaking` heading.
 
 ## Syncing with upstream
+
+**Disabled.** This section describes automation that has been turned
+off — see *Status: archived / abandoned* above. Kept for historical
+reference in case syncing is ever resumed.
 
 We track `nesquena/hermes-webui` (the project we forked from) using `git
 merge`, walking forward one upstream tag at a time. The fork was branched

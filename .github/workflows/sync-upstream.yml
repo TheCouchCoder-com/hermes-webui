@@ -1,23 +1,28 @@
 name: Sync Upstream
 
-# Walk forward through nesquena/hermes-webui tags one stage at a time.
-# - Runs daily 06:00 UTC, plus manual dispatch. Daily cadence paired with
-#   the daily Claude conflict-resolution routine keeps the fork close to
-#   upstream; weekly was too slow given upstream's ~3-tag/week pace.
-# - Scheduled runs always pick the next un-merged upstream `v*` tag
-#   (stage-by-stage merging is the documented policy — see CLAUDE.md).
-# - Manual dispatch can opt into `mode: latest` to skip ahead to the
-#   newest upstream tag in one merge, for catching up on a backlog.
-# - If the merge applies cleanly AND tests pass, opens a ready-for-review
-#   PR. Otherwise opens a draft PR with the conflict / failure state so a
-#   human (or Claude) can resolve it.
+# DISABLED — the fork is being abandoned/archived (see CLAUDE.md).
+# The `if: false` guard below makes this workflow a permanent no-op on
+# every trigger, including manual/API `workflow_dispatch`. That belt-
+# and-suspenders guard is intentional: the daily sync was also driven by
+# an external scheduled Routine that could dispatch this workflow
+# independently of the cron trigger below, and that Routine could not be
+# disabled from this repo (it wasn't created by an agent session, so
+# agent tooling lacks permission to stop it) — so the workflow itself
+# must refuse to do anything even if invoked.
 #
-# This workflow only runs on the fork (TheCouchCoder-com/hermes-webui),
-# matching the guard pattern used in release.yml.
+# To fully retire this workflow, also stop/delete the Routine named
+# "sync-upstream babysitter (hermes-webui)" (daily 13:00 UTC) wherever
+# your account's scheduled Routines are managed.
+#
+# Historical behavior (restore by removing `false &&` below and
+# re-adding a `schedule:` trigger if syncing is ever resumed):
+# - Walked forward through nesquena/hermes-webui tags one stage at a
+#   time, or jumped to the latest un-merged tag in `mode: latest`.
+# - If the merge applied cleanly AND tests passed, opened a
+#   ready-for-review PR. Otherwise opened a draft PR with the conflict /
+#   failure state so a human (or Claude) could resolve it.
 
 on:
-  schedule:
-    - cron: '0 6 * * *'
   workflow_dispatch:
     inputs:
       target_tag:
@@ -39,7 +44,7 @@ permissions:
 
 jobs:
   sync:
-    if: github.repository == 'TheCouchCoder-com/hermes-webui'
+    if: false && github.repository == 'TheCouchCoder-com/hermes-webui'
     runs-on: ubuntu-latest
 
     steps:
